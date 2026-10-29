@@ -569,9 +569,13 @@ pub(crate) fn nocloud_user_data(srv: &str) -> String {
 }
 
 /// An iPXE script that boots `body`, else says why and goes back to the menu.
+/// Drives 0x80 / 0x81 are let go first and on failure: a drive left hooked by a failed try (an installer DVD whose
+/// "press a key" passed unanswered, an unreachable disk) makes every later try in the same iPXE fail with "Address
+/// already in use" (seen live) until the PC restarts.
 fn boot_script(body: &str, what: &str) -> String {
+    const UNHOOK: &str = "sanunhook --drive 0x80 ||\nsanunhook --drive 0x81 ||\n";
     format!(
-        "#!ipxe\n{body}\n:failed\necho Could not boot {what} from the server\nsleep 5\n\
+        "#!ipxe\n{UNHOOK}{body}\n:failed\n{UNHOOK}echo Could not boot {what} from the server\nsleep 5\n\
          chain /boot.ipxe?mac=${{net0/mac}}&ip=${{net0/ip}}\n"
     )
 }

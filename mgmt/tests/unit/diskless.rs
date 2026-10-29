@@ -265,3 +265,24 @@ fn client_env_lines() {
         "ROLE=none\nGOLDEN=\nVER=\nFIRST=\nHOST=arebootbxc\n"
     );
 }
+
+/// A failed try lets its drives go (else the next try in the same iPXE fails: "Address already in use").
+#[test]
+fn boot_scripts_let_their_drives_go() {
+    let s = boot_script("sanboot --drive 0x80 x || goto failed", "w11");
+    let lines: Vec<&str> = s.lines().collect();
+    assert_eq!(
+        lines[..4],
+        [
+            "#!ipxe",
+            "sanunhook --drive 0x80 ||",
+            "sanunhook --drive 0x81 ||",
+            "sanboot --drive 0x80 x || goto failed"
+        ]
+    );
+    let failed = s.split(":failed\n").nth(1).unwrap();
+    assert!(failed.starts_with(
+        "sanunhook --drive 0x80 ||\nsanunhook --drive 0x81 ||\necho Could not boot w11"
+    ));
+    assert!(failed.ends_with("chain /boot.ipxe?mac=${net0/mac}&ip=${net0/ip}\n"));
+}
