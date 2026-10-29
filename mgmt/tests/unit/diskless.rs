@@ -179,3 +179,89 @@ fn base_layer_plan() {
         BaseState::default()
     );
 }
+
+/// Windows boots its disk's default loader; Linux its distribution's shim first (the default \EFI\BOOT\BOOTX64.EFI
+/// would be shim's fallback: firmware boot entry + restart at every boot), each try on one line so a missing file
+/// falls through to the next, the default loader last.
+#[test]
+fn linux_goldens_boot_their_distribution_loader() {
+    let uri = "iscsi:10.77.0.1::::iqn.x:golden-u.m0011";
+    assert_eq!(
+        san_boot("windows", uri),
+        format!("sanboot --drive 0x80 {uri} || goto failed")
+    );
+    let l = san_boot("linux", uri);
+    let lines: Vec<&str> = l.lines().collect();
+    assert_eq!(lines.len(), 2, "{l}");
+    assert_eq!(
+        lines[0],
+        format!("sanhook --drive 0x80 {uri} || goto failed")
+    );
+    let tries: Vec<&str> = lines[1].split(" || ").collect();
+    assert_eq!(tries.len(), LINUX_LOADERS.len() + 2);
+    assert_eq!(
+        tries[0],
+        r"sanboot --drive 0x80 --filename \EFI\ubuntu\shimx64.efi"
+    );
+    assert!(
+        tries[..LINUX_LOADERS.len()]
+            .iter()
+            .all(|t| t.starts_with("sanboot --drive 0x80 --filename \\EFI\\"))
+    );
+    assert_eq!(tries[LINUX_LOADERS.len()], "sanboot --drive 0x80");
+    assert_eq!(tries[LINUX_LOADERS.len() + 1], "goto failed");
+}
+
+/// Ubuntu installer: golden attached, the ISO's kernel + initrd from the server, the live system fetches the ISO
+/// (casper wants a URL ending in .iso) and its seed over HTTP.
+#[test]
+fn ubuntu_installer_boot() {
+    let s = casper_script("ubu", "iscsi:10.77.0.1::::iqn.x:golden-ubu.g3", "10.77.0.1");
+    let lines: Vec<&str> = s.lines().collect();
+    assert_eq!(
+        lines[0],
+        "sanhook --drive 0x80 iscsi:10.77.0.1::::iqn.x:golden-ubu.g3 || goto failed"
+    );
+    assert!(lines[1].starts_with("kernel /boot/iso/ubu/vmlinuz initrd=initrd ip=dhcp "));
+    assert!(lines[1].contains(" url=http://10.77.0.1/boot/iso/ubu/installer.iso "));
+    assert!(
+        lines[1].contains(" cloud-config-url=/dev/null "),
+        "else cloud-init fetches url= again"
+    );
+    assert!(lines[1].contains(" ds=nocloud;s=http://10.77.0.1/boot/nocloud/ubu/ "));
+    assert!(lines[1].ends_with(" --- || goto failed"));
+    assert_eq!(
+        lines[2],
+        "initrd --name initrd /boot/iso/ubu/initrd || goto failed"
+    );
+    assert_eq!(lines[3], "boot || goto failed");
+}
+
+/// The seed: interactive, logs in to the golden before the disks are probed, installs broom-diskless.sh in the target.
+#[test]
+fn ubuntu_installer_seed() {
+    let u = nocloud_user_data("10.77.0.1");
+    assert!(u.starts_with("#cloud-config\nautoinstall:\n  version: 1\n"));
+    assert!(u.contains("  interactive-sections: [\"*\"]\n"));
+    let early = u.split("  early-commands:\n").nth(1).unwrap();
+    assert!(early.starts_with("    - modprobe iscsi_ibft\n    - iscsistart -b\n"));
+    assert!(u.contains(
+        "  late-commands:\n    - \"curtin in-target --target=/target -- sh -c 'curl -fsS http://10.77.0.1/broom-diskless.sh | sh'\"\n"
+    ));
+    assert!(u.is_ascii() && !u.contains('\t'), "YAML: spaces only");
+}
+
+/// fmt=env for the shell script: fixed keys, values cut to a safe set (nothing a shell or sed would interpret).
+#[test]
+fn client_env_lines() {
+    let v = serde_json::json!({"role": "diskless", "golden": "ubu", "ver": 3, "first": true, "host": "PC-01"});
+    assert_eq!(
+        client_env(&v),
+        "ROLE=diskless\nGOLDEN=ubu\nVER=3\nFIRST=1\nHOST=PC-01\n"
+    );
+    let v = serde_json::json!({"role": "none", "host": "a$(reboot);b`x`/\\\n\"c"});
+    assert_eq!(
+        client_env(&v),
+        "ROLE=none\nGOLDEN=\nVER=\nFIRST=\nHOST=arebootbxc\n"
+    );
+}

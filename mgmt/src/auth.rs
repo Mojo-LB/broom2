@@ -291,10 +291,17 @@ fn is_public(method: &axum::http::Method, path: &str) -> bool {
         "/broom-prep",
         "/broom-prep-win",
         "/broom-diskless.ps1",
+        "/broom-diskless.sh",
         "/api/diskless/client",
         "/api/diskless/client/base-done",
     ];
-    if OPEN.contains(&path) || path.starts_with("/tftp/") || path.starts_with("/api/auth/") {
+    // /boot/iso/, /boot/nocloud/: a golden's Ubuntu installer, answered to its maintenance machine only (diskless.rs).
+    if OPEN.contains(&path)
+        || path.starts_with("/tftp/")
+        || path.starts_with("/api/auth/")
+        || path.starts_with("/boot/iso/")
+        || path.starts_with("/boot/nocloud/")
+    {
         return true;
     }
     // Only the standalone login page (+ its script and stylesheets) is public; the app shell, its tab fragments and all /api/* need a session.

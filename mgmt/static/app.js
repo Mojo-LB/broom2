@@ -696,7 +696,10 @@ async function loadDiskless(){
       <select class="form-select form-select-sm w-auto" id="dl_place_${esc(k)}">${opt}</select>
       <button class="btn btn-sm btn-outline-primary" ${act('setPlace',k)}>Set</button>
       <span class="mono small text-body-secondary">${esc(p.path||'')}</span></div>`;}).join('');
-  const sc=document.getElementById('dl_scriptcmd');if(sc)sc.textContent='irm http://'+location.host+'/broom-diskless.ps1 | iex';
+  // The machines reach the server at its boot-LAN address, which may not be the one this page came from.
+  const srv=d.server||location.host;
+  const sc=document.getElementById('dl_scriptcmd');if(sc)sc.textContent='irm http://'+srv+'/broom-diskless.ps1 | iex';
+  const sh=document.getElementById('dl_scriptcmd_sh');if(sh)sh.textContent='curl -fsS http://'+srv+'/broom-diskless.sh | sudo sh';
   const m=document.getElementById('dl_msg');if(m)say(m,d.error?' ✗ not served: '+d.error:'');}
 // The installer ISO choice follows the OS chosen for the golden (Windows by default).
 function dlIsoOptions(keep){const sel=document.getElementById('dl_iso');if(!sel||!dlData)return;

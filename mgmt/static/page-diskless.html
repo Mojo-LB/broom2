@@ -29,7 +29,8 @@
       <span id="dl_fmsg" class="msg align-self-center"></span>
     </div>
     <div class="small text-body-secondary mt-2">A new golden is a blank disk. Choose its maintenance machine in the table, then on that machine pick <b>Install … from …</b> in the boot menu: the installer sees the golden as its disk. After the install, the menu boots the golden itself (<b>Maintain …</b>) for drivers, software and settings. Shut it down and press <b>Save</b>.<br>
-      Windows golden: before the first Save, run once on the maintenance machine (PowerShell as Administrator) <code id="dl_scriptcmd">irm http://SERVER/broom-diskless.ps1 | iex</code> — each machine then takes its own name (Devices page) on its first boot, kept as its base.</div>
+      Windows golden: before the first Save, run once on the maintenance machine (PowerShell as Administrator) <code id="dl_scriptcmd">irm http://SERVER/broom-diskless.ps1 | iex</code> — each machine then takes its own name (Devices page) on its first boot, kept as its base.<br>
+      Linux golden: an Ubuntu installer ISO is booted from the server (the machine needs ~4 GB of RAM more than the ISO) and sets the golden up by itself. Another Debian / Ubuntu install: run once before the first Save <code id="dl_scriptcmd_sh">curl -fsS http://SERVER/broom-diskless.sh | sudo sh</code>.</div>
   </div>
   <div class="card card-body mb-3">
     <h2 class="h6 text-uppercase text-body-secondary mb-3">ISO library</h2>

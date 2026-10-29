@@ -30,6 +30,7 @@ mod hash;
 mod images;
 mod iscsi;
 mod iscsid;
+mod iso9660;
 mod license;
 mod linuxfs;
 mod logbuf;

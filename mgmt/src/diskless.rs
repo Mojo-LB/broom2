@@ -15,8 +15,9 @@
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Query, State},
-    http::StatusCode,
+    extract::{Path, Query, State},
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
     routing::{get, post, put},
 };
 use serde::{Deserialize, Serialize};
@@ -47,10 +48,14 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/diskless/iso/upload-done", post(iso_done))
         .route("/api/diskless/iso/os", post(iso_os))
         .route("/api/diskless/iso/delete", post(iso_delete))
-        // Public (the machines themselves, by their IP + MAC): broom-diskless.ps1 inside the golden.
+        // Public (the machines themselves, by their IP + MAC): broom-diskless.ps1 / .sh inside the golden.
         .route("/broom-diskless.ps1", get(script))
+        .route("/broom-diskless.sh", get(script_sh))
         .route("/api/diskless/client", get(client))
         .route("/api/diskless/client/base-done", post(base_done))
+        // Public, for a golden's maintenance machine only: an Ubuntu installer it boots from the server.
+        .route("/boot/iso/{golden}/{file}", get(iso_file))
+        .route("/boot/nocloud/{golden}/{file}", get(nocloud))
 }
 
 pub const OSES: [&str; 2] = ["windows", "linux"];
@@ -404,7 +409,8 @@ pub(crate) fn menu_entries(st: &SharedState, m: &Machine) -> Vec<MenuEntry> {
             let fresh = blank(&info);
             if let Some(iso) = &g.iso {
                 out.push(MenuEntry {
-                    text: format!("Install {} from {iso} (maintenance)", g.name),
+                    // The ISO last: a long name is cut at the menu's edge.
+                    text: format!("Install {} (maintenance) from {iso}", g.name),
                     chain: format!("/boot/maint?golden={}&do=install", g.name),
                     default: fresh,
                 });
@@ -466,6 +472,100 @@ pub(crate) fn allowed_peer(
 
 fn iscsi_uri(st: &SharedState, iqn: &str) -> String {
     format!("iscsi:{}::::{iqn}", st.db.get_config("dhcp_server_ip", ""))
+}
+
+/// EFI loaders a Linux golden is booted from, the first one found: its distribution's shim. Booting such a disk from
+/// its default \EFI\BOOT\BOOTX64.EFI runs shim's fallback instead, which adds a firmware boot entry for the disk and
+/// restarts the PC — at every boot, since the disk is gone without the network boot (seen with Ubuntu 26.04).
+pub(crate) const LINUX_LOADERS: [&str; 8] = [
+    r"\EFI\ubuntu\shimx64.efi",
+    r"\EFI\debian\shimx64.efi",
+    r"\EFI\fedora\shimx64.efi",
+    r"\EFI\redhat\shimx64.efi",
+    r"\EFI\rocky\shimx64.efi",
+    r"\EFI\almalinux\shimx64.efi",
+    r"\EFI\centos\shimx64.efi",
+    r"\EFI\opensuse\shim.efi",
+];
+
+/// iPXE lines booting disk `uri` as drive 0x80 (the iBFT tells the OS where its disk is): Windows from the disk's
+/// default loader; Linux from its distribution's loader (LINUX_LOADERS, each `sanboot` fails fast when the file is not
+/// there), else the default one.
+pub(crate) fn san_boot(os: &str, uri: &str) -> String {
+    if os != "linux" {
+        return format!("sanboot --drive 0x80 {uri} || goto failed");
+    }
+    let tries: Vec<String> = LINUX_LOADERS
+        .iter()
+        .map(|f| format!("sanboot --drive 0x80 --filename {f}"))
+        .collect();
+    format!(
+        "sanhook --drive 0x80 {uri} || goto failed\n{} || sanboot --drive 0x80 || goto failed",
+        tries.join(" || ")
+    )
+}
+
+/// Ubuntu's installers (casper) boot their live system from a medium they can find: not a DVD over iSCSI, as their
+/// initramfs does not log in to iSCSI. Broom boots such an ISO's kernel + initrd itself; the live system then fetches
+/// the whole ISO over HTTP (url=, into RAM: the machine needs ~4 GB more than the ISO) and its autoinstall seed
+/// (ds=nocloud): log in to the golden (iBFT) before the disks are probed, make the installed system's initramfs log
+/// in to its disk the same way, and install broom-diskless.sh. Every installer screen still asks as usual.
+/// Extracted once per ISO into `<library>/.boot/<iso>/`. Ok(None) = not such an ISO (it boots as a DVD).
+pub(crate) fn casper_files(
+    st: &SharedState,
+    iso: &str,
+) -> Result<Option<(PathBuf, PathBuf)>, String> {
+    let lib = dir_of(st, "iso")?;
+    let src = lib.join(iso);
+    let dir = lib.join(".boot").join(iso);
+    let (k, i) = (dir.join("vmlinuz"), dir.join("initrd"));
+    if k.is_file() && i.is_file() {
+        return Ok(Some((k, i)));
+    }
+    if crate::iso9660::find(&src, "casper/vmlinuz")
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        return Ok(None);
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    for (from, to) in [("casper/vmlinuz", &k), ("casper/initrd", &i)] {
+        if !crate::iso9660::extract(&src, from, to, 1 << 30).map_err(|e| e.to_string())? {
+            return Ok(None);
+        }
+    }
+    tracing::info!(
+        "ISO library: {iso} boots as an Ubuntu installer (kernel + initrd taken from it)"
+    );
+    Ok(Some((k, i)))
+}
+
+/// iPXE body: the golden attached as drive 0x80, Ubuntu's installer booted from the ISO's own kernel + initrd.
+pub(crate) fn casper_script(name: &str, disk: &str, srv: &str) -> String {
+    let http = format!("http://{srv}");
+    format!(
+        "sanhook --drive 0x80 {disk} || goto failed\n\
+         kernel /boot/iso/{name}/vmlinuz initrd=initrd ip=dhcp url={http}/boot/iso/{name}/installer.iso \
+         cloud-config-url=/dev/null ds=nocloud;s={http}/boot/nocloud/{name}/ --- || goto failed\n\
+         initrd --name initrd /boot/iso/{name}/initrd || goto failed\n\
+         boot || goto failed"
+    )
+}
+
+/// The autoinstall seed of a golden's Ubuntu install (user-data). Interactive: only adds steps around the screens.
+pub(crate) fn nocloud_user_data(srv: &str) -> String {
+    format!(
+        "#cloud-config\n\
+         autoinstall:\n\
+         \x20 version: 1\n\
+         \x20 interactive-sections: [\"*\"]\n\
+         \x20 early-commands:\n\
+         \x20   - modprobe iscsi_ibft\n\
+         \x20   - iscsistart -b\n\
+         \x20 late-commands:\n\
+         \x20   - \"curtin in-target --target=/target -- sh -c 'curl -fsS http://{srv}/broom-diskless.sh | sh'\"\n"
+    )
 }
 
 /// An iPXE script that boots `body`, else says why and goes back to the menu.
@@ -549,8 +649,8 @@ pub(crate) fn boot_diskless(
     );
     Ok(boot_script(
         &format!(
-            "echo Booting {name} from the server (diskless)...\nsanboot --drive 0x80 {} || goto failed",
-            iscsi_uri(st, &t)
+            "echo Booting {name} from the server (diskless)...\n{}",
+            san_boot(&g.os, &iscsi_uri(st, &t))
         ),
         name,
     ))
@@ -592,6 +692,19 @@ pub(crate) fn boot_maint(
             if !path.is_file() {
                 return Err(format!("ISO {iso} is not in the library folder"));
             }
+            if g.os == "linux" && casper_files(st, &iso)?.is_some() {
+                tracing::info!(
+                    "golden {name}: {} installs from {iso} (Ubuntu installer)",
+                    who(m)
+                );
+                return Ok(boot_script(
+                    &format!(
+                        "echo Installing onto {name} from {iso}: the installer loads it from the server first\n{}",
+                        casper_script(name, &disk, &st.db.get_config("dhcp_server_ip", ""))
+                    ),
+                    &iso,
+                ));
+            }
             let t = iso_iqn(st, &iso);
             crate::iscsi::export_cd(&t, &path.to_string_lossy())?;
             tracing::info!("golden {name}: {} installs from {iso}", who(m));
@@ -610,7 +723,8 @@ pub(crate) fn boot_maint(
             tracing::info!("golden {name}: {} boots it for maintenance", who(m));
             Ok(boot_script(
                 &format!(
-                    "echo Booting {name} for maintenance (writable)...\nsanboot --drive 0x80 {disk} || goto failed"
+                    "echo Booting {name} for maintenance (writable)...\n{}",
+                    san_boot(&g.os, &disk)
                 ),
                 name,
             ))
@@ -633,6 +747,94 @@ async fn script(
         )],
         crate::assets::text("scripts/broom-diskless.ps1").replace("__SERVER__", &srv),
     )
+}
+
+/// GET /broom-diskless.sh — the same for Linux goldens (curl … | sudo sh; Broom's Ubuntu installs run it themselves).
+async fn script_sh(
+    State(st): State<SharedState>,
+) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+    let srv = st.db.get_config("dhcp_server_ip", "");
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        crate::assets::text("scripts/broom-diskless.sh").replace("__SERVER__", &srv),
+    )
+}
+
+/// The golden `name` whose maintenance machine is asking (its IP + MAC), for the installer files it boots.
+fn maint_asking(st: &SharedState, name: &str, peer: &str) -> Result<Golden, ApiError> {
+    let g = goldens(st)
+        .into_iter()
+        .find(|g| g.name == name)
+        .ok_or_else(|| not_found(name))?;
+    let m = g.maint.and_then(|id| machine_by_id(st, id).ok()).ok_or((
+        StatusCode::FORBIDDEN,
+        format!("golden {name} has no maintenance machine"),
+    ))?;
+    from_machine(&m, ip_of(st, &m).as_deref(), peer).map_err(|e| (StatusCode::FORBIDDEN, e))?;
+    Ok(g)
+}
+
+/// GET /boot/iso/{golden}/{vmlinuz|initrd|installer.iso} — the golden's installer (casper_files), for its maintenance
+/// machine only.
+async fn iso_file(
+    State(st): State<SharedState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    Path((name, file)): Path<(String, String)>,
+    req: axum::extract::Request,
+) -> Result<Response, ApiError> {
+    let peer = peer.ip().to_canonical().to_string();
+    let st2 = st.clone();
+    let path = tokio::task::spawn_blocking(move || -> Result<PathBuf, ApiError> {
+        let g = maint_asking(&st2, &name, &peer)?;
+        let iso = g.iso.ok_or_else(|| bad("no installer ISO chosen"))?;
+        let (k, i) = casper_files(&st2, &iso)
+            .map_err(ise)?
+            .ok_or_else(|| bad("not an Ubuntu installer ISO"))?;
+        match file.as_str() {
+            "vmlinuz" => Ok(k),
+            "initrd" => Ok(i),
+            "installer.iso" => Ok(dir_of(&st2, "iso").map_err(ise)?.join(&iso)),
+            _ => Err((StatusCode::NOT_FOUND, "no such file".into())),
+        }
+    })
+    .await
+    .map_err(ise)??;
+    let res = tower_http::services::ServeFile::new(path)
+        .try_call(req)
+        .await
+        .map_err(ise)?
+        .map(Body::new);
+    Ok(res)
+}
+
+/// GET /boot/nocloud/{golden}/{meta-data|user-data|vendor-data} — the autoinstall seed of the golden's Ubuntu install
+/// (nocloud_user_data), for its maintenance machine only.
+async fn nocloud(
+    State(st): State<SharedState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    Path((name, file)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let peer = peer.ip().to_canonical().to_string();
+    let st2 = st.clone();
+    let n = name.clone();
+    tokio::task::spawn_blocking(move || maint_asking(&st2, &n, &peer))
+        .await
+        .map_err(ise)??;
+    let body = match file.as_str() {
+        "meta-data" => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            format!("instance-id: broom-{name}-{now}\n")
+        }
+        "user-data" => nocloud_user_data(&st.db.get_config("dhcp_server_ip", "")),
+        "vendor-data" => String::new(),
+        _ => return Err((StatusCode::NOT_FOUND, "no such file".into())),
+    };
+    Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response())
 }
 
 /// The registered machine asking, by the connection's IP with its MAC behind it, and the golden it runs now.
@@ -661,29 +863,64 @@ fn asking(
     Ok((m, on))
 }
 
-/// GET /api/diskless/client (public) — what the asking machine is: role diskless (with its golden version, whether this
-/// boot is its first on that version, its name) / maintenance / none.
+/// GET /api/diskless/client[?fmt=env] (public) — what the asking machine is: role diskless (with its golden version,
+/// whether this boot is its first on that version, its name) / maintenance / none. fmt=env: KEY=value lines for
+/// broom-diskless.sh.
 async fn client(
     State(st): State<SharedState>,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Result<Response, ApiError> {
     let peer = peer.ip().to_canonical().to_string();
     let st2 = st.clone();
     let (m, on) = tokio::task::spawn_blocking(move || asking(&st2, &peer))
         .await
         .map_err(ise)??;
-    if let Some((g, x)) = on {
+    let v = if let Some((g, x)) = on {
         let first = x.base_ver.is_none() || x.base_ver != x.session_ver;
-        return Ok(Json(serde_json::json!({
+        serde_json::json!({
             "role": "diskless", "golden": g, "ver": x.session_ver, "first": first, "host": m.hostname,
-        })));
-    }
-    let role = if goldens(&st).iter().any(|g| g.maint == Some(m.id)) {
-        "maintenance"
+        })
     } else {
-        "none"
+        let role = if goldens(&st).iter().any(|g| g.maint == Some(m.id)) {
+            "maintenance"
+        } else {
+            "none"
+        };
+        serde_json::json!({"role": role, "host": m.hostname})
     };
-    Ok(Json(serde_json::json!({"role": role, "host": m.hostname})))
+    if q.get("fmt").map(String::as_str) == Some("env") {
+        return Ok((
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            client_env(&v),
+        )
+            .into_response());
+    }
+    Ok(Json(v).into_response())
+}
+
+/// `client`'s answer as KEY=value lines a shell reads with sed (values cut to letters, digits, '-', '.', '_').
+pub(crate) fn client_env(v: &serde_json::Value) -> String {
+    let s = |k: &str| -> String {
+        let raw = match &v[k] {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Bool(b) => (if *b { "1" } else { "0" }).into(),
+            serde_json::Value::Number(n) => n.to_string(),
+            _ => String::new(),
+        };
+        raw.chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'))
+            .take(64)
+            .collect()
+    };
+    format!(
+        "ROLE={}\nGOLDEN={}\nVER={}\nFIRST={}\nHOST={}\n",
+        s("role"),
+        s("golden"),
+        s("ver"),
+        s("first"),
+        s("host")
+    )
 }
 
 /// POST /api/diskless/client/base-done (public) — the asking machine finished its first-boot setup on its golden version
@@ -772,6 +1009,8 @@ async fn status(State(st): State<SharedState>) -> Result<Json<serde_json::Value>
         "isos": isos(&st),
         "places": places,
         "machines": machines,
+        // The address the machines reach the server at (boot LAN), for the commands shown on the page.
+        "server": st.db.get_config("dhcp_server_ip", ""),
         "error": *LAST_ERR.lock(),
     })))
 }
@@ -1230,7 +1469,9 @@ async fn iso_delete(
         Ok(())
     })?;
     if valid_iso(&b.name) {
-        let _ = std::fs::remove_file(dir_of(&st, "iso").map_err(ise)?.join(&b.name));
+        let lib = dir_of(&st, "iso").map_err(ise)?;
+        let _ = std::fs::remove_file(lib.join(&b.name));
+        let _ = std::fs::remove_dir_all(lib.join(".boot").join(&b.name)); // casper_files
     }
     tracing::info!("ISO library: {} deleted", b.name);
     Ok(ok())

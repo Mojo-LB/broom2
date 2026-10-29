@@ -186,10 +186,20 @@ PC down.
 - **Storage** (Diskless page): goldens, the machines' layers and the ISO library each go on broom's own folder or a
   server disk. Layers are sparse files of 64 KB blocks: a machine costs what it writes.
 - **ISO library:** upload installer ISOs (Windows or Linux); they are served read-only as a DVD-ROM.
+- **Linux goldens:** an Ubuntu installer ISO (casper) is not booted as a DVD (its live system cannot find it there):
+  Broom boots the ISO's own kernel and initrd, the live system loads the whole ISO over HTTP (the machine needs about
+  4 GB of RAM more than the ISO) and an autoinstall seed that only adds steps around the usual screens: log in to the
+  golden before the disks are probed, and set the installed system up for it (`broom-diskless.sh`: the initramfs logs
+  in to the disk the network boot describes, no swap on the network disk, each machine's own name / machine-id / SSH
+  host keys on its first boot). Another Debian / Ubuntu install: run `curl -fsS http://<server>/broom-diskless.sh |
+  sudo sh` on it once before Save. Linux goldens boot their distribution's shim (`\EFI\<distro>\shimx64.efi`), not
+  `\EFI\BOOT\BOOTX64.EFI`: that one is shim's fallback, which adds a firmware boot entry and restarts every time.
+- **Windows goldens:** run `irm http://<server>/broom-diskless.ps1 | iex` on the golden (as Administrator) before
+  the first Save: each machine then takes its own name (Devices page) on its first boot, kept as its base.
 
-Status: the server side, the boot path and the maintenance flow are in place and tested on a VM client; a full
-Windows 11 install and the per-machine base (name / license on first boot) are being tested next. Anti-cheat behind
-this chain is untested.
+Status: tested on a VM client with an Ubuntu 26.04 golden end to end (installed from the library, maintained, saved,
+then booted diskless: its own name kept as its base, everything else gone at the next boot). A full Windows 11
+install is being tested next. Anti-cheat behind this chain is untested.
 
 ## Groups, images, versions
 
