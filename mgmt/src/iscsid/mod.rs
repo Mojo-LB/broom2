@@ -44,6 +44,9 @@ pub struct Entry {
     /// reading the old content).
     #[serde(default)]
     pub stamp: String,
+    /// Serve the file as a read-only DVD-ROM (an installer ISO, scsi::handle_cd) instead of a disk.
+    #[serde(default)]
+    pub cd: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -143,6 +146,8 @@ pub struct Resp {
 pub struct Lun {
     pub iqn: String,
     pub size: u64,
+    /// A DVD-ROM (2048-byte blocks, MMC), not a disk.
+    pub cd: bool,
     data: Data,
     pub sessions: AtomicUsize,
     /// Bytes read by clients (benchmark page: live throughput).
@@ -160,6 +165,7 @@ impl Lun {
         Lun {
             iqn,
             size,
+            cd: false,
             data,
             sessions: AtomicUsize::new(0),
             read_bytes: AtomicU64::new(read_bytes),
@@ -174,6 +180,11 @@ impl Lun {
     }
 
     fn open(e: &Entry) -> Result<Lun, String> {
+        if e.cd {
+            let mut l = Lun::file(&e.iqn, &e.path)?;
+            l.cd = true;
+            return Ok(l);
+        }
         if !e.ram {
             return Lun::file(&e.iqn, &e.path);
         }
@@ -183,6 +194,20 @@ impl Lun {
 
     pub fn is_ram(&self) -> bool {
         matches!(self.data, Data::Ram(_))
+    }
+
+    /// Its block size.
+    pub fn block(&self) -> u64 {
+        if self.cd { scsi::CD_BLOCK } else { scsi::BLOCK }
+    }
+
+    /// Answer a CDB as this disk / DVD-ROM.
+    pub fn handle(&self, cdb: &[u8; 16], writable: bool) -> scsi::Cmd {
+        if self.cd {
+            scsi::handle_cd(cdb, self.size, &self.iqn)
+        } else {
+            scsi::handle(cdb, self.size, &self.iqn, writable)
+        }
     }
 
     /// Blocking read (disk I/O, or unpacking many RAM blocks): run it off the async threads.

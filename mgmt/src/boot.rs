@@ -74,7 +74,23 @@ pub async fn render(State(st): State<SharedState>, Query(q): Q) -> impl IntoResp
 
     // Clamp: menu_script does timeout_s * 1000 (would overflow / panic on a huge stored value).
     let timeout_s = crate::db::num(&*st.db, "boot_timeout", 3u64).min(3600);
-    let images = menu_images(st.db.images().unwrap_or_default(), m.as_ref());
+    let mut images = menu_images(st.db.images().unwrap_or_default(), m.as_ref());
+    // Diskless goldens it boots / maintains first; one of them is the default when it has one.
+    if let Some(mm) = m.clone() {
+        let st2 = st.clone();
+        let dl = tokio::task::spawn_blocking(move || crate::diskless::menu_entries(&st2, &mm))
+            .await
+            .unwrap_or_default();
+        if dl.iter().any(|e| e.default) {
+            images.iter_mut().for_each(|i| i.is_default = false);
+        }
+        let dl = dl.into_iter().map(|e| MenuImage {
+            name: e.text,
+            chain: e.chain,
+            is_default: e.default,
+        });
+        images = dl.chain(images).collect();
+    }
     script(menu_script(
         &images,
         timeout_s,
@@ -146,6 +162,7 @@ fn menu_images(images: Vec<crate::db::Image>, m: Option<&Machine>) -> Vec<MenuIm
         .into_iter()
         .map(|i| MenuImage {
             is_default: Some(i.id) == def,
+            chain: format!("/boot/start?image={}", i.name),
             name: i.name,
         })
         .collect()
@@ -266,6 +283,85 @@ pub async fn capture(State(st): State<SharedState>, Query(q): Q) -> impl IntoRes
     ))
 }
 
+/// Golden / action names from the query: [a-z0-9-] only (logged and echoed into the script).
+fn word(q: &HashMap<String, String>, k: &str) -> String {
+    q.get(k)
+        .map_or("", String::as_str)
+        .chars()
+        .filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-')
+        .take(24)
+        .collect()
+}
+
+/// The menu again after `msg` (a refused or failed diskless / maintenance boot).
+fn back_to_menu(msg: &str) -> String {
+    let msg: String = msg
+        .chars()
+        .filter(|c| c.is_ascii() && *c != '$' && *c != '\n')
+        .collect();
+    format!("#!ipxe\necho {msg}\nsleep 5\nchain /boot.ipxe?mac=${{net0/mac}}&ip=${{net0/ip}}\n")
+}
+
+/// GET /boot/diskless?golden=&mac=&ip= — a registered machine of the golden's groups boots it from the server, no disk.
+pub async fn diskless(
+    State(st): State<SharedState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    Query(q): Q,
+) -> impl IntoResponse {
+    let (mac, ip, m) = client(&st, &q);
+    let name = word(&q, "golden");
+    let Some(m) = m else {
+        warn!("client {mac} - ip {ip}: diskless {name}, but not a registered machine");
+        return script(back_to_menu(
+            "Diskless boot needs a registered machine with a fixed IP",
+        ));
+    };
+    let peer = peer.ip().to_canonical().to_string();
+    st.saw_pxe(&mac, Some(&peer));
+    let st2 = st.clone();
+    let r =
+        tokio::task::spawn_blocking(move || crate::diskless::boot_diskless(&st2, &name, &m, &peer))
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+    script(match r {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("client {mac} - ip {ip}: diskless boot refused: {e}");
+            back_to_menu(&e)
+        }
+    })
+}
+
+/// GET /boot/maint?golden=&do=install|boot&mac=&ip= — a golden's maintenance machine installs it from its ISO, or boots
+/// it writable.
+pub async fn maint(
+    State(st): State<SharedState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    Query(q): Q,
+) -> impl IntoResponse {
+    let (mac, ip, m) = client(&st, &q);
+    let (name, what) = (word(&q, "golden"), word(&q, "do"));
+    let Some(m) = m else {
+        warn!("client {mac} - ip {ip}: maintenance of {name}, but not a registered machine");
+        return script(back_to_menu("Maintenance needs a registered machine"));
+    };
+    let peer = peer.ip().to_canonical().to_string();
+    st.saw_pxe(&mac, Some(&peer));
+    let st2 = st.clone();
+    let r = tokio::task::spawn_blocking(move || {
+        crate::diskless::boot_maint(&st2, &name, &what, &m, &peer)
+    })
+    .await
+    .unwrap_or_else(|e| Err(e.to_string()));
+    script(match r {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("client {mac} - ip {ip}: maintenance boot refused: {e}");
+            back_to_menu(&e)
+        }
+    })
+}
+
 /// GB of the Linux writeback partition (broomwb) on the Broom SSD — the only place this number lives: the stage and
 /// the Linux hook get it on their cmdline (broom.wbgb).
 const WB_GB: u64 = 30;
@@ -283,7 +379,10 @@ fn linux_share_gb(golden_sizes: impl Iterator<Item = u64>) -> u64 {
 }
 
 struct MenuImage {
+    /// The text of its line.
     name: String,
+    /// The URL a choice chains to (the client's mac + ip are appended).
+    chain: String,
     is_default: bool,
 }
 
@@ -313,10 +412,10 @@ fn menu_script(
             String::new()
         };
         items.push_str(&format!("item {key}{label} [{}] {}\n", i + 1, img.name));
-        // The server logs the boot and returns the image's script (image names are URL-safe: [A-Za-z0-9_-]).
+        // The server logs the boot and returns its script (image / golden names are URL-safe: [A-Za-z0-9_-]).
         targets.push_str(&format!(
-            ":{label}\nchain /boot/start?image={}&mac=${{net0/mac}}&ip=${{net0/ip}} || goto start\n\n",
-            img.name
+            ":{label}\nchain {}&mac=${{net0/mac}}&ip=${{net0/ip}} || goto start\n\n",
+            img.chain
         ));
         if img.is_default {
             default = Some(label);

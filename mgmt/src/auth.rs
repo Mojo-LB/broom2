@@ -269,6 +269,8 @@ fn is_public(method: &axum::http::Method, path: &str) -> bool {
         "/boot.ipxe",
         "/boot/start",
         "/boot/capture",
+        "/boot/diskless",
+        "/boot/maint",
         "/broom-capture",
         "/api/cache-list",
         "/api/drivers/for",

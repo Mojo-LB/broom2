@@ -26,7 +26,7 @@ for(const ev of ['click','change','input'])document.addEventListener(ev,e=>{
 });
 
 // ---- tabs: load HTML fragments on demand (/ui/<page>) + only load data for the tab being viewed ----
-const loaders={machines:loadStatus,remote:loadRemote,server:loadServer,devices:loadDevices,groups:loadGroups,images:loadImages,games:loadGames,drivers:loadDrivers,network:loadDhcp,windows:loadCafe,system:()=>{loadCafe();loadUsers();},benchmark:loadBench,logs:loadLogs};
+const loaders={machines:loadStatus,remote:loadRemote,server:loadServer,devices:loadDevices,groups:loadGroups,images:loadImages,games:loadGames,diskless:loadDiskless,drivers:loadDrivers,network:loadDhcp,windows:loadCafe,system:()=>{loadCafe();loadUsers();},benchmark:loadBench,logs:loadLogs};
 const fragCache={};
 let curPage=null;
 async function showPage(p){
@@ -649,6 +649,90 @@ const delGames=name=>gamesCall('/api/games/delete',{name},'Delete iSCSI disk '+n
 function editGames(name){const d=gmDisks.find(x=>x.disk.name===name).disk;
   for(const [k,val] of [['gm_name',d.name],['gm_letter',d.letter],['gm_size',d.size_gb],['gm_groups',d.groups.join(', ')]])document.getElementById(k).value=val;}
 
+// ---- diskless goldens (Diskless page) ----
+let dlData=null;
+const mac12=m=>(m||'').toLowerCase().replace(/[^0-9a-f]/g,'');
+async function loadDiskless(){
+  const [d,vl]=await Promise.all([j('/api/diskless'),j('/api/volumes').catch(()=>({volumes:[]}))]);
+  dlData=d;const tb=document.querySelector('#dl_goldens tbody');if(!tb)return;
+  const opts=sel=>'<option value="">— none —</option>'+d.machines.map(m=>
+    `<option value="${esc(m.id)}"${m.id===sel?' selected':''}>${esc(m.name)}${m.group?' ('+esc(m.group)+')':''}</option>`).join('');
+  tb.innerHTML=d.goldens.map(x=>{const g=x.golden,s=x.status?x.status.disk:null;
+    return `<tr><td><b>${esc(g.name)}</b></td><td>${osPill(g.os)}</td><td class="mono">${esc(g.size_gb)} GB</td>
+      <td class="mono">${esc(g.iso||'—')}</td>
+      <td>${g.groups.length?esc(g.groups.join(', ')):'<span class="text-body-secondary">none</span>'}</td>
+      <td class="mono">${s?'g'+esc(s.ver)+(s.layers?' +'+esc(s.layers)+(s.merging?' merging…':' to merge'):''):'<span class="text-danger">not served</span>'}</td>
+      <td class="mono">${x.status?x.status.machines.filter(m=>m.connected).length:''}</td>
+      <td><select class="form-select form-select-sm d-inline-block w-auto" data-owner data-change="setMaint" data-args="${esc(JSON.stringify([g.name]))}">${opts(g.maint)}</select>${s&&s.update_connected?' <span class="text-success">'+ic('dot','')+' writable</span>':''}</td>
+      <td class="mono">${s&&s.update_bytes?gbs(s.update_bytes)+` <button class="btn btn-sm btn-outline-primary" data-owner ${act('saveMaint',g.name)}>Save</button> <button class="btn btn-sm btn-outline-secondary" data-owner ${act('discardMaint',g.name)}>Discard</button>`:'—'}</td>
+      <td data-owner><button class="btn btn-sm btn-outline-secondary" ${act('editGolden',g.name)}>Edit</button> <button class="btn btn-sm btn-outline-danger" ${act('delGolden',g.name)}>Delete</button></td></tr>`;}).join('')
+    ||'<tr><td colspan="10" class="mono">no golden yet — create one below</td></tr>';
+  // Their machines: each with its own layers (from the daemon) and target.
+  const mb=document.querySelector('#dl_machines tbody');
+  const rows=d.goldens.flatMap(x=>x.machines.map(m=>{const st=x.status?x.status.machines.find(y=>y.mac===mac12(m.mac)):null;
+    return `<tr><td>${esc(x.golden.name)}</td><td>${esc(m.name)}</td><td class="mono">${esc(m.mac)}</td><td class="mono">${esc(m.ip)}</td>
+      <td class="mono">${st&&st.session_ver!=null?gbs(st.session_bytes)+' on g'+esc(st.session_ver):'—'}</td>
+      <td class="mono">${st&&st.base_ver!=null?gbs(st.base_bytes)+' (g'+esc(st.base_ver)+')':'—'}</td>
+      <td>${st&&st.connected?'<span class="text-success">'+ic('dot','')+' on</span>':'—'}</td>
+      <td class="mono small">${esc(m.target)}</td></tr>`;})).join('');
+  mb.innerHTML=rows||'<tr><td colspan="8" class="mono">no machine yet: put registered machines with a fixed IP in a golden\'s group</td></tr>';
+  const noip=d.goldens.filter(x=>x.machines_without_fixed_ip.length).map(x=>x.golden.name+': '+x.machines_without_fixed_ip.join(', ')+' (no fixed IP — not served)');
+  document.getElementById('dl_noip').textContent=noip.join(' · ');
+  const groups=[...new Set([...d.machines.map(m=>m.group).filter(Boolean),...d.goldens.flatMap(x=>x.golden.groups)])];
+  document.getElementById('dl_grouplist').innerHTML=groups.map(x=>`<option value="${esc(x)}">`).join('');
+  dlIsoOptions();
+  // ISO library.
+  const ib=document.querySelector('#dl_isos tbody');
+  ib.innerHTML=d.isos.map(i=>`<tr><td class="mono">${esc(i.name)}</td>
+      <td><select class="form-select form-select-sm d-inline-block w-auto" data-owner data-change="isoOs" data-args="${esc(JSON.stringify([i.name]))}"><option value="windows"${i.os==='windows'?' selected':''}>Windows</option><option value="linux"${i.os==='linux'?' selected':''}>Linux</option></select></td>
+      <td class="mono">${gbs(i.size)}</td><td class="mono">${i.added?new Date(i.added*1000).toLocaleString():''}</td>
+      <td data-owner><button class="btn btn-sm btn-outline-danger" ${act('delIso',i.name)}>Delete</button></td></tr>`).join('')
+    ||'<tr><td colspan="5" class="mono">no ISO yet — upload an installer below</td></tr>';
+  // Places: broom's own folder or a server disk each.
+  const labels={golden:'Goldens',writeback:'Machines\' layers (writeback)',iso:'ISO library'};
+  document.getElementById('dl_places').innerHTML=Object.keys(labels).map(k=>{const p=d.places[k]||{};
+    const opt='<option value="">broom\'s own folder</option>'+(vl.volumes||[]).map(v=>`<option value="${esc(v.id)}"${v.id===p.volume?' selected':''}>${esc(v.id)} — ${esc(v.path)}</option>`).join('');
+    return `<div class="d-flex flex-wrap gap-2 align-items-center"><span style="min-width:220px">${esc(labels[k])}</span>
+      <select class="form-select form-select-sm w-auto" id="dl_place_${esc(k)}">${opt}</select>
+      <button class="btn btn-sm btn-outline-primary" ${act('setPlace',k)}>Set</button>
+      <span class="mono small text-body-secondary">${esc(p.path||'')}</span></div>`;}).join('');
+  const m=document.getElementById('dl_msg');if(m)say(m,d.error?' ✗ not served: '+d.error:'');}
+// The installer ISO choice follows the OS chosen for the golden (Windows by default).
+function dlIsoOptions(keep){const sel=document.getElementById('dl_iso');if(!sel||!dlData)return;
+  const os=document.getElementById('dl_os').value,cur=keep??sel.value;
+  sel.innerHTML='<option value="">— none —</option>'+dlData.isos.filter(i=>i.os===os).map(i=>
+    `<option value="${esc(i.name)}"${i.name===cur?' selected':''}>${esc(i.name)}</option>`).join('');}
+function dlOsChanged(){const os=document.getElementById('dl_os').value,sz=document.getElementById('dl_size');
+  if(sz&&(sz.value==='256'||sz.value==='64'))sz.value=os==='linux'?'64':'256';dlIsoOptions('');}
+const dlCall=(url,body,q,msg)=>(q?sure(q):Promise.resolve(true)).then(ok=>ok&&post(url,body,msg||'dl_msg',r=>r.status||'saved',loadDiskless));
+const saveGolden=()=>dlCall('/api/diskless/golden',{name:v('dl_name'),os:v('dl_os'),size_gb:+v('dl_size'),iso:v('dl_iso')||null,groups:[v('dl_groups')]},null,'dl_fmsg');
+const setMaint=(name,el)=>dlCall('/api/diskless/maint',{name,id:el.value?+el.value:null});
+const saveMaint=name=>dlCall('/api/diskless/save',{name},'Save the maintenance work on '+name+' as its next version? Its maintenance machine must be shut down. Every machine gets it at its next boot (and sets itself up again).');
+const discardMaint=name=>dlCall('/api/diskless/discard',{name},'Throw the maintenance work on '+name+' away?');
+const delGolden=name=>dlCall('/api/diskless/golden/delete',{name},'Delete golden '+name+', all its versions and every machine\'s layers of it?');
+const isoOs=(name,el)=>dlCall('/api/diskless/iso/os',{name,os:el.value});
+const delIso=name=>dlCall('/api/diskless/iso/delete',{name},'Delete '+name+' from the ISO library?');
+const setPlace=k=>dlCall('/api/diskless/volume',{kind:k,id:document.getElementById('dl_place_'+k).value},null,'dl_pmsg');
+function editGolden(name){const g=dlData.goldens.find(x=>x.golden.name===name).golden;
+  for(const [k,val] of [['dl_name',g.name],['dl_os',g.os],['dl_size',g.size_gb],['dl_groups',g.groups.join(', ')]])document.getElementById(k).value=val;
+  dlIsoOptions(g.iso||'');}
+// ISO upload: same chunked protocol as goldens / drivers, with the OS chosen (Windows by default).
+async function uploadIso(){const f=document.getElementById('dl_isofile').files[0],msg=document.getElementById('dl_isomsg');
+  if(!f){toast('Choose an installer .iso',true);return;}
+  const name=f.name.replace(/[^A-Za-z0-9._-]/g,'-'),os=v('dl_isoos'),prog=document.getElementById('dl_isoprog');
+  try{await j('/api/diskless/iso/upload-start',mk({name,os}));
+    const q=[];for(let o=0;o===0||o<f.size;o+=CHUNK)q.push(o);
+    const t0=Date.now();let done=0;const bar=prog.firstElementChild;prog.style.display='';bar.style.width='0%';
+    const file=new File([f],name);
+    const lane=async()=>{while(q.length){const o=q.shift();
+      try{await putChunk('/api/diskless/iso',name,file,o);}catch(e){q.length=0;throw e;}
+      done+=Math.min(CHUNK,f.size-o);bar.style.width=done/f.size*100+'%';
+      msg.textContent=' upload '+Math.round(done/f.size*100)+'% · '+(done/1e6/Math.max(1,(Date.now()-t0)/1000)).toFixed(0)+' MB/s';}};
+    await Promise.all(Array.from({length:LANES},lane));
+    await j('/api/diskless/iso/upload-done',mk({name,os}));say(msg,' ✓ '+name+' added');}
+  catch(e){say(msg,' ✗ '+e.message);}
+  loadDiskless();}
+
 // ---- groups (Groups page) ----
 let grData=null,grCur=null;
 const grIn=(x,n)=>x.groups.some(y=>y.toLowerCase()===n.toLowerCase());
@@ -1169,6 +1253,7 @@ const ACTIONS={
   loadImages,addImage,setDefault,toggleCache,toggleSsd,togglePreload,editImgGroups,republish,showVersions,exportImage,editBoot,delImage,
   snapshotImage,rollbackImage,versionToImage,deleteVersion,
   loadGames,saveGames,setGamesUpdate,toggleGamesRam,saveGamesUpdate,discardGamesUpdate,editGames,delGames,
+  loadDiskless,dlOsChanged,saveGolden,setMaint,saveMaint,discardMaint,delGolden,editGolden,isoOs,delIso,setPlace,uploadIso,
   loadDrivers,uploadDriver,saveDrvTargets,delDriver,
   loadGroups,editGroup,closeGroup,saveGroup,createGroup,renameGroup,deleteGroup,
   loadServer,loadBench,loadBenchHist,logsReload,logsFollow,logsSearch,benchServer,benchRequest:()=>benchAsk(false),benchCancel:()=>benchAsk(true),bSelAll,

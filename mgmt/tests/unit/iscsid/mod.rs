@@ -40,6 +40,7 @@ async fn serves_pipelined_reads() {
         ram: false,
         reserve: 0,
         stamp: String::new(),
+        cd: false,
     })
     .unwrap();
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -358,6 +359,7 @@ fn requests_roundtrip() {
         ram: true,
         reserve: 2 << 30,
         stamp: String::new(),
+        cd: false,
     };
     let s = serde_json::to_string(&Req::Export(e.clone())).unwrap();
     assert!(s.contains("\"op\":\"export\""));
@@ -425,6 +427,7 @@ async fn fuzz_sessions() {
         ram: false,
         reserve: 0,
         stamp: String::new(),
+        cd: false,
     })
     .unwrap();
     let keys = format!(

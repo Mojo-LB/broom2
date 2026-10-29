@@ -58,6 +58,20 @@ pub fn export(iqn: &str, path: &str, ram: bool, reserve: u64) -> Result<(), Stri
         ram,
         reserve,
         stamp: String::new(),
+        cd: false,
+    }))
+    .map(|_| ())
+}
+
+/// Serve the ISO at `path` as a read-only DVD-ROM target `iqn` (an installer, diskless.rs). Instant (file-backed).
+pub fn export_cd(iqn: &str, path: &str) -> Result<(), String> {
+    call_up(&Req::Export(Entry {
+        iqn: iqn.into(),
+        path: path.into(),
+        ram: false,
+        reserve: 0,
+        stamp: String::new(),
+        cd: true,
     }))
     .map(|_| ())
 }
@@ -102,6 +116,22 @@ pub fn diskless_set(goldens: Vec<crate::iscsid::golden::Config>) -> Result<(), S
 /// Every golden served, with its machines. None = no daemon (or one of a build without goldens).
 pub fn diskless_status() -> Option<Vec<crate::iscsid::golden::Info>> {
     call(&Req::DisklessStatus).ok().map(|r| r.goldens)
+}
+
+/// Machine `mac` is about to boot golden `name`: its session layer is reset (or, `promote`, kept as its base).
+pub fn diskless_prepare(
+    name: &str,
+    mac: &str,
+    promote: bool,
+    drop_base: bool,
+) -> Result<crate::iscsid::golden::Prepared, String> {
+    call(&Req::DisklessPrepare {
+        name: name.into(),
+        mac: mac.into(),
+        promote,
+        drop_base,
+    })
+    .and_then(|r| r.prepared.ok_or_else(|| "daemon of an older build".into()))
 }
 
 /// Delete machine `mac`'s layers of golden `name`.

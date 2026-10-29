@@ -19,6 +19,7 @@ fn linux_share() {
 fn img(name: &str, def: bool) -> MenuImage {
     MenuImage {
         name: name.into(),
+        chain: format!("/boot/start?image={name}"),
         is_default: def,
     }
 }

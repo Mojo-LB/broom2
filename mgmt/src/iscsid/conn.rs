@@ -641,7 +641,7 @@ fn is_write(bhs: &[u8; 48], disk: &Disk) -> bool {
         && bhs[1] & 0x20 != 0
         && edtl > 0
         && bhs[8..16] == [0u8; 8]
-        && matches!(scsi::handle(&cdb, disk.lun.size, &disk.lun.iqn, true), scsi::Cmd::Write { blocks, .. } if blocks as u64 * scsi::BLOCK == edtl)
+        && matches!(disk.lun.handle(&cdb, true), scsi::Cmd::Write { blocks, .. } if blocks as u64 * disk.lun.block() == edtl)
 }
 
 async fn reject(tx: &mpsc::Sender<Out>, bhs: &[u8; 48], reason: u8) {
@@ -664,17 +664,17 @@ pub async fn command(bhs: &[u8; 48], disk: Disk, mrdsl: usize, data: Vec<u8>) ->
         // Only LUN 0 exists.
         match cdb[0] {
             0x12 => scsi::Cmd::Data(vec![0x7f, 0, 0x06, 0x02, 0, 0, 0, 0]), // peripheral qualifier: no LUN here
-            0xa0 => scsi::handle(&cdb, lun.size, &lun.iqn, writable),
+            0xa0 => lun.handle(&cdb, writable),
             _ => scsi::Cmd::Check(0x05, 0x25, 0x00),
         }
     } else {
-        scsi::handle(&cdb, lun.size, &lun.iqn, writable)
+        lun.handle(&cdb, writable)
     };
     let moved = data.len();
     let plain = disk.ov.is_none() && disk.layers.is_empty();
     let cmd = match (cmd, disk.ov.clone()) {
         (scsi::Cmd::Read { lba, blocks }, ov) => {
-            let (off, len) = (lba * scsi::BLOCK, blocks as usize * scsi::BLOCK as usize);
+            let (off, len) = (lba * lun.block(), blocks as usize * lun.block() as usize);
             let r = match plain.then(|| lun.read_now(off, len)).flatten() {
                 Some(buf) => Ok(Ok(buf)),
                 None => {
@@ -704,10 +704,10 @@ pub async fn command(bhs: &[u8; 48], disk: Disk, mrdsl: usize, data: Vec<u8>) ->
             }
         }
         (scsi::Cmd::Write { lba, blocks }, Some(ov))
-            if blocks as usize * scsi::BLOCK as usize == moved =>
+            if blocks as usize * lun.block() as usize == moved =>
         {
             let d = disk.clone();
-            let off = lba * scsi::BLOCK;
+            let off = lba * lun.block();
             match tokio::task::spawn_blocking(move || {
                 ov.write_at(&|o, b| d.read_at(o, b), off, &data)
             })

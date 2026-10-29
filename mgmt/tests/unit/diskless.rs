@@ -70,3 +70,34 @@ fn places_are_known() {
     assert_eq!(sub_of("iso"), Some("isos"));
     assert_eq!(sub_of("games"), None);
 }
+
+/// The open boot URLs act for a machine only when the request comes from it: its IP, its MAC behind it.
+#[test]
+fn boot_requests_only_from_the_machine_itself() {
+    let m = Machine {
+        id: 7,
+        mac: "02:00:00:00:00:07".into(),
+        ip: Some("10.77.0.21".into()),
+        hostname: Some("PC07".into()),
+        ..Default::default()
+    };
+    let arp = |x: Option<&'static str>| move || x.map(String::from);
+    let ip = m.ip.as_deref();
+    assert!(allowed_peer(&m, ip, "10.77.0.21", arp(Some("02-00-00-00-00-07"))).is_ok());
+    assert!(
+        allowed_peer(&m, ip, "10.77.0.22", arp(Some("02:00:00:00:00:07"))).is_err(),
+        "other IP"
+    );
+    assert!(
+        allowed_peer(&m, ip, "10.77.0.21", arp(Some("02:00:00:00:00:08"))).is_err(),
+        "other card"
+    );
+    assert!(
+        allowed_peer(&m, ip, "10.77.0.21", arp(None)).is_err(),
+        "no ARP entry"
+    );
+    assert!(
+        allowed_peer(&m, None, "10.77.0.21", arp(Some("02:00:00:00:00:07"))).is_err(),
+        "no IP"
+    );
+}

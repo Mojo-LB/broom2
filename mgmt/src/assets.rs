@@ -36,6 +36,7 @@ assets!(
     "static/page-remote.html",
     "static/page-server.html",
     "static/page-games.html",
+    "static/page-diskless.html",
     "static/page-windows.html",
     "static/page-logs.html",
     "ipxe/snponly.efi",

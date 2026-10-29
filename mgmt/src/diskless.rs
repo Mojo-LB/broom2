@@ -285,6 +285,247 @@ pub(crate) fn forget_machine(st: &SharedState, m: &Machine) {
     }
 }
 
+// ---------- boot (boot.rs) ----------
+
+/// A boot menu entry: its text, the URL it chains to (mac / ip appended), and whether it is the default.
+pub(crate) struct MenuEntry {
+    pub text: String,
+    pub chain: String,
+    pub default: bool,
+}
+
+/// Target name of library ISO `iso` served as a DVD-ROM: "<iqn_base>:iso-<name>" (lower-case letters / digits / '-').
+pub(crate) fn iso_iqn(st: &SharedState, iso: &str) -> String {
+    let base = st.db.get_config("iqn_base", "iqn.2026-01.local.broom");
+    let n: String = iso
+        .trim_end_matches(".iso")
+        .trim_end_matches(".ISO")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    format!("{base}:iso-{n}")
+}
+
+/// The golden's state in the daemon (None = not served).
+fn served(name: &str) -> Option<golden::Info> {
+    crate::iscsi::diskless_status()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|i| i.disk.name == name)
+}
+
+/// Nothing written to it yet: no version saved, no maintenance work — a blank disk to install onto.
+fn blank(i: &golden::Info) -> bool {
+    i.disk.ver == 0 && i.disk.layers == 0 && i.disk.update_bytes == 0
+}
+
+/// Machine `m`'s entries: Install / Maintain for each golden it maintains (Install is the default while the golden is
+/// blank, Maintain once the installer wrote to it — the installer's own restarts go on by themselves), then each golden
+/// it boots diskless (the first is the default unless it maintains one). Blocking (asks the daemon).
+pub(crate) fn menu_entries(st: &SharedState, m: &Machine) -> Vec<MenuEntry> {
+    let mut out: Vec<MenuEntry> = Vec::new();
+    let all = st.db.machines().unwrap_or_default();
+    for g in goldens(st) {
+        let Some(info) = served(&g.name) else {
+            continue;
+        };
+        if g.maint == Some(m.id) {
+            let fresh = blank(&info);
+            if let Some(iso) = &g.iso {
+                out.push(MenuEntry {
+                    text: format!("Install {} from {iso} (maintenance)", g.name),
+                    chain: format!("/boot/maint?golden={}&do=install", g.name),
+                    default: fresh,
+                });
+            }
+            out.push(MenuEntry {
+                text: format!("Maintain {} (maintenance, saved with Save)", g.name),
+                chain: format!("/boot/maint?golden={}&do=boot", g.name),
+                default: !fresh || g.iso.is_none(),
+            });
+        } else if machines_of(&g, &all).iter().any(|x| x.id == m.id) {
+            out.push(MenuEntry {
+                text: format!("{} (diskless)", g.name),
+                chain: format!("/boot/diskless?golden={}", g.name),
+                default: true,
+            });
+        }
+    }
+    // One default at most: the first one marked.
+    let mut seen = false;
+    for e in out.iter_mut().filter(|e| e.default) {
+        if seen {
+            e.default = false;
+        }
+        seen = true;
+    }
+    out
+}
+
+/// The request comes from machine `m` itself: from its IP, with its MAC behind it (ARP) — these boot URLs are open
+/// and reset its session / close its sessions, so another PC must not trigger them for it.
+fn from_machine(m: &Machine, ip: Option<&str>, peer: &str) -> Result<(), String> {
+    allowed_peer(m, ip, peer, || crate::license::arp_mac(peer))
+}
+
+pub(crate) fn allowed_peer(
+    m: &Machine,
+    ip: Option<&str>,
+    peer: &str,
+    arp: impl FnOnce() -> Option<String>,
+) -> Result<(), String> {
+    if ip != Some(peer) {
+        return Err(format!(
+            "{} must boot from its own IP ({}), not {peer}",
+            who(m),
+            ip.unwrap_or("none")
+        ));
+    }
+    let seen = arp().and_then(|a| golden::mac12(&a));
+    if seen.is_none() || seen != golden::mac12(&m.mac) {
+        return Err(format!("{peer} is not {}'s network card", who(m)));
+    }
+    Ok(())
+}
+
+fn iscsi_uri(st: &SharedState, iqn: &str) -> String {
+    format!("iscsi:{}::::{iqn}", st.db.get_config("dhcp_server_ip", ""))
+}
+
+/// An iPXE script that boots `body`, else says why and goes back to the menu.
+fn boot_script(body: &str, what: &str) -> String {
+    format!(
+        "#!ipxe\n{body}\n:failed\necho Could not boot {what} from the server\nsleep 5\n\
+         chain /boot.ipxe?mac=${{net0/mac}}&ip=${{net0/ip}}\n"
+    )
+}
+
+/// Machine `m` boots golden `name` diskless: its earlier sessions closed, its session layer reset (its base kept while
+/// the golden version stays), then iPXE boots its own target (the iBFT tells Windows / Linux where its disk is).
+/// Blocking.
+pub(crate) fn boot_diskless(
+    st: &SharedState,
+    name: &str,
+    m: &Machine,
+    peer: &str,
+) -> Result<String, String> {
+    from_machine(m, m.ip.as_deref(), peer)?;
+    let g = goldens(st)
+        .into_iter()
+        .find(|g| g.name == name)
+        .ok_or_else(|| format!("no golden {name}"))?;
+    let all = st.db.machines().map_err(|e| e.to_string())?;
+    if !machines_of(&g, &all).iter().any(|x| x.id == m.id) {
+        return Err(format!(
+            "golden {name} is not for this machine (its groups, a fixed IP)"
+        ));
+    }
+    if let Some(ip) = m.ip.as_deref() {
+        let _ = crate::iscsi::kick_peer(ip); // its previous boot's sessions (it is in its boot menu now)
+    }
+    let mut p = None;
+    for i in 0..30 {
+        match crate::iscsi::diskless_prepare(name, &m.mac, false, false) {
+            Ok(x) => {
+                p = Some(x);
+                break;
+            }
+            Err(e) if e.contains("still connected") && i < 29 => {
+                std::thread::sleep(std::time::Duration::from_millis(200))
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    let p = p.ok_or("still connected")?;
+    let t = machine_target(st, name, m).ok_or("bad MAC")?;
+    tracing::info!(
+        "golden {name}: {} boots diskless on g{}{}",
+        who(m),
+        p.ver,
+        if p.first {
+            " (first boot on this version)"
+        } else {
+            ""
+        }
+    );
+    Ok(boot_script(
+        &format!(
+            "echo Booting {name} from the server (diskless)...\nsanboot --drive 0x80 {} || goto failed",
+            iscsi_uri(st, &t)
+        ),
+        name,
+    ))
+}
+
+/// Maintenance machine `m` works on golden `name`: `install` = the golden attached (blank disk) and the golden's
+/// installer ISO booted as a DVD; `boot` = the golden itself. Both writable for it only (the daemon checks its IP + MAC);
+/// Save makes the work the golden's next version. Blocking.
+pub(crate) fn boot_maint(
+    st: &SharedState,
+    name: &str,
+    what: &str,
+    m: &Machine,
+    peer: &str,
+) -> Result<String, String> {
+    from_machine(m, ip_of(st, m).as_deref(), peer)?;
+    let g = goldens(st)
+        .into_iter()
+        .find(|g| g.name == name)
+        .ok_or_else(|| format!("no golden {name}"))?;
+    if g.maint != Some(m.id) {
+        return Err(format!(
+            "{} is not the maintenance machine of {name}",
+            who(m)
+        ));
+    }
+    let info = served(name).ok_or_else(|| format!("golden {name} is not served"))?;
+    let disk = iscsi_uri(st, &format!("{}.g{}", iqn(st, name), info.disk.ver));
+    if let Some(ip) = ip_of(st, m) {
+        let _ = crate::iscsi::kick_peer(&ip); // its previous boot's sessions: their writes are flushed
+    }
+    match what {
+        "install" => {
+            let iso = g
+                .iso
+                .clone()
+                .ok_or("no installer ISO chosen for this golden")?;
+            let path = dir_of(st, "iso")?.join(&iso);
+            if !path.is_file() {
+                return Err(format!("ISO {iso} is not in the library folder"));
+            }
+            let t = iso_iqn(st, &iso);
+            crate::iscsi::export_cd(&t, &path.to_string_lossy())?;
+            tracing::info!("golden {name}: {} installs from {iso}", who(m));
+            Ok(boot_script(
+                &format!(
+                    "echo Installing onto {name} from {iso}\n\
+                     echo If the installer asks to press a key to boot from CD/DVD, press one now.\n\
+                     sanhook --drive 0x80 {disk} || goto failed\n\
+                     sanboot --drive 0x81 {} || goto failed",
+                    iscsi_uri(st, &t)
+                ),
+                &iso,
+            ))
+        }
+        "boot" => {
+            tracing::info!("golden {name}: {} boots it for maintenance", who(m));
+            Ok(boot_script(
+                &format!(
+                    "echo Booting {name} for maintenance (writable)...\nsanboot --drive 0x80 {disk} || goto failed"
+                ),
+                name,
+            ))
+        }
+        _ => Err("do: install or boot".into()),
+    }
+}
+
 // ---------- API ----------
 
 /// GET /api/diskless — goldens (with what the daemon reports), ISO library, the three places, machines (pickers).
