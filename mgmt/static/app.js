@@ -696,6 +696,7 @@ async function loadDiskless(){
       <select class="form-select form-select-sm w-auto" id="dl_place_${esc(k)}">${opt}</select>
       <button class="btn btn-sm btn-outline-primary" ${act('setPlace',k)}>Set</button>
       <span class="mono small text-body-secondary">${esc(p.path||'')}</span></div>`;}).join('');
+  const sc=document.getElementById('dl_scriptcmd');if(sc)sc.textContent='irm http://'+location.host+'/broom-diskless.ps1 | iex';
   const m=document.getElementById('dl_msg');if(m)say(m,d.error?' ✗ not served: '+d.error:'');}
 // The installer ISO choice follows the OS chosen for the golden (Windows by default).
 function dlIsoOptions(keep){const sel=document.getElementById('dl_iso');if(!sel||!dlData)return;

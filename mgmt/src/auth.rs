@@ -290,6 +290,9 @@ fn is_public(method: &axum::http::Method, path: &str) -> bool {
         "/api/bench/booted",
         "/broom-prep",
         "/broom-prep-win",
+        "/broom-diskless.ps1",
+        "/api/diskless/client",
+        "/api/diskless/client/base-done",
     ];
     if OPEN.contains(&path) || path.starts_with("/tftp/") || path.starts_with("/api/auth/") {
         return true;

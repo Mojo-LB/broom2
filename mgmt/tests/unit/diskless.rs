@@ -134,3 +134,48 @@ fn maintenance_entry_wins_the_default() {
         "first diskless one"
     );
 }
+
+/// A machine's base: its first boot is kept once Windows reported its setup done on that same version; a new name
+/// or licence drops it; nothing reported = nothing kept (that boot's writes are wiped like any other).
+#[test]
+fn base_layer_plan() {
+    let st = |pending: Option<u64>, host: &str, lic: i64| BaseState {
+        pending,
+        host: Some(host.into()),
+        lic,
+    };
+    // First boot on g2 reported → promote at the next boot.
+    assert_eq!(
+        base_plan(&st(Some(2), "PC01", 0), Some(2), false, Some("PC01"), 0),
+        (true, false)
+    );
+    // Reported on g1 but the machine's session is on g2 (a Save in between): not kept.
+    assert_eq!(
+        base_plan(&st(Some(1), "PC01", 0), Some(2), false, Some("PC01"), 0),
+        (false, false)
+    );
+    // Nothing reported: nothing kept, base untouched.
+    assert_eq!(
+        base_plan(&st(None, "PC01", 0), Some(2), true, Some("PC01"), 0),
+        (false, false)
+    );
+    // Renamed on the Devices page, or a new licence: set up again.
+    assert_eq!(
+        base_plan(&st(None, "PC01", 0), Some(2), true, Some("PC09"), 0),
+        (false, true)
+    );
+    assert_eq!(
+        base_plan(&st(None, "PC01", 0), Some(2), true, Some("PC01"), 1),
+        (false, true)
+    );
+    // No base to drop.
+    assert_eq!(
+        base_plan(&st(None, "PC01", 0), Some(2), false, Some("PC09"), 0),
+        (false, false)
+    );
+    // An empty state (never set up) parses from "{}".
+    assert_eq!(
+        serde_json::from_str::<BaseState>("{}").unwrap(),
+        BaseState::default()
+    );
+}

@@ -47,6 +47,10 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/diskless/iso/upload-done", post(iso_done))
         .route("/api/diskless/iso/os", post(iso_os))
         .route("/api/diskless/iso/delete", post(iso_delete))
+        // Public (the machines themselves, by their IP + MAC): broom-diskless.ps1 inside the golden.
+        .route("/broom-diskless.ps1", get(script))
+        .route("/api/diskless/client", get(client))
+        .route("/api/diskless/client/base-done", post(base_done))
 }
 
 pub const OSES: [&str; 2] = ["windows", "linux"];
@@ -298,6 +302,53 @@ pub(crate) fn forget_machine(st: &SharedState, m: &Machine) {
     }
 }
 
+// ---------- each machine's base layer (its own first-boot setup) ----------
+
+/// Per machine and golden (config `diskless:<golden>:<mac>`): the first-boot setup Windows reported done, and what the
+/// base was built with — a new name or licence makes it be set up again.
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
+pub(crate) struct BaseState {
+    /// The golden version whose first boot finished its setup (broom-diskless.ps1): kept as the base at the next boot.
+    #[serde(default)]
+    pub pending: Option<u64>,
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub lic: i64,
+}
+
+fn base_key(golden: &str, mac: &str) -> String {
+    format!(
+        "diskless:{golden}:{}",
+        golden::mac12(mac).unwrap_or_default()
+    )
+}
+
+fn base_state(st: &SharedState, golden: &str, mac: &str) -> BaseState {
+    serde_json::from_str(&st.db.get_config(&base_key(golden, mac), "{}")).unwrap_or_default()
+}
+
+fn set_base_state(st: &SharedState, golden: &str, mac: &str, b: &BaseState) {
+    let _ = st
+        .db
+        .set_config(&base_key(golden, mac), &serde_json::to_string(b).unwrap());
+}
+
+/// This boot's plan for a machine's layers: (promote the last session to its base, drop its base). Promote when its
+/// first boot on the version it was on reported its setup done; drop the base when the machine's name or licence
+/// changed since the base was built (the golden version changing drops it anyway, in the daemon).
+pub(crate) fn base_plan(
+    s: &BaseState,
+    session_ver: Option<u64>,
+    has_base: bool,
+    host: Option<&str>,
+    lic: i64,
+) -> (bool, bool) {
+    let promote = s.pending.is_some() && s.pending == session_ver;
+    let drop = !promote && has_base && (s.host.as_deref() != host || s.lic != lic);
+    (promote, drop)
+}
+
 // ---------- boot (boot.rs) ----------
 
 /// A boot menu entry: its text, the URL it chains to (mac / ip appended), and whether it is the default.
@@ -448,9 +499,21 @@ pub(crate) fn boot_diskless(
     if let Some(ip) = m.ip.as_deref() {
         let _ = crate::iscsi::kick_peer(ip); // its previous boot's sessions (it is in its boot menu now)
     }
+    let mine = served(name).and_then(|i| {
+        let mac = golden::mac12(&m.mac)?;
+        i.machines.into_iter().find(|x| x.mac == mac)
+    });
+    let bs = base_state(st, name, &m.mac);
+    let (promote, drop_base) = base_plan(
+        &bs,
+        mine.as_ref().and_then(|x| x.session_ver),
+        mine.as_ref().is_some_and(|x| x.base_ver.is_some()),
+        m.hostname.as_deref(),
+        m.license_gen,
+    );
     let mut p = None;
     for i in 0..30 {
-        match crate::iscsi::diskless_prepare(name, &m.mac, false, false) {
+        match crate::iscsi::diskless_prepare(name, &m.mac, promote, drop_base) {
             Ok(x) => {
                 p = Some(x);
                 break;
@@ -462,6 +525,17 @@ pub(crate) fn boot_diskless(
         }
     }
     let p = p.ok_or("still connected")?;
+    if bs.pending.is_some() || drop_base {
+        // Promoted (or not: an older version's setup) — either way that report is used up; a dropped base starts over.
+        let keep = BaseState {
+            pending: None,
+            ..if drop_base { BaseState::default() } else { bs }
+        };
+        set_base_state(st, name, &m.mac, &keep);
+    }
+    if promote {
+        tracing::info!("golden {name}: {}'s first boot kept as its base", who(m));
+    }
     let t = machine_target(st, name, m).ok_or("bad MAC")?;
     tracing::info!(
         "golden {name}: {} boots diskless on g{}{}",
@@ -543,6 +617,105 @@ pub(crate) fn boot_maint(
         }
         _ => Err("do: install or boot".into()),
     }
+}
+
+// ---------- the machine itself (broom-diskless.ps1) ----------
+
+/// GET /broom-diskless.ps1 — the script installed on a golden (irm … | iex), with this server's address.
+async fn script(
+    State(st): State<SharedState>,
+) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+    let srv = st.db.get_config("dhcp_server_ip", "");
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        crate::assets::text("scripts/broom-diskless.ps1").replace("__SERVER__", &srv),
+    )
+}
+
+/// The registered machine asking, by the connection's IP with its MAC behind it, and the golden it runs now.
+fn asking(
+    st: &SharedState,
+    peer: &str,
+) -> Result<(Machine, Option<(String, golden::MachineInfo)>), ApiError> {
+    let m = crate::machines::machine_at(st, peer).ok_or((
+        StatusCode::NOT_FOUND,
+        "not a registered machine".to_string(),
+    ))?;
+    from_machine(&m, m.ip.as_deref(), peer).map_err(|e| (StatusCode::FORBIDDEN, e))?;
+    let mac = golden::mac12(&m.mac).unwrap_or_default();
+    let all = st.db.machines().map_err(ise)?;
+    let on = goldens(st)
+        .into_iter()
+        .filter(|g| machines_of(g, &all).iter().any(|x| x.id == m.id))
+        .find_map(|g| {
+            let i = served(&g.name)?;
+            let x = i
+                .machines
+                .into_iter()
+                .find(|x| x.mac == mac && x.connected)?;
+            Some((g.name, x))
+        });
+    Ok((m, on))
+}
+
+/// GET /api/diskless/client (public) — what the asking machine is: role diskless (with its golden version, whether this
+/// boot is its first on that version, its name) / maintenance / none.
+async fn client(
+    State(st): State<SharedState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let peer = peer.ip().to_canonical().to_string();
+    let st2 = st.clone();
+    let (m, on) = tokio::task::spawn_blocking(move || asking(&st2, &peer))
+        .await
+        .map_err(ise)??;
+    if let Some((g, x)) = on {
+        let first = x.base_ver.is_none() || x.base_ver != x.session_ver;
+        return Ok(Json(serde_json::json!({
+            "role": "diskless", "golden": g, "ver": x.session_ver, "first": first, "host": m.hostname,
+        })));
+    }
+    let role = if goldens(&st).iter().any(|g| g.maint == Some(m.id)) {
+        "maintenance"
+    } else {
+        "none"
+    };
+    Ok(Json(serde_json::json!({"role": role, "host": m.hostname})))
+}
+
+/// POST /api/diskless/client/base-done (public) — the asking machine finished its first-boot setup on its golden version
+/// (and restarts now): that session becomes its base at the next boot.
+async fn base_done(
+    State(st): State<SharedState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let peer = peer.ip().to_canonical().to_string();
+    let st2 = st.clone();
+    let (m, on) = tokio::task::spawn_blocking(move || asking(&st2, &peer))
+        .await
+        .map_err(ise)??;
+    let Some((g, x)) = on else {
+        return Err(bad("not running a diskless golden"));
+    };
+    set_base_state(
+        &st,
+        &g,
+        &m.mac,
+        &BaseState {
+            pending: x.session_ver,
+            host: m.hostname.clone(),
+            lic: m.license_gen,
+        },
+    );
+    tracing::info!(
+        "golden {g}: {} set itself up (g{}) — kept as its base at its next boot",
+        who(&m),
+        x.session_ver.unwrap_or(0)
+    );
+    Ok(ok())
 }
 
 // ---------- API ----------

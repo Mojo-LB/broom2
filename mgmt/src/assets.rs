@@ -53,6 +53,7 @@ assets!(
     "scripts/broom-games.ps1",
     "scripts/broom-watch.ps1",
     "scripts/broom-stub.ps1",
+    "scripts/broom-diskless.ps1",
     "scripts/broom-fw.cs",
     "scripts/broom-vnc.cs",
 );
