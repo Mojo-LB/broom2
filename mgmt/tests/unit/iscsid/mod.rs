@@ -470,3 +470,110 @@ async fn fuzz_sessions() {
     TARGETS.lock().remove(iqn);
     let _ = std::fs::remove_file(p);
 }
+
+/// A diskless machine over the wire: it logs in to its own target, its WRITE lands in its session layer and reads
+/// back; the golden is untouched; another IP or a machine that was not prepared is refused.
+#[tokio::test]
+async fn diskless_machine_session() {
+    let _one = golden::TEST_LOCK.lock().await;
+    let d = std::env::temp_dir().join("broom_test_diskless_tcp");
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("img")).unwrap();
+    let img = d.join("img/golden.img");
+    std::fs::write(&img, vec![0x22u8; 1 << 20]).unwrap();
+    let mac = "02:00:00:00:00:31";
+    TEST_ARP.lock().insert("127.0.0.1".into(), mac.into());
+    let cfg = golden::Config {
+        disk: games::Config {
+            name: "w11tcp".into(),
+            iqn: "iqn.test:golden-w11tcp".into(),
+            path: img.to_string_lossy().into(),
+            ..Default::default()
+        },
+        dir: d.join("wb").to_string_lossy().into(),
+        machines: vec![
+            golden::Machine {
+                mac: mac.into(),
+                ip: "127.0.0.1".into(),
+            },
+            golden::Machine {
+                mac: "02:00:00:00:00:32".into(),
+                ip: "127.0.0.2".into(),
+            },
+        ],
+    };
+    golden::set(vec![cfg]).unwrap();
+    let mine = golden::machine_iqn("iqn.test:golden-w11tcp", mac).unwrap();
+    let other = golden::machine_iqn("iqn.test:golden-w11tcp", "02:00:00:00:00:32").unwrap();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = l.accept().await {
+            tokio::spawn(conn::serve(s, "127.0.0.1".into()));
+        }
+    });
+
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    assert_eq!(
+        login(&mut s, &mine).await.bhs[36],
+        0x03,
+        "not prepared for a boot: refused"
+    );
+    golden::prepare("w11tcp", mac, false, false).unwrap();
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    assert_eq!(login(&mut s, &mine).await.bhs[36], 0, "its own disk");
+    let data: Vec<u8> = (0..64 << 10).map(|i: u32| (i % 251) as u8).collect();
+    s.write_all(&scsi_cmd(40, 1, 0xa0, 0x2a, 16, 128))
+        .await
+        .unwrap();
+    let r = conn::read_pdu(&mut s).await.unwrap();
+    assert_eq!(r.bhs[0], 0x31, "R2T");
+    for (i, chunk) in data.chunks(32768).enumerate() {
+        let mut p = pdu(0x05, if i == 1 { 0x80 } else { 0 }, 40, 0, chunk);
+        p[8..16].fill(0);
+        p[20..24].copy_from_slice(&r.bhs[20..24]);
+        p[36..40].copy_from_slice(&(i as u32).to_be_bytes());
+        p[40..44].copy_from_slice(&(i as u32 * 32768).to_be_bytes());
+        s.write_all(&p).await.unwrap();
+    }
+    let r = conn::read_pdu(&mut s).await.unwrap();
+    assert_eq!((r.bhs[0], r.bhs[3]), (0x21, 0), "GOOD");
+    assert!(
+        read_blocks(&mut s, 41, 2, 16, 128).await == data,
+        "reads its own write"
+    );
+    assert!(
+        read_blocks(&mut s, 42, 3, 0, 8)
+            .await
+            .iter()
+            .all(|&b| b == 0x22),
+        "rest from the golden"
+    );
+    assert!(
+        std::fs::read(&img).unwrap().iter().all(|&b| b == 0x22),
+        "golden file untouched"
+    );
+    // The other machine's disk, from this IP: refused.
+    golden::prepare("w11tcp", "02:00:00:00:00:32", false, false).unwrap();
+    let mut x = tokio::net::TcpStream::connect(addr).await.unwrap();
+    assert_eq!(
+        login(&mut x, &other).await.bhs[36],
+        0x03,
+        "not that machine"
+    );
+    drop(s);
+    for _ in 0..100 {
+        if golden::prepare("w11tcp", mac, false, false).is_ok() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let i = golden::info();
+    assert_eq!(
+        i[0].machines[0].session_bytes, 0,
+        "next boot: session dropped"
+    );
+    golden::set(Vec::new()).unwrap();
+    TEST_ARP.lock().remove("127.0.0.1");
+    let _ = std::fs::remove_dir_all(&d);
+}

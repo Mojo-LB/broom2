@@ -7,6 +7,7 @@
 // and restored when the daemon itself starts again (crash → systemd restarts it; server reboot).
 mod conn;
 pub mod games;
+pub mod golden;
 mod overlay;
 pub(crate) mod ramimg; // also the Windows goldens' RAM copies (goldenram.rs)
 mod scsi;
@@ -70,6 +71,32 @@ pub enum Req {
     KickPeer {
         ip: String,
     },
+    /// Serve exactly these diskless goldens (and their machines).
+    DisklessSet {
+        goldens: Vec<golden::Config>,
+    },
+    /// Machine `mac` is about to boot golden `name` (golden::prepare). Answers `prepared`.
+    DisklessPrepare {
+        name: String,
+        mac: String,
+        #[serde(default)]
+        promote: bool,
+        #[serde(default)]
+        drop_base: bool,
+    },
+    /// Delete machine `mac`'s layers of golden `name`.
+    DisklessForget {
+        name: String,
+        mac: String,
+    },
+    /// The golden's maintenance work becomes its next version / is thrown away.
+    GoldenSave {
+        name: String,
+    },
+    GoldenDiscard {
+        name: String,
+    },
+    DisklessStatus,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -107,6 +134,10 @@ pub struct Resp {
     /// With List.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub peers: Vec<PeerInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub goldens: Vec<golden::Info>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared: Option<golden::Prepared>,
 }
 
 pub struct Lun {
@@ -197,7 +228,44 @@ static STATE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new
 fn lookup(iqn: &str) -> Option<Arc<Lun>> {
     let l = TARGETS.lock().get(iqn).map(|(_, l)| l.clone());
     l.or_else(|| games::lun(iqn))
+        .or_else(|| golden::GOLDENS.lun(iqn))
+        .or_else(|| golden::lun(iqn))
 }
+
+/// A session logging in to a layered disk (games disk, golden, diskless machine): what it reads and may write. None =
+/// a plain target. Every Some(Ok) is paired with a `detach`.
+fn attach(iqn: &str, peer: &str) -> Option<Result<games::View, String>> {
+    if games::GAMES.owns(iqn) {
+        Some(games::GAMES.attach(iqn, peer))
+    } else if golden::GOLDENS.owns(iqn) {
+        Some(golden::GOLDENS.attach(iqn, peer))
+    } else if golden::owns(iqn) {
+        Some(golden::attach(iqn, peer))
+    } else {
+        None
+    }
+}
+
+fn detach(v: &games::View) {
+    if v.machine.is_some() {
+        golden::detach(v)
+    } else {
+        v.reg.detach(v)
+    }
+}
+
+/// A client's MAC as the kernel sees it (ARP): who may write. Tests put their own in TEST_ARP.
+pub(crate) fn arp_mac(ip: &str) -> Option<String> {
+    #[cfg(test)]
+    if let Some(m) = TEST_ARP.lock().get(ip) {
+        return Some(m.clone());
+    }
+    crate::license::arp_mac(ip)
+}
+
+#[cfg(test)]
+pub(crate) static TEST_ARP: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(Default::default);
 
 fn iqns() -> Vec<String> {
     let mut v: Vec<String> = TARGETS.lock().keys().cloned().collect();
@@ -302,6 +370,38 @@ async fn handle(req: Req) -> Resp {
         Req::GamesDiscard { name } => r.err = games::discard(&name).err(),
         Req::GamesStatus => r.games = games::info(),
         Req::KickPeer { ip } => r.msg = conn::kick_peer(&ip).to_string(),
+        Req::DisklessSet { goldens } => {
+            r.err = tokio::task::spawn_blocking(move || golden::set(goldens))
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()))
+                .err()
+        }
+        Req::DisklessPrepare {
+            name,
+            mac,
+            promote,
+            drop_base,
+        } => match tokio::task::spawn_blocking(move || {
+            golden::prepare(&name, &mac, promote, drop_base)
+        })
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()))
+        {
+            Ok(p) => r.prepared = Some(p),
+            Err(e) => r.err = Some(e),
+        },
+        Req::DisklessForget { name, mac } => r.err = golden::forget(&name, &mac).err(),
+        Req::GoldenSave { name } => {
+            match tokio::task::spawn_blocking(move || golden::GOLDENS.save(&name))
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()))
+            {
+                Ok(m) => r.msg = m,
+                Err(e) => r.err = Some(e),
+            }
+        }
+        Req::GoldenDiscard { name } => r.err = golden::GOLDENS.discard(&name).err(),
+        Req::DisklessStatus => r.goldens = golden::info(),
     }
     r
 }
@@ -401,13 +501,15 @@ pub async fn run(args: &[String]) -> ! {
         }
         save(); // drops the ones that were skipped or failed
         games::restore();
+        golden::restore();
     });
-    // Games disk versions nobody uses any more are merged into games.img.
+    // Games disk / golden versions nobody uses any more are merged into their file.
     tokio::spawn(async {
         let mut t = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
             t.tick().await;
             let _ = tokio::task::spawn_blocking(games::tick).await;
+            let _ = tokio::task::spawn_blocking(|| golden::GOLDENS.tick()).await;
         }
     });
 

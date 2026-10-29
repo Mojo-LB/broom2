@@ -12,6 +12,9 @@
 // RAM option, per disk: games.img copied into RAM (ramimg.rs) in the background, served from the file meanwhile. The
 // copy stays right while layers sit on top of it (a merge only rewrites blocks the layers cover); once a merge drops
 // those layers the disk goes back to the file at once and the copy is loaded again.
+//
+// The same engine (a Registry: its own list of disks and its own config file) also serves the diskless Windows
+// goldens (golden.rs): a golden is such a disk whose update machine is the golden's maintenance machine.
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -80,6 +83,10 @@ pub struct View {
     pub ver: u64,
     pub layers: Vec<Arc<Overlay>>,
     pub ov: Option<Arc<Overlay>>,
+    /// The family the disk belongs to: the session detaches from it.
+    pub reg: &'static Registry,
+    /// A diskless machine's own session (golden.rs: its MAC), not a session of the shared disk.
+    pub machine: Option<String>,
 }
 
 struct Layer {
@@ -107,12 +114,16 @@ struct State {
     ram_loading: bool,
 }
 
-/// The disks, by name.
-static DISKS: Mutex<Option<HashMap<String, State>>> = Mutex::new(None);
-
-fn with<T>(f: impl FnOnce(&mut HashMap<String, State>) -> T) -> T {
-    f(DISKS.lock().get_or_insert_with(HashMap::new))
+/// One family of layered disks: its disks by name, the file keeping their configs for the daemon's next start (next to
+/// its state file), and the word naming one in the log.
+pub struct Registry {
+    disks: Mutex<Option<HashMap<String, State>>>,
+    cfg_name: &'static str,
+    what: &'static str,
 }
+
+/// The games disks.
+pub static GAMES: Registry = Registry::new("iscsid-games.json", "iSCSI disk");
 
 fn update_files(dir: &Path) -> (PathBuf, PathBuf) {
     (dir.join("update.ovl"), dir.join("update.blocks"))
@@ -125,11 +136,6 @@ fn layer_dir(dir: &Path, ver: u64) -> PathBuf {
 fn open_layer(dir: &Path, ver: u64, size: u64) -> Result<Overlay, String> {
     let d = layer_dir(dir, ver);
     Overlay::open(&d.join("ovl"), &d.join("blocks"), size)
-}
-
-/// Where the configs are kept for the daemon's next start (next to its state file).
-fn cfg_file() -> Option<PathBuf> {
-    super::state_path().map(|p| p.with_file_name("iscsid-games.json"))
 }
 
 fn open_lun(cfg: &Config) -> Result<Arc<Lun>, String> {
@@ -149,54 +155,6 @@ fn to_file(s: &mut State) -> Result<(), String> {
         swap_lun(s, super::Data::File(f));
     }
     Ok(())
-}
-
-/// Disk `name` set to RAM and not in RAM yet → load the copy on a thread, swapped in when done unless games.img changed
-/// meanwhile (a merge, the disk grew → loaded again). Not enough RAM → stays on the file.
-fn load_ram(name: &str) {
-    let Some((path, reserve, merges)) = with(|d| {
-        let s = d.get_mut(name)?;
-        if !s.cfg.ram || s.ram_loading || s.lun.is_ram() {
-            return None;
-        }
-        s.ram_loading = true;
-        Some((s.cfg.path.clone(), s.cfg.reserve, s.merges))
-    }) else {
-        return;
-    };
-    let name = name.to_string();
-    std::thread::spawn(move || {
-        let r = super::ramimg::RamImage::load(&path, reserve);
-        let (again, unused) = with(|d| {
-            let Some(s) = d.get_mut(&name) else {
-                return (false, r.ok());
-            };
-            s.ram_loading = false;
-            match r {
-                Ok(img)
-                    if s.cfg.ram
-                        && s.cfg.path == path
-                        && s.merges == merges
-                        && s.lun.size == img.size() =>
-                {
-                    swap_lun(s, super::Data::Ram(img));
-                    tracing::info!("iSCSI disk {name}: served from RAM");
-                    (false, None)
-                }
-                Ok(img) => (s.cfg.ram, Some(img)),
-                Err(e) => {
-                    tracing::warn!(
-                        "iSCSI disk {name}: not loaded into RAM ({e}) → served from the file"
-                    );
-                    (false, None)
-                }
-            }
-        });
-        drop(unused); // outside the lock: unmapping a big copy takes a while
-        if again {
-            load_ram(&name);
-        }
-    });
 }
 
 /// Blocking read of gen view `layers` (oldest first) over games.img.
@@ -253,97 +211,6 @@ fn load(dir: &Path, size: u64) -> Result<(u64, Vec<Layer>), String> {
     Ok((base_ver, layers))
 }
 
-/// Serve exactly the disks `cfgs` (others stop being served; their connected clients stay connected). Each disk is
-/// set up on its own: one that fails doesn't keep the others from being served.
-pub fn set(cfgs: Vec<Config>) -> Result<(), String> {
-    let mut errs = Vec::new();
-    with(|d| d.retain(|name, _| cfgs.iter().any(|c| &c.name == name)));
-    for c in &cfgs {
-        if let Err(e) = set_one(c.clone()) {
-            errs.push(format!("iSCSI disk {}: {e}", c.name));
-        }
-    }
-    if let Some(p) = cfg_file() {
-        let _ = std::fs::write(p, serde_json::to_vec(&cfgs).unwrap());
-    }
-    if errs.is_empty() {
-        Ok(())
-    } else {
-        Err(errs.join("; "))
-    }
-}
-
-fn set_one(cfg: Config) -> Result<(), String> {
-    let dir = Path::new(&cfg.path)
-        .parent()
-        .ok_or("path has no folder")?
-        .to_path_buf();
-    let size = std::fs::metadata(&cfg.path)
-        .map_err(|e| format!("{}: {e}", cfg.path))?
-        .len();
-    let name = cfg.name.clone();
-    with(|d| -> Result<(), String> {
-        match d.get_mut(&name) {
-            Some(s) if s.cfg.path == cfg.path => {
-                if s.lun.size != size {
-                    if s.update_users > 0 {
-                        return Err("the update machine is connected — shut it down first".into());
-                    }
-                    // The disk grew: sessions from now on see the new size; the update overlay grows on reopen.
-                    s.lun = open_lun(&cfg)?;
-                    s.update = None;
-                }
-                s.cfg = cfg;
-                if !s.cfg.ram {
-                    to_file(s)?;
-                }
-            }
-            _ => {
-                let lun = open_lun(&cfg)?;
-                let (base_ver, layers) = load(&dir, size)?;
-                let ver = layers.last().map_or(base_ver, |l| l.ver);
-                let s = State {
-                    cfg,
-                    lun,
-                    dir: dir.clone(),
-                    base_ver,
-                    ver,
-                    layers,
-                    sessions: HashMap::new(),
-                    old_idle: Instant::now(),
-                    update: None,
-                    update_users: 0,
-                    merging: None,
-                    merges: 0,
-                    ram_loading: false,
-                };
-                d.insert(name.clone(), s);
-            }
-        }
-        Ok(())
-    })?;
-    load_ram(&name);
-    // A merge cut off by a crash / restart: games.img is half merged, only the newest gen reads it right → finish now.
-    if dir.join("merging").exists() {
-        tracing::warn!("iSCSI disk {name}: finishing a merge cut off earlier");
-        merge_if_idle(&name, Duration::ZERO);
-    }
-    Ok(())
-}
-
-/// At daemon start: the configs of the previous run.
-pub fn restore() {
-    let Some(cfgs) = cfg_file()
-        .and_then(|p| std::fs::read(p).ok())
-        .and_then(|b| serde_json::from_slice::<Vec<Config>>(&b).ok())
-    else {
-        return;
-    };
-    if let Err(e) = set(cfgs) {
-        tracing::error!("{e}");
-    }
-}
-
 /// The disk and gen `iqn` names, if it is a gen still served.
 fn find<'a>(d: &'a mut HashMap<String, State>, iqn: &str) -> Option<(&'a mut State, u64)> {
     d.values_mut().find_map(|s| {
@@ -352,33 +219,13 @@ fn find<'a>(d: &'a mut HashMap<String, State>, iqn: &str) -> Option<(&'a mut Sta
             .strip_prefix(".g")?
             .parse()
             .ok()?;
-        let ok = k >= s.merging.unwrap_or(s.base_ver) && k <= s.ver;
-        ok.then_some((s, k))
+        served(s, k).then_some((s, k))
     })
 }
 
-/// games.img of the disk if `iqn` names a gen still served.
-pub fn lun(iqn: &str) -> Option<Arc<Lun>> {
-    with(|d| find(d, iqn).map(|(s, _)| s.lun.clone()))
-}
-
-/// Target names of every disk's newest gen (discovery).
-pub fn iqns() -> Vec<String> {
-    with(|d| {
-        d.values()
-            .map(|s| format!("{}.g{}", s.cfg.iqn, s.ver))
-            .collect()
-    })
-}
-
-/// A target name of a games disk (any gen): its sessions attach / detach.
-pub fn owns(iqn: &str) -> bool {
-    with(|d| {
-        d.values().any(|s| {
-            iqn.strip_prefix(&s.cfg.iqn)
-                .is_some_and(|r| r.starts_with(".g"))
-        })
-    })
+/// Gen `k` of the disk can still be read (not merged away, not in the future).
+fn served(s: &State, k: u64) -> bool {
+    k >= s.merging.unwrap_or(s.base_ver) && k <= s.ver
 }
 
 /// `peer` is the disk's update machine: its IP, and its MAC as the kernel sees it (ARP) when the disk names one — an
@@ -401,72 +248,10 @@ pub(crate) fn update_allowed(
         return true;
     }
     tracing::warn!(
-        "iSCSI disk {name}: {peer} is the update machine's IP but its MAC is {} (expected {want}) — read-only",
+        "{name}: {peer} is the update machine's IP but its MAC is {} (expected {want}) — read-only",
         got.as_deref().unwrap_or("unknown")
     );
     false
-}
-
-/// A session of `iqn` from `peer` logs in. The disk's update machine on the newest gen gets the update overlay
-/// (writable). Every Ok is paired with a `detach`.
-pub fn attach(iqn: &str, peer: &str) -> Result<View, String> {
-    with(|d| {
-        let (s, ver) = find(d, iqn).ok_or("version no longer served")?;
-        let layers = s
-            .layers
-            .iter()
-            .filter(|l| l.ver <= ver)
-            .map(|l| l.ov.clone())
-            .collect();
-        let mut ov = None;
-        let writer = ver == s.ver
-            && update_allowed(&s.cfg, peer, || crate::license::arp_mac(peer), &s.cfg.name);
-        if writer {
-            if s.update.is_none() {
-                let (ovl, list) = update_files(&s.dir);
-                s.update = Some(Arc::new(Overlay::open(&ovl, &list, s.lun.size)?));
-            }
-            s.update_users += 1;
-            ov = s.update.clone();
-            tracing::info!(
-                "iSCSI disk {}: {peer} in UPDATE mode on g{ver} — its writes are kept for saving",
-                s.cfg.name
-            );
-        }
-        *s.sessions.entry(ver).or_default() += 1;
-        Ok(View {
-            disk: s.cfg.name.clone(),
-            ver,
-            layers,
-            ov,
-        })
-    })
-}
-
-pub fn detach(v: &View) {
-    with(|d| {
-        let Some(s) = d.get_mut(&v.disk) else { return };
-        if let Some(n) = s.sessions.get_mut(&v.ver) {
-            *n -= 1;
-            if *n == 0 {
-                s.sessions.remove(&v.ver);
-                if v.ver < s.ver && old_sessions(s) == 0 {
-                    s.old_idle = Instant::now();
-                }
-            }
-        }
-        if let Some(ov) = &v.ov
-            && s.update.as_ref().is_some_and(|u| Arc::ptr_eq(u, ov))
-        {
-            s.update_users = s.update_users.saturating_sub(1);
-        }
-    });
-    // Outside the lock: an fsync.
-    if let Some(ov) = &v.ov
-        && let Err(e) = ov.flush()
-    {
-        tracing::error!("iSCSI disk {} update: {e}", v.disk);
-    }
 }
 
 fn old_sessions(s: &State) -> usize {
@@ -477,163 +262,496 @@ fn old_sessions(s: &State) -> usize {
         .sum()
 }
 
-/// Every 30 s: merge each disk's layers into its games.img once no session has used an older gen for GRACE. Blocking.
-pub fn tick() {
-    for name in with(|d| d.keys().cloned().collect::<Vec<_>>()) {
-        merge_if_idle(&name, GRACE);
+/// What a diskless machine's session reads below its own writes (golden.rs): the disk's file, the frozen layers up to
+/// its gen. Counted as a session of that gen (merges wait for it) until `uncount`.
+pub(super) struct Below {
+    pub lun: Arc<Lun>,
+    pub layers: Vec<Arc<Overlay>>,
+}
+
+impl Registry {
+    pub const fn new(cfg_name: &'static str, what: &'static str) -> Registry {
+        Registry {
+            disks: Mutex::new(None),
+            cfg_name,
+            what,
+        }
+    }
+
+    fn with<T>(&self, f: impl FnOnce(&mut HashMap<String, State>) -> T) -> T {
+        f(self.disks.lock().get_or_insert_with(HashMap::new))
+    }
+
+    /// Where the configs are kept for the daemon's next start (next to its state file).
+    fn cfg_file(&self) -> Option<PathBuf> {
+        super::state_path().map(|p| p.with_file_name(self.cfg_name))
+    }
+
+    /// Disk `name` set to RAM and not in RAM yet → load the copy on a thread, swapped in when done unless games.img
+    /// changed meanwhile (a merge, the disk grew → loaded again). Not enough RAM → stays on the file.
+    fn load_ram(&'static self, name: &str) {
+        let Some((path, reserve, merges)) = self.with(|d| {
+            let s = d.get_mut(name)?;
+            if !s.cfg.ram || s.ram_loading || s.lun.is_ram() {
+                return None;
+            }
+            s.ram_loading = true;
+            Some((s.cfg.path.clone(), s.cfg.reserve, s.merges))
+        }) else {
+            return;
+        };
+        let name = name.to_string();
+        let what = self.what;
+        std::thread::spawn(move || {
+            let r = super::ramimg::RamImage::load(&path, reserve);
+            let (again, unused) = self.with(|d| {
+                let Some(s) = d.get_mut(&name) else {
+                    return (false, r.ok());
+                };
+                s.ram_loading = false;
+                match r {
+                    Ok(img)
+                        if s.cfg.ram
+                            && s.cfg.path == path
+                            && s.merges == merges
+                            && s.lun.size == img.size() =>
+                    {
+                        swap_lun(s, super::Data::Ram(img));
+                        tracing::info!("{what} {name}: served from RAM");
+                        (false, None)
+                    }
+                    Ok(img) => (s.cfg.ram, Some(img)),
+                    Err(e) => {
+                        tracing::warn!(
+                            "{what} {name}: not loaded into RAM ({e}) → served from the file"
+                        );
+                        (false, None)
+                    }
+                }
+            });
+            drop(unused); // outside the lock: unmapping a big copy takes a while
+            if again {
+                self.load_ram(&name);
+            }
+        });
+    }
+
+    /// Serve exactly the disks `cfgs` (others stop being served; their connected clients stay connected). Each disk is
+    /// set up on its own: one that fails doesn't keep the others from being served.
+    pub fn set(&'static self, cfgs: Vec<Config>) -> Result<(), String> {
+        let mut errs = Vec::new();
+        self.with(|d| d.retain(|name, _| cfgs.iter().any(|c| &c.name == name)));
+        for c in &cfgs {
+            if let Err(e) = self.set_one(c.clone()) {
+                errs.push(format!("{} {}: {e}", self.what, c.name));
+            }
+        }
+        if let Some(p) = self.cfg_file() {
+            let _ = std::fs::write(p, serde_json::to_vec(&cfgs).unwrap());
+        }
+        if errs.is_empty() {
+            Ok(())
+        } else {
+            Err(errs.join("; "))
+        }
+    }
+
+    fn set_one(&'static self, cfg: Config) -> Result<(), String> {
+        let dir = Path::new(&cfg.path)
+            .parent()
+            .ok_or("path has no folder")?
+            .to_path_buf();
+        let size = std::fs::metadata(&cfg.path)
+            .map_err(|e| format!("{}: {e}", cfg.path))?
+            .len();
+        let name = cfg.name.clone();
+        self.with(|d| -> Result<(), String> {
+            match d.get_mut(&name) {
+                Some(s) if s.cfg.path == cfg.path => {
+                    if s.lun.size != size {
+                        if s.update_users > 0 {
+                            return Err(
+                                "the update machine is connected — shut it down first".into()
+                            );
+                        }
+                        // The disk grew: sessions from now on see the new size; the update overlay grows on reopen.
+                        s.lun = open_lun(&cfg)?;
+                        s.update = None;
+                    }
+                    s.cfg = cfg;
+                    if !s.cfg.ram {
+                        to_file(s)?;
+                    }
+                }
+                _ => {
+                    let lun = open_lun(&cfg)?;
+                    let (base_ver, layers) = load(&dir, size)?;
+                    let ver = layers.last().map_or(base_ver, |l| l.ver);
+                    let s = State {
+                        cfg,
+                        lun,
+                        dir: dir.clone(),
+                        base_ver,
+                        ver,
+                        layers,
+                        sessions: HashMap::new(),
+                        old_idle: Instant::now(),
+                        update: None,
+                        update_users: 0,
+                        merging: None,
+                        merges: 0,
+                        ram_loading: false,
+                    };
+                    d.insert(name.clone(), s);
+                }
+            }
+            Ok(())
+        })?;
+        self.load_ram(&name);
+        // A merge cut off by a crash / restart: games.img is half merged, only the newest gen reads it right → finish.
+        if dir.join("merging").exists() {
+            tracing::warn!("{} {name}: finishing a merge cut off earlier", self.what);
+            self.merge_if_idle(&name, Duration::ZERO);
+        }
+        Ok(())
+    }
+
+    /// At daemon start: the configs of the previous run.
+    pub fn restore(&'static self) {
+        let Some(cfgs) = self
+            .cfg_file()
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|b| serde_json::from_slice::<Vec<Config>>(&b).ok())
+        else {
+            return;
+        };
+        if let Err(e) = self.set(cfgs) {
+            tracing::error!("{e}");
+        }
+    }
+
+    /// The disk file if `iqn` names a gen still served.
+    pub fn lun(&self, iqn: &str) -> Option<Arc<Lun>> {
+        self.with(|d| find(d, iqn).map(|(s, _)| s.lun.clone()))
+    }
+
+    /// Target names of every disk's newest gen (discovery).
+    pub fn iqns(&self) -> Vec<String> {
+        self.with(|d| {
+            d.values()
+                .map(|s| format!("{}.g{}", s.cfg.iqn, s.ver))
+                .collect()
+        })
+    }
+
+    /// A target name of one of the disks (any gen): its sessions attach / detach.
+    pub fn owns(&self, iqn: &str) -> bool {
+        self.with(|d| {
+            d.values().any(|s| {
+                iqn.strip_prefix(&s.cfg.iqn)
+                    .is_some_and(|r| r.starts_with(".g"))
+            })
+        })
+    }
+
+    /// A session of `iqn` from `peer` logs in. The disk's update machine on the newest gen gets the update overlay
+    /// (writable). Every Ok is paired with a `detach`.
+    pub fn attach(&'static self, iqn: &str, peer: &str) -> Result<View, String> {
+        self.with(|d| {
+            let (s, ver) = find(d, iqn).ok_or("version no longer served")?;
+            let layers = s
+                .layers
+                .iter()
+                .filter(|l| l.ver <= ver)
+                .map(|l| l.ov.clone())
+                .collect();
+            let mut ov = None;
+            let label = format!("{} {}", self.what, s.cfg.name);
+            let writer =
+                ver == s.ver && update_allowed(&s.cfg, peer, || super::arp_mac(peer), &label);
+            if writer {
+                if s.update.is_none() {
+                    let (ovl, list) = update_files(&s.dir);
+                    s.update = Some(Arc::new(Overlay::open(&ovl, &list, s.lun.size)?));
+                }
+                s.update_users += 1;
+                ov = s.update.clone();
+                tracing::info!(
+                    "{label}: {peer} in UPDATE mode on g{ver} — its writes are kept for saving"
+                );
+            }
+            *s.sessions.entry(ver).or_default() += 1;
+            Ok(View {
+                disk: s.cfg.name.clone(),
+                ver,
+                layers,
+                ov,
+                reg: self,
+                machine: None,
+            })
+        })
+    }
+
+    pub fn detach(&self, v: &View) {
+        self.uncount(&v.disk, v.ver);
+        self.with(|d| {
+            let Some(s) = d.get_mut(&v.disk) else { return };
+            if let Some(ov) = &v.ov
+                && s.update.as_ref().is_some_and(|u| Arc::ptr_eq(u, ov))
+            {
+                s.update_users = s.update_users.saturating_sub(1);
+            }
+        });
+        // Outside the lock: an fsync.
+        if let Some(ov) = &v.ov
+            && let Err(e) = ov.flush()
+        {
+            tracing::error!("{} {} update: {e}", self.what, v.disk);
+        }
+    }
+
+    /// The disk's newest gen (None = not served).
+    pub(super) fn newest(&self, name: &str) -> Option<u64> {
+        self.with(|d| d.get(name).map(|s| s.ver))
+    }
+
+    /// What gen `ver` of disk `name` reads (None = not served any more), counted as one of its sessions.
+    pub(super) fn count(&self, name: &str, ver: u64) -> Option<Below> {
+        self.with(|d| {
+            let s = d.get_mut(name)?;
+            if !served(s, ver) {
+                return None;
+            }
+            *s.sessions.entry(ver).or_default() += 1;
+            Some(Below {
+                lun: s.lun.clone(),
+                layers: s
+                    .layers
+                    .iter()
+                    .filter(|l| l.ver <= ver)
+                    .map(|l| l.ov.clone())
+                    .collect(),
+            })
+        })
+    }
+
+    /// The end of a session counted by `attach` / `count`.
+    pub(super) fn uncount(&self, name: &str, ver: u64) {
+        self.with(|d| {
+            let Some(s) = d.get_mut(name) else { return };
+            if let Some(n) = s.sessions.get_mut(&ver) {
+                *n -= 1;
+                if *n == 0 {
+                    s.sessions.remove(&ver);
+                    if ver < s.ver && old_sessions(s) == 0 {
+                        s.old_idle = Instant::now();
+                    }
+                }
+            }
+        });
+    }
+
+    /// Every 30 s: merge each disk's layers into its file once no session has used an older gen for GRACE. Blocking.
+    pub fn tick(&'static self) {
+        for name in self.with(|d| d.keys().cloned().collect::<Vec<_>>()) {
+            self.merge_if_idle(&name, GRACE);
+        }
+    }
+
+    pub fn merge_if_idle(&'static self, name: &str, grace: Duration) {
+        let job = self.with(|d| {
+            let s = d.get_mut(name)?;
+            if s.layers.is_empty()
+                || s.merging.is_some()
+                || old_sessions(s) > 0
+                || s.old_idle.elapsed() < grace
+            {
+                return None;
+            }
+            let target = s.ver;
+            s.merging = Some(target); // older gens are not served from now on
+            let layers: Vec<(u64, Arc<Overlay>)> =
+                s.layers.iter().map(|l| (l.ver, l.ov.clone())).collect();
+            Some((target, layers, s.cfg.path.clone(), s.dir.clone()))
+        });
+        let Some((target, layers, path, dir)) = job else {
+            return;
+        };
+        let what = self.what;
+        let marker = dir.join("merging");
+        let r = (|| -> Result<(), String> {
+            std::fs::write(&marker, target.to_string())
+                .map_err(|e| format!("{}: {e}", marker.display()))?;
+            let f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .map_err(|e| format!("{path}: {e}"))?;
+            for (_, l) in &layers {
+                l.merge_into(&f)?; // oldest first: a newer layer's block wins
+            }
+            crate::versions::write_durable(&dir.join("base.gen"), target.to_string().as_bytes())
+                .map_err(|e| format!("base.gen: {e}"))
+        })();
+        self.with(|d| {
+            let Some(s) = d.get_mut(name) else { return };
+            s.merging = None;
+            match r {
+                Ok(()) => {
+                    // Sessions holding these layers keep reading them (open files) — same bytes as the file now.
+                    // A RAM copy holds the old bytes under those layers: new sessions read the file until it is loaded
+                    // again.
+                    s.merges += 1;
+                    if let Err(e) = to_file(s) {
+                        tracing::error!("{what} {name}: {e}");
+                        return; // layers kept: still served right from the stale copy; retried at the next tick
+                    }
+                    s.base_ver = target;
+                    s.layers.retain(|l| l.ver > target);
+                    for (g, _) in &layers {
+                        let _ = std::fs::remove_dir_all(layer_dir(&dir, *g));
+                    }
+                    let _ = std::fs::remove_file(&marker);
+                    tracing::info!("{what} {name}: versions up to g{target} merged into {path}");
+                }
+                Err(e) => tracing::error!("{what} {name}: merge failed (retried later): {e}"),
+            }
+        });
+        self.load_ram(name);
+    }
+
+    /// Freeze the update into a new gen, served at once (machines get it at their next boot). The update machine must
+    /// be off: its file system must be on disk, whole.
+    pub fn save(&self, name: &str) -> Result<String, String> {
+        let what = self.what;
+        self.with(|d| {
+            let s = d.get_mut(name).ok_or(format!("{what} not served"))?;
+            if s.update_users > 0 {
+                return Err(
+                    "the update machine is still connected — shut it down properly first".into(),
+                );
+            }
+            let (ovl, list) = update_files(&s.dir);
+            let ov = match s.update.take() {
+                Some(o) => o,
+                None if ovl.exists() => Arc::new(Overlay::open(&ovl, &list, s.lun.size)?),
+                None => return Err("no update to save".into()),
+            };
+            ov.flush()?;
+            if ov.used() == 0 {
+                return Err("the update is empty".into());
+            }
+            let ver = s.ver + 1;
+            // Hard links into layer-<ver>.tmp, then one rename: the layer appears whole or not at all.
+            let (tmp, dst) = (
+                s.dir.join(format!("layer-{ver}.tmp")),
+                layer_dir(&s.dir, ver),
+            );
+            let _ = std::fs::remove_dir_all(&tmp);
+            let r = std::fs::create_dir(&tmp)
+                .and_then(|_| std::fs::hard_link(&ovl, tmp.join("ovl")))
+                .and_then(|_| std::fs::hard_link(&list, tmp.join("blocks")))
+                .and_then(|_| std::fs::rename(&tmp, &dst));
+            if let Err(e) = r {
+                let _ = std::fs::remove_dir_all(&tmp);
+                s.update = Some(ov);
+                return Err(format!("{}: {e}", dst.display()));
+            }
+            drop(ov);
+            let _ = std::fs::remove_file(&ovl);
+            let _ = std::fs::remove_file(&list);
+            let layer = open_layer(&s.dir, ver, s.lun.size)?;
+            s.layers.push(Layer {
+                ver,
+                ov: Arc::new(layer),
+            });
+            s.ver = ver;
+            if old_sessions(s) == 0 {
+                s.old_idle = Instant::now();
+            }
+            tracing::info!("{what} {name}: version g{ver} ready");
+            Ok(format!(
+                "version g{ver} ready: each machine gets it at its next boot"
+            ))
+        })
+    }
+
+    /// Throw the update away (the update machine must be off).
+    pub fn discard(&self, name: &str) -> Result<(), String> {
+        let what = self.what;
+        self.with(|d| {
+            let s = d.get_mut(name).ok_or(format!("{what} not served"))?;
+            if s.update_users > 0 {
+                return Err("the update machine is still connected — shut it down first".into());
+            }
+            let (ovl, list) = update_files(&s.dir);
+            drop(s.update.take());
+            let _ = std::fs::remove_file(ovl);
+            let _ = std::fs::remove_file(list);
+            Ok(())
+        })
+    }
+
+    pub fn info(&self) -> Vec<Info> {
+        self.with(|d| {
+            d.values()
+                .map(|s| Info {
+                    name: s.cfg.name.clone(),
+                    ver: s.ver,
+                    sessions: s.sessions.values().sum(),
+                    old_sessions: old_sessions(s),
+                    layers: s.layers.len(),
+                    layer_bytes: s.layers.iter().map(|l| l.ov.used()).sum(),
+                    update_bytes: match &s.update {
+                        Some(u) => u.used(),
+                        None => std::fs::metadata(update_files(&s.dir).1)
+                            .map_or(0, |m| m.len() / 4 * super::overlay::BLOCK),
+                    },
+                    update_connected: s.update_users > 0,
+                    merging: s.merging.is_some(),
+                    read_bytes: s.lun.read_bytes.load(std::sync::atomic::Ordering::Relaxed),
+                    ram: s.lun.is_ram(),
+                    ram_loading: s.ram_loading,
+                })
+                .collect()
+        })
     }
 }
 
+// The games disks' entry points (mod.rs, conn.rs, the tests).
+
+pub fn set(cfgs: Vec<Config>) -> Result<(), String> {
+    GAMES.set(cfgs)
+}
+
+pub fn restore() {
+    GAMES.restore()
+}
+
+pub fn lun(iqn: &str) -> Option<Arc<Lun>> {
+    GAMES.lun(iqn)
+}
+
+pub fn iqns() -> Vec<String> {
+    GAMES.iqns()
+}
+
+pub fn tick() {
+    GAMES.tick()
+}
+
+#[cfg(test)]
 pub fn merge_if_idle(name: &str, grace: Duration) {
-    let job = with(|d| {
-        let s = d.get_mut(name)?;
-        if s.layers.is_empty()
-            || s.merging.is_some()
-            || old_sessions(s) > 0
-            || s.old_idle.elapsed() < grace
-        {
-            return None;
-        }
-        let target = s.ver;
-        s.merging = Some(target); // older gens are not served from now on
-        let layers: Vec<(u64, Arc<Overlay>)> =
-            s.layers.iter().map(|l| (l.ver, l.ov.clone())).collect();
-        Some((target, layers, s.cfg.path.clone(), s.dir.clone()))
-    });
-    let Some((target, layers, path, dir)) = job else {
-        return;
-    };
-    let marker = dir.join("merging");
-    let r = (|| -> Result<(), String> {
-        std::fs::write(&marker, target.to_string())
-            .map_err(|e| format!("{}: {e}", marker.display()))?;
-        let f = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .map_err(|e| format!("{path}: {e}"))?;
-        for (_, l) in &layers {
-            l.merge_into(&f)?; // oldest first: a newer layer's block wins
-        }
-        crate::versions::write_durable(&dir.join("base.gen"), target.to_string().as_bytes())
-            .map_err(|e| format!("base.gen: {e}"))
-    })();
-    with(|d| {
-        let Some(s) = d.get_mut(name) else { return };
-        s.merging = None;
-        match r {
-            Ok(()) => {
-                // Sessions holding these layers keep reading them (open files) — same bytes as games.img now.
-                // A RAM copy holds the old bytes under those layers: new sessions read the file until it is loaded again.
-                s.merges += 1;
-                if let Err(e) = to_file(s) {
-                    tracing::error!("iSCSI disk {name}: {e}");
-                    return; // layers kept: still served right from the stale copy; retried at the next tick
-                }
-                s.base_ver = target;
-                s.layers.retain(|l| l.ver > target);
-                for (g, _) in &layers {
-                    let _ = std::fs::remove_dir_all(layer_dir(&dir, *g));
-                }
-                let _ = std::fs::remove_file(&marker);
-                tracing::info!("iSCSI disk {name}: versions up to g{target} merged into {path}");
-            }
-            Err(e) => tracing::error!("iSCSI disk {name}: merge failed (retried later): {e}"),
-        }
-    });
-    load_ram(name);
+    GAMES.merge_if_idle(name, grace)
 }
 
-/// Freeze the update into a new gen, served at once (machines get it at their next boot). The update machine must be
-/// off: its file system must be on disk, whole.
 pub fn save(name: &str) -> Result<String, String> {
-    with(|d| {
-        let s = d.get_mut(name).ok_or("iSCSI disk not served")?;
-        if s.update_users > 0 {
-            return Err(
-                "the update machine is still connected — shut it down properly first".into(),
-            );
-        }
-        let (ovl, list) = update_files(&s.dir);
-        let ov = match s.update.take() {
-            Some(o) => o,
-            None if ovl.exists() => Arc::new(Overlay::open(&ovl, &list, s.lun.size)?),
-            None => return Err("no update to save".into()),
-        };
-        ov.flush()?;
-        if ov.used() == 0 {
-            return Err("the update is empty".into());
-        }
-        let ver = s.ver + 1;
-        // Hard links into layer-<ver>.tmp, then one rename: the layer appears whole or not at all.
-        let (tmp, dst) = (
-            s.dir.join(format!("layer-{ver}.tmp")),
-            layer_dir(&s.dir, ver),
-        );
-        let _ = std::fs::remove_dir_all(&tmp);
-        let r = std::fs::create_dir(&tmp)
-            .and_then(|_| std::fs::hard_link(&ovl, tmp.join("ovl")))
-            .and_then(|_| std::fs::hard_link(&list, tmp.join("blocks")))
-            .and_then(|_| std::fs::rename(&tmp, &dst));
-        if let Err(e) = r {
-            let _ = std::fs::remove_dir_all(&tmp);
-            s.update = Some(ov);
-            return Err(format!("{}: {e}", dst.display()));
-        }
-        drop(ov);
-        let _ = std::fs::remove_file(&ovl);
-        let _ = std::fs::remove_file(&list);
-        let layer = open_layer(&s.dir, ver, s.lun.size)?;
-        s.layers.push(Layer {
-            ver,
-            ov: Arc::new(layer),
-        });
-        s.ver = ver;
-        if old_sessions(s) == 0 {
-            s.old_idle = Instant::now();
-        }
-        tracing::info!("iSCSI disk {name}: version g{ver} ready");
-        Ok(format!(
-            "version g{ver} ready: each machine gets it at its next boot"
-        ))
-    })
+    GAMES.save(name)
 }
 
-/// Throw the update away (the update machine must be off).
 pub fn discard(name: &str) -> Result<(), String> {
-    with(|d| {
-        let s = d.get_mut(name).ok_or("iSCSI disk not served")?;
-        if s.update_users > 0 {
-            return Err("the update machine is still connected — shut it down first".into());
-        }
-        let (ovl, list) = update_files(&s.dir);
-        drop(s.update.take());
-        let _ = std::fs::remove_file(ovl);
-        let _ = std::fs::remove_file(list);
-        Ok(())
-    })
+    GAMES.discard(name)
 }
 
 pub fn info() -> Vec<Info> {
-    with(|d| {
-        d.values()
-            .map(|s| Info {
-                name: s.cfg.name.clone(),
-                ver: s.ver,
-                sessions: s.sessions.values().sum(),
-                old_sessions: old_sessions(s),
-                layers: s.layers.len(),
-                layer_bytes: s.layers.iter().map(|l| l.ov.used()).sum(),
-                update_bytes: match &s.update {
-                    Some(u) => u.used(),
-                    None => std::fs::metadata(update_files(&s.dir).1)
-                        .map_or(0, |m| m.len() / 4 * super::overlay::BLOCK),
-                },
-                update_connected: s.update_users > 0,
-                merging: s.merging.is_some(),
-                read_bytes: s.lun.read_bytes.load(std::sync::atomic::Ordering::Relaxed),
-                ram: s.lun.is_ram(),
-                ram_loading: s.ram_loading,
-            })
-            .collect()
-    })
+    GAMES.info()
 }

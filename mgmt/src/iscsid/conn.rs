@@ -190,7 +190,7 @@ static TSIH: AtomicU16 = AtomicU16::new(1);
 
 struct Login {
     disk: Option<Disk>, // None = discovery session
-    /// A games disk session (attached, to detach when it ends).
+    /// A session of a layered disk — games disk, golden, diskless machine (attached, to detach when it ends).
     games: Option<super::games::View>,
     their_mrdsl: usize,
     /// MaxBurstLength: data asked for per R2T.
@@ -303,11 +303,15 @@ async fn login(
         }
         let done = transit && nsg == 3;
         let mut games = None;
-        if done && fail.is_none() && target.as_deref().is_some_and(super::games::owns) {
-            match super::games::attach(target.as_deref().unwrap_or_default(), peer) {
-                Ok(v) => games = Some(v),
-                Err(e) => {
-                    tracing::info!("iscsid: iSCSI disk login of {peer} refused: {e}");
+        if done && fail.is_none() {
+            match target.as_deref().and_then(|t| super::attach(t, peer)) {
+                None => {} // a plain target
+                Some(Ok(v)) => games = Some(v),
+                Some(Err(e)) => {
+                    tracing::info!(
+                        "iscsid: login of {peer} to {} refused: {e}",
+                        target.as_deref().unwrap_or_default()
+                    );
                     fail = Some((0x03, 0x01)); // service unavailable: the initiator retries
                 }
             }
@@ -367,11 +371,11 @@ impl Drop for Counted {
     }
 }
 
-/// A games disk session, detached when the connection ends.
+/// A layered disk's session, detached when the connection ends.
 struct Attached(super::games::View);
 impl Drop for Attached {
     fn drop(&mut self) {
-        super::games::detach(&self.0);
+        super::detach(&self.0);
     }
 }
 

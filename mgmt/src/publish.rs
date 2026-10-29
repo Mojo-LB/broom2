@@ -174,6 +174,7 @@ pub fn start_iscsi(st: &SharedState) {
     }
     restore_targets(st);
     let _ = crate::games::sync(st); // logs its own errors
+    let _ = crate::diskless::sync(st); // idem
 }
 
 /// Every published Linux image whose current target the daemon doesn't have (first start, daemon lost its state):

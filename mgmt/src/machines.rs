@@ -67,6 +67,7 @@ pub(crate) fn forget(st: &SharedState, m: &Machine) {
         let _ = st.db.delete_config(&k);
     }
     crate::games::forget_update(st, m.id, &who(m));
+    crate::diskless::forget_machine(st, m);
 }
 
 /// A machine's MAC changed: its disks and Remote key follow it.

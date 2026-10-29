@@ -94,6 +94,33 @@ pub fn games_discard(name: &str) -> Result<(), String> {
     call(&Req::GamesDiscard { name: name.into() }).map(|_| ())
 }
 
+/// Serve exactly these diskless goldens (and their machines).
+pub fn diskless_set(goldens: Vec<crate::iscsid::golden::Config>) -> Result<(), String> {
+    call_up(&Req::DisklessSet { goldens }).map(|_| ())
+}
+
+/// Every golden served, with its machines. None = no daemon (or one of a build without goldens).
+pub fn diskless_status() -> Option<Vec<crate::iscsid::golden::Info>> {
+    call(&Req::DisklessStatus).ok().map(|r| r.goldens)
+}
+
+/// Delete machine `mac`'s layers of golden `name`.
+pub fn diskless_forget(name: &str, mac: &str) -> Result<(), String> {
+    call(&Req::DisklessForget {
+        name: name.into(),
+        mac: mac.into(),
+    })
+    .map(|_| ())
+}
+
+pub fn golden_save(name: &str) -> Result<String, String> {
+    call(&Req::GoldenSave { name: name.into() }).map(|r| r.msg)
+}
+
+pub fn golden_discard(name: &str) -> Result<(), String> {
+    call(&Req::GoldenDiscard { name: name.into() }).map(|_| ())
+}
+
 /// Close every iSCSI session of client `ip` (that machine is off). Err from a daemon of a build without it.
 pub fn kick_peer(ip: &str) -> Result<usize, String> {
     call(&Req::KickPeer { ip: ip.into() }).map(|r| r.msg.parse().unwrap_or(0))

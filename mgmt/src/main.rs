@@ -13,6 +13,7 @@ mod db;
 mod devices;
 mod dhcp;
 mod disk;
+mod diskless;
 mod disks;
 mod dns;
 mod dnsrec;
@@ -524,6 +525,7 @@ async fn main() {
                 let _ = tokio::task::spawn_blocking(move || {
                     iscsi::upgrade_if_idle();
                     let _ = games::sync(&st); // logs its own errors
+                    let _ = diskless::sync(&st); // idem (a maintenance machine's lease may move)
                     for img in st
                         .db
                         .images()
@@ -571,6 +573,7 @@ async fn main() {
         .merge(images::routes()) // images, versions, upload, publish
         .merge(drivers::routes()) // Windows driver packages
         .merge(games::routes()) // games disks (Windows)
+        .merge(diskless::routes()) // diskless goldens, their machines, the ISO library
         .merge(groups::routes()) // Groups page
         .merge(machines::routes()) // Machines table
         .merge(license::routes()) // Windows license keys + boot reports
