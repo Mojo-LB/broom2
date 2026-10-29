@@ -59,7 +59,8 @@ their own layer over it. Every boot resets to `base ← drivers ← fresh child`
 
 - **Server:** x86_64 Linux (tested on Debian/Ubuntu and Rocky Linux 10), run as root, disk space for the goldens.
 - **Clients:** x86_64 UEFI PCs, **PXE first in the boot order**. Windows images need a local SSD; Linux images can
-  run without one (writes in RAM).
+  run without one (writes in RAM). [Diskless goldens](#diskless-machines-no-ssd) run Windows (or Linux) with no disk
+  at all, entirely from the server.
 
 ## Sizing
 
@@ -165,6 +166,31 @@ Upload the powered-off VM folder (only `.vmx` / `.vmdk` are sent, in parallel ch
 The Windows scripts and helpers are the server's, not the image's: a new server version reaches every PC at its next
 boot without a republish.
 
+## Diskless machines (no SSD)
+
+A **golden** (Diskless page) is a whole disk that machines with no local disk boot straight from the server over
+iSCSI (iPXE `sanboot`, the iBFT tells the OS where its disk is). Every read and write goes to the server: size it for
+that (fast disks for the machines' layers, the server's link) and keep in mind that the server down = every diskless
+PC down.
+
+- **Create:** name, OS (Windows by default, or Linux), size, the **installer ISO** from the ISO library, and the
+  groups whose machines boot it. It starts as a blank disk.
+- **Install / maintain:** pick its **maintenance machine**. Its boot menu then has *Install … from …* (the golden
+  attached as a blank disk, the ISO booted as a DVD drive) and *Maintain …* (the golden itself, writable). Install
+  the OS, then drivers, software and settings; shut down; **Save** makes that work the golden's next version, which
+  every machine gets at its next boot (**Discard** throws it away). Windows ISOs ask to press a key to boot from the
+  DVD: press one on the maintenance machine.
+- **Machines:** registered machines of the golden's groups with a **fixed IP**. Each gets its own disk (target
+  `<golden>.m<mac>`, answered only from its IP with its MAC behind it): the golden, then the machine's own **base**
+  layer, then a **session** layer that is wiped at every PXE boot.
+- **Storage** (Diskless page): goldens, the machines' layers and the ISO library each go on broom's own folder or a
+  server disk. Layers are sparse files of 64 KB blocks: a machine costs what it writes.
+- **ISO library:** upload installer ISOs (Windows or Linux); they are served read-only as a DVD-ROM.
+
+Status: the server side, the boot path and the maintenance flow are in place and tested on a VM client; a full
+Windows 11 install and the per-machine base (name / license on first boot) are being tested next. Anti-cheat behind
+this chain is untested.
+
 ## Groups, images, versions
 
 - A machine's **group** decides its boot menu, the images kept on its SSD, its iSCSI disks and drivers (Groups page).
@@ -257,8 +283,8 @@ mgmt/
 
 ## FAQ
 
-**Do the clients need a disk?** Windows: yes, a local SSD (cache + session writes keep boots fast and the server
-idle). Linux: no.
+**Do the clients need a disk?** Windows images: yes, a local SSD (cache + session writes keep boots fast and the
+server idle). Linux: no. [Diskless goldens](#diskless-machines-no-ssd): no disk at all, the server carries the load.
 
 **How many machines?** About 100 per server with the hardware in [Sizing](#sizing). The rooms running it today are
 small: grow gradually and watch the Server page.
