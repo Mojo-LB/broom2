@@ -197,9 +197,10 @@ PC down.
 - **Windows goldens:** run `irm http://<server>/broom-diskless.ps1 | iex` on the golden (as Administrator) before
   the first Save: each machine then takes its own name (Devices page) on its first boot, kept as its base.
 
-Status: tested on a VM client with an Ubuntu 26.04 golden end to end (installed from the library, maintained, saved,
-then booted diskless: its own name kept as its base, everything else gone at the next boot). A full Windows 11
-install is being tested next. Anti-cheat behind this chain is untested.
+Status: tested end to end on a VM client with Windows 11 24H2 and Ubuntu 26.04 goldens: installed from the library
+(the golden attached, the installer from the server), maintained, saved, then booted diskless: each machine's own name
+kept as its base, everything else gone at the next boot. Not tested yet: real PCs (their network card in Windows
+Setup and in the iSCSI boot) and anti-cheat behind this chain.
 
 ## Groups, images, versions
 
