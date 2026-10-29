@@ -94,6 +94,10 @@ fn all(st: &SharedState) -> Vec<String> {
         .iter()
         .flat_map(|d| d.groups.iter())
         .for_each(|g| add(g));
+    crate::diskless::goldens(st)
+        .iter()
+        .flat_map(|g| g.groups.iter())
+        .for_each(|g| add(g));
     v.sort_by_key(|g| g.to_ascii_lowercase());
     v
 }
@@ -120,8 +124,14 @@ async fn list(State(st): State<SharedState>) -> Json<serde_json::Value> {
         .map(|d| serde_json::json!({"name": d.name, "letter": d.letter, "groups": d.groups}))
         .collect();
     let drivers: Vec<_> = st.db.drivers().unwrap_or_default().iter().map(|d| serde_json::json!({"id": d.id, "name": d.name, "all": d.all_machines, "groups": d.groups})).collect();
+    // Diskless goldens: their groups' machines boot them (no group = no machine).
+    let goldens: Vec<_> = crate::diskless::goldens(&st)
+        .iter()
+        .map(|g| serde_json::json!({"name": g.name, "os": g.os, "groups": g.groups}))
+        .collect();
     Json(serde_json::json!({
         "groups": all(&st), "machines": machines, "images": images, "disks": disks, "drivers": drivers,
+        "goldens": goldens,
         "hide_disks": crate::disks::hidden_groups(&st),
     }))
 }
@@ -239,6 +249,8 @@ fn apply(
             st.db.set_machine_group(m.id, g.as_deref()).map_err(ise)?;
         }
     }
+    // Diskless goldens (no group = no machine: losing the last one is fine).
+    crate::diskless::edit_groups(st, &|name, g| f(&format!("g{name}"), g))?;
     Ok(())
 }
 
@@ -322,6 +334,9 @@ struct SetBody {
     /// Its machines hide their other disks from the guest (disks.rs); None = unchanged.
     #[serde(default)]
     hide_disks: Option<bool>,
+    /// Diskless golden names its machines boot; None = unchanged (a client that doesn't know them).
+    #[serde(default)]
+    goldens: Option<Vec<String>>,
 }
 
 /// POST /api/groups/set {name, machines, images, disks, drivers, allow_all} — exactly these are the group's. Images /
@@ -340,12 +355,17 @@ async fn set(
             _ => false,
         };
         let f = |key: &str, g: &[String]| {
-            // Image / games disk for every machine: stays so (not made this group's only).
-            if g.is_empty() && !key.starts_with('r') {
+            // Image / games disk for every machine: stays so (not made this group's only). A golden with no group has
+            // no machine: it simply gets this one.
+            if g.is_empty() && !key.starts_with('r') && !key.starts_with('g') {
                 return Vec::new();
             }
             let has = g.iter().any(|x| same(x, &n2));
-            match (want(key), has) {
+            let want = match key.split_at(1) {
+                ("g", n) => b.goldens.as_ref().map_or(has, |l| l.iter().any(|x| x == n)),
+                _ => want(key),
+            };
+            match (want, has) {
                 (true, false) => g.iter().cloned().chain([n2.clone()]).collect(),
                 (false, true) => swap(g, &n2, None),
                 _ => g.to_vec(),
@@ -382,7 +402,12 @@ async fn set(
 
 async fn sync_games(st: &SharedState) {
     let st = st.clone();
-    if let Ok(Err(e)) = tokio::task::spawn_blocking(move || crate::games::sync(&st)).await {
+    if let Ok(Err(e)) = tokio::task::spawn_blocking(move || {
+        let _ = crate::diskless::sync(&st); // logs its own errors
+        crate::games::sync(&st)
+    })
+    .await
+    {
         tracing::warn!("iSCSI disks: {e}");
     }
 }

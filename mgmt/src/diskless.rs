@@ -265,6 +265,19 @@ async fn sync_now(st: SharedState) -> Result<(), ApiError> {
         .map_err(|e| (StatusCode::CONFLICT, e))
 }
 
+/// Groups page: every golden's groups through `f` (name, groups → new groups), as one step. No group = no machine.
+pub(crate) fn edit_groups(
+    st: &SharedState,
+    f: &dyn Fn(&str, &[String]) -> Vec<String>,
+) -> Result<(), ApiError> {
+    edit(st, |list| {
+        for g in list.iter_mut() {
+            g.groups = f(&g.name, &g.groups);
+        }
+        Ok(())
+    })
+}
+
 /// Machine `m` was deleted: no longer any golden's maintenance machine, its layers of every golden deleted. Blocking.
 pub(crate) fn forget_machine(st: &SharedState, m: &Machine) {
     let all = goldens(st);

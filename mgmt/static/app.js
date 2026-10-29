@@ -740,10 +740,10 @@ const grNames=l=>l.length?l.map(x=>esc(x.name)+(x.letter?' ('+esc(x.letter)+':)'
 async function loadGroups(){const g=grData=await j('/api/groups');const tb=document.querySelector('#groups tbody');if(!tb)return;
   const cnt=n=>g.machines.filter(m=>(m.grp||'').toLowerCase()===n.toLowerCase()).length;
   tb.innerHTML=g.groups.map(n=>`<tr><td><b>${esc(n)}</b></td><td class="mono">${cnt(n)}</td>
-      <td>${grNames(g.images.filter(x=>grIn(x,n)))}</td><td>${grNames(g.disks.filter(x=>grIn(x,n)))}</td><td>${grNames(g.drivers.filter(x=>grIn(x,n)))}</td>
+      <td>${grNames(g.images.filter(x=>grIn(x,n)))}</td><td>${grNames(g.disks.filter(x=>grIn(x,n)))}</td><td>${grNames((g.goldens||[]).filter(x=>grIn(x,n)))}</td><td>${grNames(g.drivers.filter(x=>grIn(x,n)))}</td>
       <td><div class="d-flex gap-1"><button class="btn btn-sm btn-outline-secondary" ${act('editGroup',n)}>Edit</button> <button class="btn btn-sm btn-outline-secondary" ${act('renameGroup',n)}>Rename</button> <button class="btn btn-sm btn-outline-danger" ${act('deleteGroup',n)}>Delete</button></div></td></tr>`).join('')
     +`<tr><td><i>every machine</i></td><td class="mono" title="machines without a group">${g.machines.filter(m=>!m.grp).length} without</td>
-      <td>${grNames(g.images.filter(x=>!x.groups.length))}</td><td>${grNames(g.disks.filter(x=>!x.groups.length))}</td><td>${grNames(g.drivers.filter(x=>x.all))}</td><td></td></tr>`;
+      <td>${grNames(g.images.filter(x=>!x.groups.length))}</td><td>${grNames(g.disks.filter(x=>!x.groups.length))}</td><td title="a golden boots only on the machines of its groups">—</td><td>${grNames(g.drivers.filter(x=>x.all))}</td><td></td></tr>`;
   if(grCur&&g.groups.some(n=>n===grCur))editGroup(grCur);else closeGroup();}
 function editGroup(n){if(!grData)return;grCur=n;const g=grData,lc=n.toLowerCase();
   document.getElementById('gr_edit').style.display='';document.getElementById('gr_title').textContent='Group '+n;document.getElementById('gr_emsg').textContent='';
@@ -755,13 +755,14 @@ function editGroup(n){if(!grData)return;grCur=n;const g=grData,lc=n.toLowerCase(
     esc(i.name)+' '+osPill(i.os)+(i.groups.length?'':all),!i.groups.length,i.groups.length?'':allT)).join('')||'—';
   document.getElementById('gr_disks').innerHTML=g.disks.map(d=>box(d.name,!d.groups.length||grIn(d,n),
     esc(d.name)+' ('+esc(d.letter)+':)'+(d.groups.length?'':all),!d.groups.length,d.groups.length?'':allT)).join('')||'—';
+  document.getElementById('gr_goldens').innerHTML=(g.goldens||[]).map(d=>box(d.name,grIn(d,n),esc(d.name)+' '+osPill(d.os))).join('')||'—';
   document.getElementById('gr_drivers').innerHTML=g.drivers.map(d=>box(d.id,d.all||grIn(d,n),
     esc(d.name)+(d.all?all:''),d.all,d.all?'for every machine — change it on the Drivers page':'')).join('')||'—';
   document.getElementById('gr_hide').checked=(g.hide_disks||[]).some(x=>x.toLowerCase()===lc);}
 function closeGroup(){grCur=null;const e=document.getElementById('gr_edit');if(e)e.style.display='none';}
 async function saveGroup(){const m=document.getElementById('gr_emsg');
   const ids=(id,num)=>[...document.querySelectorAll('#'+id+' input:checked:not(:disabled)')].map(e=>num?+e.dataset.v:e.dataset.v);
-  const body={name:grCur,machines:ids('gr_machines',1),images:ids('gr_images',1),disks:ids('gr_disks',0),drivers:ids('gr_drivers',1),hide_disks:document.getElementById('gr_hide').checked};
+  const body={name:grCur,machines:ids('gr_machines',1),images:ids('gr_images',1),disks:ids('gr_disks',0),goldens:ids('gr_goldens',0),drivers:ids('gr_drivers',1),hide_disks:document.getElementById('gr_hide').checked};
   try{await j('/api/groups/set',mk(body));say(m,' ✓ saved');}
   catch(e){if(/EVERY machine/.test(e.message)&&await sure(e.message+'.\n\nSave anyway?')){
       try{await j('/api/groups/set',mk({...body,allow_all:true}));say(m,' ✓ saved');}catch(e2){say(m,' ✗ '+e2.message);}}
