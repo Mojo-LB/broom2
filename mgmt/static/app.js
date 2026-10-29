@@ -659,13 +659,13 @@ async function loadDiskless(){
     `<option value="${esc(m.id)}"${m.id===sel?' selected':''}>${esc(m.name)}${m.group?' ('+esc(m.group)+')':''}</option>`).join('');
   tb.innerHTML=d.goldens.map(x=>{const g=x.golden,s=x.status?x.status.disk:null;
     return `<tr><td><b>${esc(g.name)}</b></td><td>${osPill(g.os)}</td><td class="mono">${esc(g.size_gb)} GB</td>
-      <td class="mono">${esc(g.iso||'—')}</td>
+      <td><div class="mono small" style="max-width:16rem;white-space:normal;overflow-wrap:anywhere">${esc(g.iso||'—')}</div></td>
       <td>${g.groups.length?esc(g.groups.join(', ')):'<span class="text-body-secondary">none</span>'}</td>
       <td class="mono">${s?'g'+esc(s.ver)+(s.layers?' +'+esc(s.layers)+(s.merging?' merging…':' to merge'):''):'<span class="text-danger">not served</span>'}</td>
       <td class="mono">${x.status?x.status.machines.filter(m=>m.connected).length:''}</td>
       <td><select class="form-select form-select-sm d-inline-block w-auto" data-owner data-change="setMaint" data-args="${esc(JSON.stringify([g.name]))}">${opts(g.maint)}</select>${s&&s.update_connected?' <span class="text-success">'+ic('dot','')+' writable</span>':''}</td>
       <td class="mono">${s&&s.update_bytes?gbs(s.update_bytes)+` <button class="btn btn-sm btn-outline-primary" data-owner ${act('saveMaint',g.name)}>Save</button> <button class="btn btn-sm btn-outline-secondary" data-owner ${act('discardMaint',g.name)}>Discard</button>`:'—'}</td>
-      <td data-owner><button class="btn btn-sm btn-outline-secondary" ${act('editGolden',g.name)}>Edit</button> <button class="btn btn-sm btn-outline-danger" ${act('delGolden',g.name)}>Delete</button></td></tr>`;}).join('')
+      <td data-owner class="text-nowrap"><button class="btn btn-sm btn-outline-secondary" ${act('editGolden',g.name)}>Edit</button> <button class="btn btn-sm btn-outline-danger" ${act('delGolden',g.name)}>Delete</button></td></tr>`;}).join('')
     ||'<tr><td colspan="10" class="mono">no golden yet — create one below</td></tr>';
   // Their machines: each with its own layers (from the daemon) and target.
   const mb=document.querySelector('#dl_machines tbody');

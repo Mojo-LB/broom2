@@ -101,3 +101,36 @@ fn boot_requests_only_from_the_machine_itself() {
         "no IP"
     );
 }
+
+/// A machine that maintains a golden and is also in a diskless group boots the maintenance entry by default.
+#[test]
+fn maintenance_entry_wins_the_default() {
+    let e = |t: &str, d: bool| MenuEntry {
+        text: t.into(),
+        chain: String::new(),
+        default: d,
+    };
+    let out = ordered(
+        vec![e("Install cdtest", true), e("Maintain cdtest", false)],
+        vec![e("w11 (diskless)", true), e("w10 (diskless)", true)],
+    );
+    let got: Vec<(&str, bool)> = out.iter().map(|x| (x.text.as_str(), x.default)).collect();
+    assert_eq!(
+        got,
+        [
+            ("Install cdtest", true),
+            ("Maintain cdtest", false),
+            ("w11 (diskless)", false),
+            ("w10 (diskless)", false)
+        ]
+    );
+    let only = ordered(
+        vec![],
+        vec![e("w11 (diskless)", true), e("w10 (diskless)", true)],
+    );
+    assert_eq!(
+        (only[0].default, only[1].default),
+        (true, false),
+        "first diskless one"
+    );
+}

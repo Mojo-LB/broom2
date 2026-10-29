@@ -329,13 +329,14 @@ fn blank(i: &golden::Info) -> bool {
 /// blank, Maintain once the installer wrote to it — the installer's own restarts go on by themselves), then each golden
 /// it boots diskless (the first is the default unless it maintains one). Blocking (asks the daemon).
 pub(crate) fn menu_entries(st: &SharedState, m: &Machine) -> Vec<MenuEntry> {
-    let mut out: Vec<MenuEntry> = Vec::new();
+    let (mut maint, mut diskless): (Vec<MenuEntry>, Vec<MenuEntry>) = (Vec::new(), Vec::new());
     let all = st.db.machines().unwrap_or_default();
     for g in goldens(st) {
         let Some(info) = served(&g.name) else {
             continue;
         };
         if g.maint == Some(m.id) {
+            let out = &mut maint;
             let fresh = blank(&info);
             if let Some(iso) = &g.iso {
                 out.push(MenuEntry {
@@ -350,22 +351,27 @@ pub(crate) fn menu_entries(st: &SharedState, m: &Machine) -> Vec<MenuEntry> {
                 default: !fresh || g.iso.is_none(),
             });
         } else if machines_of(&g, &all).iter().any(|x| x.id == m.id) {
-            out.push(MenuEntry {
+            diskless.push(MenuEntry {
                 text: format!("{} (diskless)", g.name),
                 chain: format!("/boot/diskless?golden={}", g.name),
                 default: true,
             });
         }
     }
-    // One default at most: the first one marked.
+    ordered(maint, diskless)
+}
+
+/// Maintenance entries first (its work is why it is on), then diskless ones; one default at most: the first marked.
+pub(crate) fn ordered(mut maint: Vec<MenuEntry>, mut diskless: Vec<MenuEntry>) -> Vec<MenuEntry> {
+    maint.append(&mut diskless);
     let mut seen = false;
-    for e in out.iter_mut().filter(|e| e.default) {
+    for e in maint.iter_mut().filter(|e| e.default) {
         if seen {
             e.default = false;
         }
         seen = true;
     }
-    out
+    maint
 }
 
 /// The request comes from machine `m` itself: from its IP, with its MAC behind it (ARP) — these boot URLs are open
@@ -973,6 +979,7 @@ async fn iso_done(
     let dst = dir_of(&st, "iso").map_err(bad)?.join(&b.name);
     std::fs::rename(&src, &dst).map_err(ise)?;
     let _ = std::fs::remove_dir_all(&up);
+    let _ = std::fs::remove_dir(up.parent().unwrap_or(&up)); // .upload itself, once no other upload runs
     let added = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
