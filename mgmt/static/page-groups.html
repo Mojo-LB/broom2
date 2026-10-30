@@ -12,6 +12,17 @@
       <span id="gr_msg" class="msg align-self-center"></span>
     </div>
   </div>
+  <div class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">New machines</h2>
+    <div class="d-flex flex-wrap gap-2 align-items-end">
+      <div><label class="form-label small mb-1" for="gr_newm">Unknown PCs join this group by themselves (empty = register them by hand)</label>
+        <input class="form-control form-control-sm" id="gr_newm" size="20" placeholder="off" list="gr_grouplist"></div>
+      <datalist id="gr_grouplist"></datalist>
+      <button class="btn btn-sm btn-primary" data-click="saveNewMachines">Save</button>
+      <span id="gr_nmsg" class="msg align-self-center"></span>
+    </div>
+    <p class="form-text mb-0">A PC that network-boots and is not in the Machines table is added at its boot menu: named NEW-&lt;end of its MAC&gt;, its current IP as fixed IP, in this group, where it waits until you move it to its group (Devices page, or Edit here). Meanwhile it boots what this group gets (images and iSCSI disks for every machine included; no diskless golden unless one is for this group), and its disks are never partitioned without asking. Only a PC on the server's own LAN (its MAC seen behind its IP), at most 250 waiting. Fixed IPs: with the DHCP server off, give it a static lease on the router too.</p>
+  </div>
   <div class="card card-body mb-3" id="gr_edit" style="display:none">
     <h2 class="h6 text-uppercase text-body-secondary mb-3" id="gr_title"></h2>
     <div class="d-flex flex-wrap align-items-start gap-4">

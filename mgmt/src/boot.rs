@@ -58,8 +58,27 @@ fn script(body: String) -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body)
 }
 
-pub async fn render(State(st): State<SharedState>, Query(q): Q) -> impl IntoResponse {
-    let (mac, ip, m) = client(&st, &q);
+pub async fn render(
+    State(st): State<SharedState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    Query(q): Q,
+) -> impl IntoResponse {
+    let (mac, ip, mut m) = client(&st, &q);
+    // New machines group on (Groups page): an unknown PC joins it by itself and waits there for an admin.
+    let new_grp = crate::machines::new_group(&st);
+    if m.is_none()
+        && !mac.is_empty()
+        && let Some(g) = new_grp.clone()
+    {
+        let (st2, mac2) = (st.clone(), mac.clone());
+        let peer = peer.ip().to_canonical().to_string();
+        m = tokio::task::spawn_blocking(move || crate::machines::join_new(&st2, &mac2, &peer, &g))
+            .await
+            .unwrap_or_default();
+    }
+    let waiting = m
+        .as_ref()
+        .is_some_and(|m| crate::machines::waiting(m, new_grp.as_deref()));
     let host = m.as_ref().and_then(|m| m.hostname.clone());
     // License generation (a counter, never the key) → stage rebuilds base when it changes.
     let lic = m
@@ -91,15 +110,21 @@ pub async fn render(State(st): State<SharedState>, Query(q): Q) -> impl IntoResp
         });
         images = dl.chain(images).collect();
     }
+    // A machine waiting in the new-machines group is not "registered" for its disks: they are never partitioned
+    // without asking (the stage asks on its screen), as for an unknown PC — until an admin moves it to its group.
     script(menu_script(
         &images,
         timeout_s,
         host.as_deref(),
         lic,
-        m.is_some(),
+        m.is_some() && !waiting,
         secure_boot(&st),
+        waiting.then_some(WAITING_NOTE),
     ))
 }
+
+/// Top line of the boot menu of a machine waiting in the new-machines group.
+pub(crate) const WAITING_NOTE: &str = "New PC: waiting for an admin to move it to its group";
 
 /// "Secure Boot clients" switch (Network page): clients run the official signed iPXE.
 fn secure_boot(st: &SharedState) -> bool {
@@ -399,6 +424,7 @@ fn menu_script(
     lic: Option<i64>,
     reg: bool,
     sb: bool,
+    note: Option<&str>,
 ) -> String {
     let mut items = String::new();
     let mut targets = String::new();
@@ -462,7 +488,7 @@ fn menu_script(
         host
     };
     // One short line per field: the menu box is as wide as its longest line, so this fits any console width.
-    let header = if sb {
+    let mut header = if sb {
         format!(
             "item --gap Host : {host}\nitem --gap IP   : ${{net0/ip}}\nitem --gap MAC  : ${{net0/mac}}\n\
              item --gap\nitem --gap Arrows/number to select, Enter to boot\nitem --gap\n"
@@ -470,6 +496,15 @@ fn menu_script(
     } else {
         String::new()
     };
+    // A line of server text above the choices (plain words only: it is not quoted in the script).
+    if let Some(n) = note {
+        let n: String = n
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || " .,:-()".contains(*c))
+            .take(70)
+            .collect();
+        header = format!("item --gap {n}\nitem --gap\n{header}");
+    }
 
     format!(
         "#!ipxe\n\

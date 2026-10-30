@@ -206,6 +206,10 @@ Setup and in the iSCSI boot) and anti-cheat behind this chain.
 
 - A machine's **group** decides its boot menu, the images kept on its SSD, its iSCSI disks and drivers (Groups page).
   Things set for no group go to everyone. This organizes, it is not access control.
+- **New machines** (Groups page, off by default): an unknown PC that network-boots joins a group you pick by itself
+  (named `NEW-<end of its MAC>`, its IP as fixed IP) and waits there until you move it to its group. Meanwhile it
+  boots what that group gets, and its disks are never partitioned without asking. Only PCs on the server's own LAN
+  (MAC seen behind the IP), at most 250 waiting.
 - **Preload** (Windows images): PCs fetch the image ahead of use while booting another one.
 - **Versions:** snapshot / roll back a golden (hard links, instant); **→ New image** turns a version into an image.
 - **Export:** a VMware VM (`.vmx` + `.vmdk`) of an image or version, to edit it again.

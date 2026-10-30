@@ -743,7 +743,10 @@ const grIn=(x,n)=>x.groups.some(y=>y.toLowerCase()===n.toLowerCase());
 const grNames=l=>l.length?l.map(x=>esc(x.name)+(x.letter?' ('+esc(x.letter)+':)':'')).join(', '):'—';
 async function loadGroups(){const g=grData=await j('/api/groups');const tb=document.querySelector('#groups tbody');if(!tb)return;
   const cnt=n=>g.machines.filter(m=>(m.grp||'').toLowerCase()===n.toLowerCase()).length;
-  tb.innerHTML=g.groups.map(n=>`<tr><td><b>${esc(n)}</b></td><td class="mono">${cnt(n)}</td>
+  const nm=(g.new_machines||'').toLowerCase(),nmEl=document.getElementById('gr_newm');
+  if(nmEl&&document.activeElement!==nmEl)nmEl.value=g.new_machines||'';
+  const gl=document.getElementById('gr_grouplist');if(gl)gl.innerHTML=g.groups.map(x=>`<option value="${esc(x)}">`).join('');
+  tb.innerHTML=g.groups.map(n=>`<tr><td><b>${esc(n)}</b>${n.toLowerCase()===nm?' <span class="badge text-bg-warning" title="unknown PCs join it by themselves and wait here for you">new machines</span>':''}</td><td class="mono">${cnt(n)}</td>
       <td>${grNames(g.images.filter(x=>grIn(x,n)))}</td><td>${grNames(g.disks.filter(x=>grIn(x,n)))}</td><td>${grNames((g.goldens||[]).filter(x=>grIn(x,n)))}</td><td>${grNames(g.drivers.filter(x=>grIn(x,n)))}</td>
       <td><div class="d-flex gap-1"><button class="btn btn-sm btn-outline-secondary" ${act('editGroup',n)}>Edit</button> <button class="btn btn-sm btn-outline-secondary" ${act('renameGroup',n)}>Rename</button> <button class="btn btn-sm btn-outline-danger" ${act('deleteGroup',n)}>Delete</button></div></td></tr>`).join('')
     +`<tr><td><i>every machine</i></td><td class="mono" title="machines without a group">${g.machines.filter(m=>!m.grp).length} without</td>
@@ -773,6 +776,7 @@ async function saveGroup(){const m=document.getElementById('gr_emsg');
     else say(m,' ✗ '+e.message);}
   loadGroups();}
 const grCall=(url,body,el)=>post(url,body,el||'gr_msg','done',loadGroups);
+const saveNewMachines=()=>post('/api/groups/new-machines',{group:v('gr_newm')},'gr_nmsg',()=>v('gr_newm')?'unknown PCs join '+v('gr_newm'):'off',loadGroups);
 const createGroup=()=>{const n=v('gr_new');if(n)grCall('/api/groups/create',{name:n}).then(()=>{document.getElementById('gr_new').value='';});};
 async function renameGroup(n){const to=await ask('Rename group '+n,'New name (an existing name merges the two):',n);
   if(to&&to!==n){if(grCur===n)grCur=to.trim();grCall('/api/groups/rename',{from:n,to});}}
@@ -1260,7 +1264,7 @@ const ACTIONS={
   loadGames,saveGames,setGamesUpdate,toggleGamesRam,saveGamesUpdate,discardGamesUpdate,editGames,delGames,
   loadDiskless,dlOsChanged,saveGolden,setMaint,saveMaint,discardMaint,delGolden,editGolden,isoOs,delIso,setPlace,uploadIso,
   loadDrivers,uploadDriver,saveDrvTargets,delDriver,
-  loadGroups,editGroup,closeGroup,saveGroup,createGroup,renameGroup,deleteGroup,
+  loadGroups,editGroup,closeGroup,saveGroup,createGroup,renameGroup,deleteGroup,saveNewMachines,
   loadServer,loadBench,loadBenchHist,logsReload,logsFollow,logsSearch,benchServer,benchRequest:()=>benchAsk(false),benchCancel:()=>benchAsk(true),bSelAll,
   applyDhcp,savePw,saveCafe,setTimeout_,setZramReserve,setAlert,setSsd,gsMode,setGoldenStreams,logout,
   remoteTo,rmGo,rmConnect,rmClose,rmBack,rmWallSize,rmWallFilter,rmWallPrev,rmWallNext,rmQuality,rmFull,rmSas,rmWin,rmAltTab,rmPaste,loadRemote,
