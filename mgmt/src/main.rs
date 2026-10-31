@@ -14,8 +14,8 @@ mod devices;
 mod dhcp;
 mod disk;
 mod diskless;
-mod display;
 mod disks;
+mod display;
 mod dns;
 mod dnsrec;
 mod drivers;
@@ -50,6 +50,7 @@ mod settings;
 mod setup;
 mod sysmon;
 mod tftp;
+mod tls;
 mod users;
 mod versions;
 mod vhdx;
@@ -601,6 +602,7 @@ async fn main() {
         .merge(dns::routes()) // DNS server for healthy machines (Network page)
         .merge(volumes::routes()) // server disks: format, mount, images / games disks on them
         .merge(auth::routes()) // admin login
+        .merge(tls::routes()) // HTTPS certificate (System page)
         .merge(users::routes()) // accounts (owners)
         // Serve boot assets over HTTP (kernel/initrd much faster than TFTP).
         // /tftp/... -> <home>/tftp/... (e.g. http://SERVER/tftp/broom-stage/vmlinuz); a Windows golden set to RAM
@@ -618,7 +620,47 @@ async fn main() {
             auth::guard,
         ))
         .layer(axum::middleware::from_fn(auth::security_headers)) // outermost: also on the guard's redirects / 401s
-        .with_state(state);
+        .with_state(state.clone());
+
+    // HTTPS for the web admin (tls.rs); the machines keep plain HTTP. No HTTPS port (taken, no certificate) → the
+    // admin pages stay on HTTP as before.
+    let https_port: u16 = args
+        .iter()
+        .position(|a| a == "--https-port")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(443);
+    tls::HTTPS_PORT.store(https_port, std::sync::atomic::Ordering::Relaxed);
+    if https_port != 0 {
+        match tls::listen(&state, https_port).await {
+            Ok(l) => {
+                let https = app
+                    .clone()
+                    .layer(axum::middleware::from_fn(tls::secure_cookies));
+                info!(
+                    "web admin on https://{}:{https_port}",
+                    addr.split(':').next().unwrap_or("")
+                );
+                tokio::spawn(async move {
+                    use axum::serve::ListenerExt;
+                    // tap_io: axum's ConnectInfo<SocketAddr> for a listener of its own kind (the peer IP: login throttle).
+                    let l = l.tap_io(|io| {
+                        let _ = io.get_ref().0.set_nodelay(true);
+                    });
+                    if let Err(e) = axum::serve(
+                        l,
+                        https.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                    )
+                    .await
+                    {
+                        error!("https server stopped: {e}");
+                    }
+                });
+            }
+            Err(e) => warn!("https: off ({e}) — the web admin stays on http://"),
+        }
+    }
+    let app = app.layer(axum::middleware::from_fn_with_state(state, tls::http_side));
 
     info!("bootrom-mgmt {VERSION} serving on http://{addr}");
     // ConnectInfo: /api/license and /api/booted identify the machine by the peer IP (license.rs).

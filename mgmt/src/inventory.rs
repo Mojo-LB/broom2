@@ -110,11 +110,20 @@ pub(crate) fn row(name: &str, mac: &str, grp: &str, v: Option<&serde_json::Value
     let s = |k: &str| v.and_then(|v| v[k].as_str()).unwrap_or("").to_string();
     let list = |k: &str, f: &dyn Fn(&serde_json::Value) -> String| -> String {
         v.and_then(|v| v[k].as_array())
-            .map(|a| a.iter().map(f).filter(|x| !x.is_empty()).collect::<Vec<_>>().join("; "))
+            .map(|a| {
+                a.iter()
+                    .map(f)
+                    .filter(|x| !x.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
             .unwrap_or_default()
     };
     let gb = |b: u64| format!("{:.0} GB", b as f64 / (1u64 << 30) as f64);
-    let ram_total = v.and_then(|v| v["ram_total"].as_u64()).map(gb).unwrap_or_default();
+    let ram_total = v
+        .and_then(|v| v["ram_total"].as_u64())
+        .map(gb)
+        .unwrap_or_default();
     let cols = [
         name.to_string(),
         mac.to_string(),
@@ -161,8 +170,16 @@ pub(crate) fn row(name: &str, mac: &str, grp: &str, v: Option<&serde_json::Value
             format!(
                 "{} {}{}",
                 n["name"].as_str().unwrap_or(""),
-                if mbps > 0 { format!("{mbps} Mb/s") } else { String::new() },
-                if n["up"].as_bool() == Some(true) { "" } else { " (down)" }
+                if mbps > 0 {
+                    format!("{mbps} Mb/s")
+                } else {
+                    String::new()
+                },
+                if n["up"].as_bool() == Some(true) {
+                    ""
+                } else {
+                    " (down)"
+                }
             )
         }),
         list("monitors", &|m| {

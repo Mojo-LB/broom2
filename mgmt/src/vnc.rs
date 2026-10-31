@@ -285,7 +285,9 @@ async fn run_agent(
                 // …and its hardware list (inventory.rs), kept in the database.
                 Message::Text(t) if t.starts_with("{\"t\":\"inventory\"") => {
                     let (st, mac) = (st.clone(), mac.clone());
-                    tokio::task::spawn_blocking(move || crate::inventory::store(&st, &mac, t.as_str()));
+                    tokio::task::spawn_blocking(move || {
+                        crate::inventory::store(&st, &mac, t.as_str())
+                    });
                 }
                 Message::Close(_) => break,
                 _ => {} // pong / other text

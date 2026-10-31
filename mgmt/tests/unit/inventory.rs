@@ -18,13 +18,22 @@ fn csv_row() {
     let r = row("PC01", "aa:bb", "Lounge", Some(&v));
     let cols: Vec<&str> = CSV_HEADER.split(',').collect();
     assert_eq!(cols.len(), 16);
-    assert!(r.starts_with("\"PC01\",\"aa:bb\",\"Lounge\",\"Micro-Star MS-7E06\",\"MAXSUN B860M\""), "{r}");
+    assert!(
+        r.starts_with("\"PC01\",\"aa:bb\",\"Lounge\",\"Micro-Star MS-7E06\",\"MAXSUN B860M\""),
+        "{r}"
+    );
     assert!(r.contains("\"Intel Core Ultra 5 225F (10C/10T)\""));
     assert!(r.contains("\"32 GB\""));
     assert!(r.contains("\"DIMM1 16 GB 6000 MT/s KF560\""));
-    assert!(r.contains("NVIDIA \"\"RTX\"\" 5060 (driver 32.0.15.7680)"), "quotes doubled");
+    assert!(
+        r.contains("NVIDIA \"\"RTX\"\" 5060 (driver 32.0.15.7680)"),
+        "quotes doubled"
+    );
     assert!(r.contains("\"Realtek 5GbE 5000 Mb/s\""));
-    assert!(r.contains("\"AOC =cmd\""), "only a leading = is neutralised");
+    assert!(
+        r.contains("\"AOC =cmd\""),
+        "only a leading = is neutralised"
+    );
     assert!(r.contains("\"1920x1080 @ 165 Hz\""));
     assert!(r.ends_with("\"1793480000\""));
     let empty = row("PC02", "cc:dd", "", None);

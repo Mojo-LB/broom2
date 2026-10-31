@@ -272,6 +272,17 @@ Setup and in the iSCSI boot) and anti-cheat behind this chain.
 
 Accounts: **owner** (everything) or **staff** (look, Remote, Wake, save a games update; no deleting or settings).
 
+**HTTPS.** The web admin is served on `https://` (port 443, `--https-port` to change it, `--https-port 0` = off);
+plain `http://` sends a browser there and refuses the admin API. The machines keep plain HTTP: iPXE, the boot files,
+Windows PE, the Remote agents and the scripts on the PCs. At first start Broom makes a **self-signed certificate** for
+its host name and addresses (valid 820 days, under Apple's 825-day limit; a new one is made by itself a month before
+the end). A browser warns the first time: compare the SHA-256 fingerprint it shows with **Settings → HTTPS**, or
+install the certificate on the staff PCs (Download there). **Your own certificate** (PEM certificate with its chain +
+its private key) replaces it on the same card, at once (no restart); so does a new self-signed one (after an address
+change). Files: `<home>/tls/cert.pem`, `key.pem` (root only). The Capture tool (boot menu [C]) trusts exactly the
+server's self-signed certificate; with your own certificate it talks plain HTTP, as the boot does. A switch on the
+card serves the admin on plain `http://` too.
+
 ## Data, backup
 
 ```
@@ -305,12 +316,14 @@ account's salt and a server nonce → a proof made from the password (PBKDF2-SHA
 the server's own proof back. The server keeps only a verifier per account, so a copied database logs nobody in, and a
 sniffed sign-in gives neither the password nor a reusable proof. A new password (first owner, change, reset by an
 owner) travels as its verifier sealed with the session's key (the first one with the setup token, never typed
-anywhere but the page). The session cookie itself still travels in the clear. What the network must do:
+anywhere but the page). The web admin is on HTTPS (see Web admin): the session cookie is `Secure`, so a browser never
+sends it over plain HTTP. What the network must do:
 
 - **Segment the boot LAN.** The goldens (HTTP) and iSCSI (`:3260`) are readable by any host on it. Keep guest Wi-Fi
   and unknown laptops off it, and keep real secrets out of goldens.
-- **Isolate the admin PC** or turn on port isolation: the web admin is plain HTTP, so a host that can redirect its
-  traffic (ARP spoofing from a guest PC) could take over a session or change the pages; port isolation stops that.
+- **Check the certificate** the first time a browser shows the admin page (fingerprint on Settings → HTTPS), or
+  install it on the staff PCs: a browser told to accept any certificate can be shown a fake one by a host that
+  redirects its traffic (ARP spoofing from a guest PC). Port isolation stops that kind of redirection too.
 - License keys go to a PC once, over plain HTTP, while its base is built.
 - iSCSI writes are accepted only from a disk's update machine (IP + MAC).
 - Remote agents dial out; each PC has its own key, both sides prove it at every connection and every command is signed.

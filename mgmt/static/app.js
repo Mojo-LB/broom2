@@ -26,7 +26,7 @@ for(const ev of ['click','change','input'])document.addEventListener(ev,e=>{
 });
 
 // ---- tabs: load HTML fragments on demand (/ui/<page>) + only load data for the tab being viewed ----
-const loaders={machines:loadStatus,remote:loadRemote,server:loadServer,devices:loadDevices,groups:loadGroups,images:loadImages,games:loadGames,diskless:loadDiskless,drivers:loadDrivers,network:loadDhcp,windows:loadCafe,system:()=>{loadCafe();loadUsers();},benchmark:loadBench,logs:loadLogs};
+const loaders={machines:loadStatus,remote:loadRemote,server:loadServer,devices:loadDevices,groups:loadGroups,images:loadImages,games:loadGames,diskless:loadDiskless,drivers:loadDrivers,network:loadDhcp,windows:loadCafe,system:()=>{loadCafe();loadUsers();loadTls();},benchmark:loadBench,logs:loadLogs};
 const fragCache={};
 let curPage=null;
 async function showPage(p){
@@ -935,6 +935,26 @@ async function userPw(name,role){const p=await ask('New password for '+name,'At 
   try{cred=sealFor(name,p);}catch(e){say(document.getElementById('us_msg'),' ✗ '+e.message);return;}
   userCall('/api/users',{name,role,cred},'password of '+name+' changed');}
 async function userDel(name){if(await sure('Delete account '+name+'? Their open sessions end.'))userCall('/api/users/delete',{name},name+' deleted');}
+// ---- HTTPS for the web admin (tls.rs; owners) ----
+const fpFmt=h=>(h||'').toUpperCase().match(/../g)?.join(':')||'';
+async function loadTls(){if(!me.role)await loadMe();const el=document.getElementById('tls_info');if(!el||me.role!=='owner')return;
+  let t;try{t=await j('/api/config/tls');}catch(e){say(el,' ✗ '+e.message);return;}
+  document.getElementById('tls_on').checked=!!t.https;
+  const until=t.until?new Date(t.until*1000):null,soon=until&&until-Date.now()<30*86400e3;
+  el.innerHTML=(t.listening?`${ic('ok')} HTTPS on port ${esc(t.port)}`:`${ic('err')} HTTPS is not running (port ${esc(t.port)} taken? see Logs) — the web admin is on plain HTTP`)
+    +`<br>${t.kind==='uploaded'?'Your certificate':'Self-signed certificate'+(t.names?.length?' for '+esc(t.names.join(', ')):'')}`
+    +(until?` · valid until <span class="${soon?'text-danger fw-semibold':''}">${esc(until.toLocaleDateString())}</span>${t.kind!=='uploaded'?' (renewed by itself)':''}`:'')
+    +`<br>SHA-256 <span class="mono" style="word-break:break-all">${esc(fpFmt(t.sha256))}</span>`;}
+async function tlsOn(el){const on=el.checked;
+  if(!on&&!await sure('Serve the web admin on plain http:// too? Passwords never travel, but the session and every page do, readable on the network.')){el.checked=true;return;}
+  await post('/api/config/tls',{https:on},'tls_msg',on?'HTTPS only':'plain HTTP too',loadTls);}
+async function tlsUpload(){const m=document.getElementById('tls_msg'),c=document.getElementById('tls_cert').files[0],k=document.getElementById('tls_key').files[0];
+  if(!c||!k){say(m,' ✗ pick the certificate and its key');return;}
+  if(!await sure('Use this certificate now? Open the page by a name it was made for, or browsers will warn.'))return;
+  await post('/api/config/tls',{cert:await c.text(),key:await k.text()},'tls_msg','in use — reload the page',loadTls);
+  document.getElementById('tls_key').value='';}
+async function tlsSelfSigned(){if(!await sure('Make a new self-signed certificate? Browsers warn again once (new fingerprint).'))return;
+  await post('/api/config/tls',{self_signed:true},'tls_msg','new certificate in use — reload the page',loadTls);}
 async function setTimeout_(){await j('/api/config/timeout',mk({seconds:+document.getElementById('timeout').value}));say(document.getElementById('to_msg'),' ✓ saved');}
 async function setSsd(){const m=document.getElementById('ssd_msg');
   try{await j('/api/config/ssd',mk({room_gb:+v('ssd_room'),warn_gb:+v('ssd_warn'),reboot_gb:+v('ssd_reboot'),pagefile_gb:+v('ssd_pagefile')}));say(m,' ✓ saved');}
@@ -1366,7 +1386,7 @@ const ACTIONS={
   loadDrivers,uploadDriver,saveDrvTargets,delDriver,
   loadGroups,editGroup,closeGroup,saveGroup,createGroup,renameGroup,deleteGroup,saveNewMachines,
   loadServer,loadBench,loadBenchHist,logsReload,logsFollow,logsSearch,benchServer,benchRequest:()=>benchAsk(false),benchCancel:()=>benchAsk(true),bSelAll,
-  applyDhcp,savePw,saveCafe,setTimeout_,setZramReserve,setAlert,setSsd,gsMode,setGoldenStreams,logout,
+  applyDhcp,savePw,saveCafe,setTimeout_,tlsOn,tlsUpload,tlsSelfSigned,setZramReserve,setAlert,setSsd,gsMode,setGoldenStreams,logout,
   remoteTo,rmGo,rmConnect,rmClose,rmBack,rmWallSize,rmWallFilter,rmWallPrev,rmWallNext,rmQuality,rmFull,rmSas,rmWin,rmAltTab,rmPaste,loadRemote,
 };
 

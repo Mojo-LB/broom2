@@ -166,7 +166,10 @@ async fn set(
     tracing::info!(
         "display: {} for {} → sent to {sent} connected machine(s)",
         mode.map(fmt_mode).unwrap_or_else(|| "none".into()),
-        group.map_or_else(|| format!("{} machine(s)", macs.len()), |g| format!("group {g}"))
+        group.map_or_else(
+            || format!("{} machine(s)", macs.len()),
+            |g| format!("group {g}")
+        )
     );
     Ok(Json(serde_json::json!({"ok": true, "sent": sent})))
 }

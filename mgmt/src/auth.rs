@@ -264,7 +264,7 @@ pub(crate) async fn until_invalid(st: SharedState, tok: Option<String>) {
 }
 
 /// Paths reachable without a session: boot/client endpoints + the login API + the static shell (HTML only, no data).
-fn is_public(method: &axum::http::Method, path: &str) -> bool {
+pub(crate) fn is_public(method: &axum::http::Method, path: &str) -> bool {
     use axum::http::Method;
     const OPEN: &[&str] = &[
         "/boot.ipxe",
@@ -299,6 +299,7 @@ fn is_public(method: &axum::http::Method, path: &str) -> bool {
         "/boot/onboard",
         "/api/onboard/report",
         "/api/onboard/state",
+        "/api/tls/cert",
     ];
     // /boot/iso/, /boot/nocloud/: a golden's Ubuntu installer, answered to its maintenance machine only (diskless.rs).
     // /boot/onboard/: "Add hardware" Windows PE files, answered to the job's machine with the job's token (onboard.rs).
