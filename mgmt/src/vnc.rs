@@ -163,6 +163,16 @@ pub fn connected(mac: &str) -> bool {
     AGENTS.lock().contains_key(&mac.to_lowercase())
 }
 
+/// A command for machine `mac`'s agent outside any viewer (power.rs); the writer signs it like a viewer's. false = no
+/// agent connected, or its queue is full.
+pub(crate) fn command(mac: &str, json: &str) -> bool {
+    AGENTS.lock().get(&mac.to_lowercase()).is_some_and(|a| {
+        a.to_agent
+            .try_send(Message::Text(json.to_string().into()))
+            .is_ok()
+    })
+}
+
 /// When machine `mac`'s agent connected (unix time), None = not connected.
 pub fn since(mac: &str) -> Option<u64> {
     AGENTS.lock().get(&mac.to_lowercase()).map(|a| a.since)

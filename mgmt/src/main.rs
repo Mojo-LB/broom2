@@ -40,6 +40,7 @@ mod monitor;
 mod ntfsread;
 mod onboard;
 mod overlay;
+mod power;
 mod preflight;
 mod publish;
 mod pwproof;
@@ -586,6 +587,7 @@ async fn main() {
         .merge(settings::routes()) // boot menu, zram, DHCP, guest user
         .merge(devices::routes()) // Devices page: edit / bulk / CSV / detail
         .merge(monitor::routes()) // online status, Wake-on-LAN
+        .merge(power::routes()) // turn on / restart / shut down machines (Machines page)
         .merge(bench::routes()) // Benchmark page + client measurements
         .merge(vnc::routes()) // Remote page: screen + mouse/keys of a Windows machine
         .merge(agentauth::routes()) // Remote: agent keys (handed to the stage, re-issued)

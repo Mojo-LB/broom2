@@ -93,7 +93,7 @@ pub(crate) fn new_user(name: &str, role: Role, v: crate::pwproof::Verifier) -> U
 }
 
 /// What staff may do: read every page (but not the CSV with the license keys, a golden's export or the accounts) and,
-/// of the changes, only Wake, Save / Discard a games update, their own password and logging out. Remote is a GET
+/// of the changes, only Wake / power (turn on, restart, shut down), Save / Discard a games update, their own password and logging out. Remote is a GET
 /// (WebSocket).
 pub(crate) fn staff_may(method: &axum::http::Method, path: &str) -> bool {
     use axum::http::Method;
@@ -106,6 +106,7 @@ pub(crate) fn staff_may(method: &axum::http::Method, path: &str) -> bool {
     ];
     const STAFF_POST: &[&str] = &[
         "/api/wake",
+        "/api/power",
         "/api/games/save",
         "/api/games/discard",
         "/api/password",

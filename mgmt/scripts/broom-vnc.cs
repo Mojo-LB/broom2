@@ -121,6 +121,29 @@ public static class BroomVnc {
     } catch { }
   }
 
+  // Power (power.rs on the server, a signed command): restart / shutdown after `delay` seconds with `msg` on screen -
+  // Windows' own shutdown.exe, which shows the countdown to whoever is signed in - or cancel a pending one. We are
+  // SYSTEM: allowed. The server cleaned the message (no quotes); cleaned here again.
+  static void Power(string what, int delay, string msg) {
+    try {
+      string args;
+      if (what == "cancel") args = "/a";
+      else if (what == "restart" || what == "shutdown") {
+        delay = Clamp(delay, 0, 600);
+        args = (what == "restart" ? "/r" : "/s") + " /f /t " + delay;
+        string m = (msg ?? "").Replace("\"", "").Replace("\\", "").Replace("\r", " ").Replace("\n", " ").Trim();
+        if (m.Length > 200) m = m.Substring(0, 200);
+        if (m.Length > 0) args += " /c \"" + m + "\"";
+      } else { Log("power: unknown action " + what); return; }
+      string exe = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "shutdown.exe");
+      var psi = new System.Diagnostics.ProcessStartInfo(exe, args) { UseShellExecute = false, CreateNoWindow = true };
+      using (var p = System.Diagnostics.Process.Start(psi)) {
+        p.WaitForExit(10000);
+        Log("power: " + what + " (shutdown " + args + ") -> exit " + (p.HasExited ? p.ExitCode.ToString() : "still running"));
+      }
+    } catch (Exception e) { Log("power: " + what + " failed: " + e.Message); }
+  }
+
   [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)] static extern bool LookupPrivilegeValueW(string system, string name, out long luid);
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool AdjustTokenPrivileges(IntPtr token, bool disableAll, ref TokenPriv tp, uint len, IntPtr prev, IntPtr retLen);
   [StructLayout(LayoutKind.Sequential, Pack = 4)] struct TokenPriv { public uint Count; public long Luid; public uint Attr; }
@@ -234,6 +257,7 @@ public static class BroomVnc {
         else if (op == "key") { Key(Field(text, "code"), text.Contains("\"down\":true")); }
         else if (op == "sas") { try { SendSAS(false); } catch { } } // Ctrl+Alt+Del (we are SYSTEM; policy set in broom-done)
         else if (op == "clip") { SetClip(ReadString(text, "text")); }
+        else if (op == "power") { Power(Field(text, "do"), IntField(text, "delay", 30), ReadString(text, "msg")); }
       }
       streaming = false;
       cts.Cancel();

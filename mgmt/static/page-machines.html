@@ -8,10 +8,26 @@
       <span class="flex-grow-1"></span>
       <span id="m_count" class="msg"></span>
     </div>
+    <!-- Power (power.rs): turn on = Wake-on-LAN; restart / shut down / cancel go to the PC's Broom agent. -->
+    <div class="d-flex flex-wrap gap-2 align-items-center mb-3">
+      <span id="m_sel" class="msg">0 selected</span>
+      <button class="btn btn-sm btn-outline-secondary" data-click="mPower" data-args='["on"]' title="Wake-on-LAN (it must be on in the PC's firmware)">Turn on</button>
+      <button class="btn btn-sm btn-outline-warning" data-click="mPower" data-args='["restart"]' title="Through the PC's Broom agent: a countdown and your message on its screen">Restart</button>
+      <button class="btn btn-sm btn-outline-danger" data-click="mPower" data-args='["shutdown"]' title="Through the PC's Broom agent: a countdown and your message on its screen">Shut down</button>
+      <button class="btn btn-sm btn-outline-secondary" data-click="mPower" data-args='["cancel"]' title="Stop a restart / shutdown still counting down">Cancel</button>
+      <label class="visually-hidden" for="m_delay">Countdown</label>
+      <select class="form-select form-select-sm w-auto" id="m_delay" title="Countdown on the PC before a restart / shutdown">
+        <option value="0">now</option><option value="30" selected>in 30 s</option><option value="60">in 1 min</option><option value="300">in 5 min</option>
+      </select>
+      <label class="visually-hidden" for="m_pmsg">Message</label>
+      <input class="form-control form-control-sm" style="max-width:22rem" id="m_pmsg" maxlength="200" placeholder="message on the PC's screen (optional)">
+      <span id="m_pres" class="msg"></span>
+    </div>
     <div class="table-responsive"><table class="table table-sm table-hover align-middle" id="machines">
-      <thead><tr><th>Hostname</th><th title="free-text group — driver packages can target a group (Drivers page)">Group</th><th>IP</th><th>MAC</th><th>Status</th><th title="Windows license key: armed = handed out once at the next base build; sent = installed (hover: activation result)">License</th><th></th></tr>
+      <thead><tr><th><input type="checkbox" class="form-check-input" id="m_selall" data-change="mSelAll" title="Select every registered machine the filters show (all pages)" aria-label="Select all"></th><th>Hostname</th><th title="free-text group — driver packages can target a group (Drivers page)">Group</th><th>IP</th><th>MAC</th><th>Status</th><th title="Windows license key: armed = handed out once at the next base build; sent = installed (hover: activation result)">License</th><th></th></tr>
         <!-- One filter per column (filteredMachines in app.js). -->
         <tr class="filters" data-input="mFilter">
+          <th></th>
           <th><input class="form-control form-control-sm" id="mf_host" placeholder="hostname"></th>
           <th><input class="form-control form-control-sm" id="mf_grp" placeholder="group"></th>
           <th><input class="form-control form-control-sm" id="mf_ip" placeholder="IP"></th>

@@ -98,10 +98,11 @@ function renderMachines(){
   const page=rows.slice((mPage-1)*M_PAGE,mPage*M_PAGE);
   document.querySelector('#machines tbody').innerHTML=page.map(m=>
     `<tr>
+       <td>${m.registered&&m.id!=null?`<input type="checkbox" class="form-check-input" data-change="mSelOne" data-args="${esc(JSON.stringify([m.id]))}"${mSel.has(m.id)?' checked':''} aria-label="select">`:''}</td>
        <td>${m.hostname?esc(m.hostname):'<span class="mono">—</span>'} ${m.registered?'':'<span class="badge rounded-pill text-bg-warning">new</span>'}</td>
        <td class="mono">${m.grp?esc(m.grp):'—'}</td>
        <td class="mono">${esc(m.ip)}</td><td class="mono">${esc(m.mac)}</td>
-       <td>${led(m.online)}${m.not_reset?' <span class="badge text-bg-danger" title="Windows started from the SSD without a PXE boot at '+new Date(m.not_reset*1000).toLocaleString()+' — this session was NOT reset (cable out, server down, boot order changed?). Cleared by the next PXE boot.">not reset</span>':''}${m.ssd_low?' <span class="badge text-bg-danger" title="SSD almost full during the session: '+gbs(m.ssd_low[0])+' free at '+new Date(m.ssd_low[1]*1000).toLocaleString()+' (the guest wrote a lot; Windows → SSD room). Cleared by the next PXE boot.">SSD full</span>':''}${mxBadge(m.metrics)}${upBadge(m)}${baseBadge(m)}</td>
+       <td>${led(m.online)}${m.not_reset?' <span class="badge text-bg-danger" title="Windows started from the SSD without a PXE boot at '+new Date(m.not_reset*1000).toLocaleString()+' — this session was NOT reset (cable out, server down, boot order changed?). Cleared by the next PXE boot.">not reset</span>':''}${m.ssd_low?' <span class="badge text-bg-danger" title="SSD almost full during the session: '+gbs(m.ssd_low[0])+' free at '+new Date(m.ssd_low[1]*1000).toLocaleString()+' (the guest wrote a lot; Windows → SSD room). Cleared by the next PXE boot.">SSD full</span>':''}${pwBadge(m)}${mxBadge(m.metrics)}${upBadge(m)}${baseBadge(m)}</td>
        <td class="mono" title="${esc(m.license_result||'')}">${licCell(m)}</td>
        <td><div class="d-flex gap-1">${m.registered
           ? `<button class="btn btn-sm btn-outline-secondary" ${act('wake',m.mac)}>Wake</button>
@@ -109,11 +110,38 @@ function renderMachines(){
              ${basePick(m)}
              ${m.remote?`<button class="btn btn-sm btn-outline-primary" ${act('remoteTo',m.hostname)} title="See and control this machine">Remote</button>`:''}`
           : `<button class="btn btn-sm btn-outline-primary" ${act('regMachine',m.mac,m.ip,m.hostname)} data-owner>Register</button>`}</div></td>
-     </tr>`).join('') || '<tr><td colspan=7 class="mono">no matching machines</td></tr>';
+     </tr>`).join('') || '<tr><td colspan=8 class="mono">no matching machines</td></tr>';
   document.getElementById('m_count').textContent=rows.length+' machines';
+  mSelCount();
   document.getElementById('m_page').textContent='Page '+mPage+'/'+pages;
   const ps=document.getElementById('m_psize');if(ps)ps.value=M_PAGE===Infinity?'0':String(M_PAGE);
 }
+// Power (power.rs): the selected machines (kept across refreshes and pages) → turn on / restart / shut down / cancel.
+const mSel=new Set();
+function mSelCount(){for(const id of [...mSel])if(!allMachines.some(m=>m.id===id))mSel.delete(id);
+  const e=document.getElementById('m_sel');if(e)e.textContent=mSel.size+' selected';}
+function mSelOne(id,el){el.checked?mSel.add(id):mSel.delete(id);mSelCount();}
+function mSelAll(el){for(const m of filteredMachines())if(m.registered&&m.id!=null){el.checked?mSel.add(m.id):mSel.delete(m.id);}renderMachines();}
+async function mPower(action){
+  const out=document.getElementById('m_pres'),ids=[...mSel];
+  if(!ids.length){say(out,' ✗ select machines first (the boxes on the left)');return;}
+  const delay=+document.getElementById('m_delay').value,msg=document.getElementById('m_pmsg').value;
+  const names=allMachines.filter(m=>mSel.has(m.id)).map(m=>m.hostname||m.mac);
+  const verb={on:'Turn on',restart:'Restart',shutdown:'Shut down',cancel:'Cancel the restart / shutdown of'}[action];
+  const when=(action==='restart'||action==='shutdown')?(delay?' in '+delay+' s':' now'):'';
+  if(action!=='on'&&!await sure(verb+' '+ids.length+' machine(s)'+when+'? '+names.slice(0,12).join(', ')+(names.length>12?' …':'')))return;
+  try{const r=await j('/api/power',mk({action,ids,delay,msg}));const bad=r.results.filter(x=>!x.ok);
+    say(out,(r.done?' ✓ ':' ✗ ')+r.done+' of '+r.results.length+(bad.length?' — not done: '+bad.map(x=>x.name+' ('+x.msg+')').join('; '):''));}
+  catch(e){say(out,' ✗ '+e.message);}
+  loadStatus();}
+// The last power action while it plays out, and "booting" (chose from its boot menu, not up yet).
+function pwBadge(m){let s='';
+  if(m.booting)s+=' <span class="badge text-bg-info" title="network-booted in the last 5 minutes, not up yet">booting</span>';
+  const p=m.power;if(p){const left=Math.ceil(p.at+p.delay-Date.now()/1000);
+    const w={on:'turn on sent',restart:'restart',shutdown:'shut down',cancel:'cancel sent'}[p.what]||p.what;
+    const t=(p.what==='restart'||p.what==='shutdown')?(left>0?' in '+left+' s':' sent'):'';
+    s+=` <span class="badge text-bg-warning" title="sent ${esc(new Date(p.at*1000).toLocaleString())}">${esc(w+t)}</span>`;}
+  return s;}
 // Base mode (per machine + one Windows image): that image boots its base itself, every change kept over its restarts;
 // off → the next boot saves it as the base and resets to it from then on.
 const BASE_TIP='Base mode: when this machine boots the chosen Windows image, everything done is KEPT, over as many restarts as needed (Windows Update, apps that restart). Turn it off when done: the next boot saves it as the base, and every boot after resets to that base.';
@@ -1289,7 +1317,7 @@ const ACTIONS={
   loadImages,addImage,setDefault,toggleCache,toggleSsd,togglePreload,editImgGroups,republish,showVersions,exportImage,editBoot,delImage,
   snapshotImage,rollbackImage,versionToImage,deleteVersion,
   loadGames,saveGames,setGamesUpdate,toggleGamesRam,saveGamesUpdate,discardGamesUpdate,editGames,delGames,
-  loadDiskless,dlOsChanged,startOnboard,cancelOnboard,retryOnboard,saveGolden,setMaint,saveMaint,discardMaint,refreshGolden,delGolden,editGolden,isoOs,delIso,setPlace,uploadIso,
+  loadDiskless,dlOsChanged,mPower,mSelOne,mSelAll,startOnboard,cancelOnboard,retryOnboard,saveGolden,setMaint,saveMaint,discardMaint,refreshGolden,delGolden,editGolden,isoOs,delIso,setPlace,uploadIso,
   loadDrivers,uploadDriver,saveDrvTargets,delDriver,
   loadGroups,editGroup,closeGroup,saveGroup,createGroup,renameGroup,deleteGroup,saveNewMachines,
   loadServer,loadBench,loadBenchHist,logsReload,logsFollow,logsSearch,benchServer,benchRequest:()=>benchAsk(false),benchCancel:()=>benchAsk(true),bSelAll,

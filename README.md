@@ -162,6 +162,10 @@ Upload the powered-off VM folder (only `.vmx` / `.vmdk` are sent, in parallel ch
   agent runs, PCs that just booted, and exempt groups / IPs. Block outside DNS (53, 853) on the router.
 - **Remote:** a small agent (`broom-vnc`) dials out to the server; the wall streams only the page shown, the single
   view uses H.264 on Chrome / Edge. Ctrl+Alt+Del, Windows key, Alt+Tab and Paste from the toolbar.
+- **Power** (Machines page; staff too): tick machines (or all a filter shows, e.g. one group), then **Turn on**
+  (Wake-on-LAN: on in the PC's firmware), **Restart** or **Shut down** (now, or after 30 s / 1 / 5 min with an optional
+  message on screen; through the PC's agent, which runs Windows' `shutdown`) or **Cancel** a countdown. A machine
+  without a connected agent is listed as not done. `POST /api/power {action, ids | group, delay, msg}` for scripts.
 
 The Windows scripts and helpers are the server's, not the image's: a new server version reaches every PC at its next
 boot without a republish.
