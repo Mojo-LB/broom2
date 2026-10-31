@@ -38,6 +38,7 @@ mod machines;
 mod metrics;
 mod monitor;
 mod ntfsread;
+mod onboard;
 mod overlay;
 mod preflight;
 mod publish;
@@ -578,6 +579,7 @@ async fn main() {
         .merge(drivers::routes()) // Windows driver packages
         .merge(games::routes()) // games disks (Windows)
         .merge(diskless::routes()) // diskless goldens, their machines, the ISO library
+        .merge(onboard::routes()) // Add hardware: a new PC's network card installed into a Windows golden
         .merge(groups::routes()) // Groups page
         .merge(machines::routes()) // Machines table
         .merge(license::routes()) // Windows license keys + boot reports

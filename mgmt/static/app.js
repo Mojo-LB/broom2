@@ -700,7 +700,33 @@ async function loadDiskless(){
   const srv=d.server||location.host;
   const sc=document.getElementById('dl_scriptcmd');if(sc)sc.textContent='irm http://'+srv+'/broom-diskless.ps1 | iex';
   const sh=document.getElementById('dl_scriptcmd_sh');if(sh)sh.textContent='curl -fsS http://'+srv+'/broom-diskless.sh | sudo sh';
-  const m=document.getElementById('dl_msg');if(m)say(m,d.error?' ✗ not served: '+d.error:'');}
+  const m=document.getElementById('dl_msg');if(m)say(m,d.error?' ✗ not served: '+d.error:'');
+  loadOnboard().catch(()=>{});}
+// "Add hardware": a new PC's network card installed into a Windows golden (onboard.rs).
+let obTimer=null;
+async function loadOnboard(){
+  const o=await j('/api/onboard').catch(()=>null);if(!o||!dlData)return;
+  const gs=document.getElementById('ob_golden'),ms=document.getElementById('ob_machine');if(!gs)return;
+  const keepG=gs.value,keepM=ms.value;
+  gs.innerHTML=dlData.goldens.filter(x=>x.golden.os==='windows').map(x=>`<option value="${esc(x.golden.name)}"${x.golden.name===keepG?' selected':''}>${esc(x.golden.name)}</option>`).join('');
+  ms.innerHTML=dlData.machines.map(m=>`<option value="${esc(m.id)}"${String(m.id)===keepM?' selected':''}>${esc(m.name)}${m.group?' ('+esc(m.group)+')':''}</option>`).join('');
+  document.getElementById('ob_missing').textContent=o.missing?'Not possible on this server yet: '+o.missing:'';
+  const jb=o.job,box=document.getElementById('ob_job');
+  if(jb){const cls={done:'text-success',failed:'text-danger',cancelled:'text-body-secondary'}[jb.state]||'text-primary';
+    box.innerHTML=`<div><b>${esc(jb.golden)}</b> · <span class="${esc(cls)}">${esc(jb.state)}</span> · ${esc(jb.msg)}</div>`
+      +(jb.nics&&jb.nics.length?'<div class="small">'+jb.nics.map(n=>esc(n.name)+' <span class="mono">'+esc(n.instance)+'</span>').join('<br>')+'</div>':'')
+      +`<details class="small"><summary>Steps</summary><pre class="mono small mb-0" style="white-space:pre-wrap">${esc((jb.log||[]).join('\n'))}</pre></details>`;}
+  else box.innerHTML='';
+  const rows=Object.entries(o.hardware||{}).flatMap(([g,l])=>l.map(h=>`<tr><td>${esc(g)}</td><td>${esc(h.name)}</td><td class="mono small" style="overflow-wrap:anywhere">${esc(h.instance)}</td>
+    <td class="mono small">${esc(h.service)}${h.inf?' ('+esc(h.inf)+')':''}</td><td class="mono">g${esc(h.ver)}</td><td class="mono small">${h.added?new Date(h.added*1000).toLocaleString():''}</td></tr>`)).join('');
+  document.querySelector('#ob_hw tbody').innerHTML=rows||'<tr><td colspan="6" class="mono">none added yet</td></tr>';
+  // Follow a running job.
+  clearTimeout(obTimer);
+  if(jb&&(jb.state==='waiting'||jb.state==='installing')&&pageFromPath()==='diskless')obTimer=setTimeout(()=>loadOnboard().catch(()=>{}),4000);
+}
+const startOnboard=()=>post('/api/onboard/start',{golden:v('ob_golden'),machine:+v('ob_machine')},'ob_msg',r=>r.status||'started',loadOnboard);
+const retryOnboard=()=>post('/api/onboard/retry',{},'ob_msg',r=>r.status||'running',loadOnboard);
+const cancelOnboard=()=>sure('Cancel adding hardware? A running VM is stopped and its work thrown away.').then(ok=>ok&&post('/api/onboard/cancel',{},'ob_msg',()=>'cancelled',loadOnboard));
 // The installer ISO choice follows the OS chosen for the golden (Windows by default).
 function dlIsoOptions(keep){const sel=document.getElementById('dl_iso');if(!sel||!dlData)return;
   const os=document.getElementById('dl_os').value,cur=keep??sel.value;
@@ -1262,7 +1288,7 @@ const ACTIONS={
   loadImages,addImage,setDefault,toggleCache,toggleSsd,togglePreload,editImgGroups,republish,showVersions,exportImage,editBoot,delImage,
   snapshotImage,rollbackImage,versionToImage,deleteVersion,
   loadGames,saveGames,setGamesUpdate,toggleGamesRam,saveGamesUpdate,discardGamesUpdate,editGames,delGames,
-  loadDiskless,dlOsChanged,saveGolden,setMaint,saveMaint,discardMaint,delGolden,editGolden,isoOs,delIso,setPlace,uploadIso,
+  loadDiskless,dlOsChanged,startOnboard,cancelOnboard,retryOnboard,saveGolden,setMaint,saveMaint,discardMaint,delGolden,editGolden,isoOs,delIso,setPlace,uploadIso,
   loadDrivers,uploadDriver,saveDrvTargets,delDriver,
   loadGroups,editGroup,closeGroup,saveGroup,createGroup,renameGroup,deleteGroup,saveNewMachines,
   loadServer,loadBench,loadBenchHist,logsReload,logsFollow,logsSearch,benchServer,benchRequest:()=>benchAsk(false),benchCancel:()=>benchAsk(true),bSelAll,

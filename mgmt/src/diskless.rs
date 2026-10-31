@@ -198,7 +198,7 @@ pub(crate) fn machines_of<'a>(g: &Golden, all: &'a [Machine]) -> Vec<&'a Machine
 }
 
 /// IP of a machine: its fixed IP, else its DHCP lease.
-fn ip_of(st: &SharedState, m: &Machine) -> Option<String> {
+pub(crate) fn ip_of(st: &SharedState, m: &Machine) -> Option<String> {
     m.ip.clone().filter(|i| !i.is_empty()).or_else(|| {
         st.db
             .leases()
@@ -219,13 +219,23 @@ fn configs(st: &SharedState) -> Result<Vec<golden::Config>, String> {
             continue;
         }
         let maint = g.maint.and_then(|id| all.iter().find(|m| m.id == id));
+        // "Add hardware" (onboard.rs) running: its VM on this server writes the golden, through 127.0.0.1 (no LAN
+        // host can send from the loopback address).
+        let (update_ip, update_mac) = if crate::onboard::vm_owns(&g.name) {
+            (Some("127.0.0.1".to_string()), None)
+        } else {
+            (
+                maint.and_then(|m| ip_of(st, m)),
+                maint.map(|m| m.mac.to_lowercase()),
+            )
+        };
         out.push(golden::Config {
             disk: crate::iscsid::games::Config {
                 name: g.name.clone(),
                 iqn: iqn(st, &g.name),
                 path: path.to_string_lossy().into(),
-                update_ip: maint.and_then(|m| ip_of(st, m)),
-                update_mac: maint.map(|m| m.mac.to_lowercase()),
+                update_ip,
+                update_mac,
                 ram: g.ram,
                 reserve: crate::publish::ram_reserve(st),
             },
@@ -382,7 +392,7 @@ pub(crate) fn iso_iqn(st: &SharedState, iso: &str) -> String {
 }
 
 /// The golden's state in the daemon (None = not served).
-fn served(name: &str) -> Option<golden::Info> {
+pub(crate) fn served(name: &str) -> Option<golden::Info> {
     crate::iscsi::diskless_status()
         .unwrap_or_default()
         .into_iter()
@@ -399,6 +409,8 @@ fn blank(i: &golden::Info) -> bool {
 /// it boots diskless (the first is the default unless it maintains one). Blocking (asks the daemon).
 pub(crate) fn menu_entries(st: &SharedState, m: &Machine) -> Vec<MenuEntry> {
     let (mut maint, mut diskless): (Vec<MenuEntry>, Vec<MenuEntry>) = (Vec::new(), Vec::new());
+    // "Add hardware" waiting for this machine: Windows PE first (it is why the admin started the job).
+    maint.extend(crate::onboard::menu_entry(st, m));
     let all = st.db.machines().unwrap_or_default();
     for g in goldens(st) {
         let Some(info) = served(&g.name) else {
@@ -1144,6 +1156,15 @@ async fn delete(
     Json(b): Json<NameBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     find(&st, &b.name)?;
+    if crate::onboard::busy(&st, &b.name) {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "adding hardware to {} is in progress — cancel it first",
+                b.name
+            ),
+        ));
+    }
     let n = b.name.clone();
     tokio::task::spawn_blocking(move || idle(&n))
         .await
@@ -1161,6 +1182,7 @@ async fn delete(
         list.retain(|g| g.name != b.name);
         Ok(())
     })?;
+    crate::onboard::forget_golden(&st, &b.name);
     sync_now(st).await?;
     tokio::task::spawn_blocking(move || {
         for d in dirs {
@@ -1195,6 +1217,15 @@ async fn set_maint(
         Some(id) => Some(who(&machine_by_id(&st, id)?)),
         None => None,
     };
+    if crate::onboard::busy(&st, &b.name) {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "adding hardware to {} is in progress — wait for it or cancel it",
+                b.name
+            ),
+        ));
+    }
     edit(&st, |list| {
         let g = list
             .iter_mut()

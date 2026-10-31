@@ -196,10 +196,25 @@ PC down.
   `\EFI\BOOT\BOOTX64.EFI`: that one is shim's fallback, which adds a firmware boot entry and restarts every time.
 - **Windows goldens:** run `irm http://<server>/broom-diskless.ps1 | iex` on the golden (as Administrator) before
   the first Save: each machine then takes its own name (Devices page) on its first boot, kept as its base.
+- **Add hardware (Windows):** Windows booting from iSCSI only brings up a network card whose *device* it already
+  knows (its exact Plug and Play instance ID: bus + slot); a driver alone is not enough. For a PC with a card the
+  golden has never seen (a new board, or a card in another slot), pick the golden and that PC under *Add hardware*
+  and press Start. Its next network boot starts Windows PE (wimboot + the Windows PE of the golden's installer ISO;
+  Microsoft-signed, so it also works with *Secure Boot clients*), which reports its cards to Broom. Broom attaches the
+  golden's newest version to itself (iSCSI over 127.0.0.1), boots it in a small VM (QEMU/KVM, no network) where
+  `broom-onboard.ps1`, run by the golden's own startup task, creates each card's device with that instance ID and lets
+  Windows install the best driver from its driver store, marked as a network-boot driver; then Broom saves the golden's
+  next version and the PC restarts into it. Identical PCs need it once; a PC whose cards are all known finishes at
+  once. Needs on the server: `qemu-system-x86_64`, OVMF, `iscsiadm` (open-iscsi), `ntfs-3g` and `/dev/kvm` (nested
+  KVM, CPU type host, when Broom itself runs in a VM). The card needs a driver in Windows PE (to report) and in the
+  golden (to install). The Windows PE files come out of the ISO's ISO 9660 part; Microsoft's own ISOs keep them in UDF
+  only: copy `boot.wim`, `boot.sdi`, `bootmgr.efi` and the UEFI `BCD` into `<ISO place>/.winpe/<iso>/` then.
 
 Status: tested end to end on a VM client with Windows 11 24H2 and Ubuntu 26.04 goldens: installed from the library
 (the golden attached, the installer from the server), maintained, saved, then booted diskless: each machine's own name
-kept as its base, everything else gone at the next boot. Not tested yet: real PCs (their network card in Windows
+kept as its base, everything else gone at the next boot. Add hardware tested on VM clients: an e1000e in a PCI slot
+the golden had never seen and an RTL8139 (another driver) under Secure Boot hung at the Windows spinner before, booted
+after (Windows PE report → VM → new version in about 2 minutes). Not tested yet: real PCs (their network card in Windows
 Setup and in the iSCSI boot) and anti-cheat behind this chain.
 
 ## Groups, images, versions

@@ -16,6 +16,23 @@
       <tbody></tbody></table></div>
     <div id="dl_noip" class="small text-danger"></div>
   </div>
+  <div class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">Add hardware (network card)</h2>
+    <div class="small text-body-secondary mb-2">A Windows golden boots only on network cards it has seen. For a PC with a new card (or a new kind of PC): pick the golden and that PC, press <b>Start</b>, then let the PC boot from the network. It starts Windows PE, reports its card, and the server installs that card into the golden in a small VM, then saves the golden's next version (a few minutes). Identical PCs need it once. The golden needs broom-diskless.ps1 and no maintenance machine.</div>
+    <div class="d-flex flex-wrap gap-2 align-items-end" data-owner>
+      <div><label class="form-label small mb-1" for="ob_golden">Golden</label><select class="form-select form-select-sm" id="ob_golden"></select></div>
+      <div><label class="form-label small mb-1" for="ob_machine">PC with the new card</label><select class="form-select form-select-sm" id="ob_machine"></select></div>
+      <button class="btn btn-sm btn-primary" data-click="startOnboard">Start</button>
+      <button class="btn btn-sm btn-outline-secondary" data-click="cancelOnboard">Cancel</button>
+      <button class="btn btn-sm btn-outline-secondary" data-click="retryOnboard" title="run the server side again with the cards the PC already reported">Retry</button>
+      <span id="ob_msg" class="msg align-self-center"></span>
+    </div>
+    <div id="ob_missing" class="small text-danger mt-2"></div>
+    <div id="ob_job" class="mt-2"></div>
+    <div class="table-responsive mt-2"><table class="table table-sm table-hover align-middle" id="ob_hw">
+      <thead><tr><th>Golden</th><th>Network card</th><th>Device instance</th><th>Driver</th><th>In version</th><th>Added</th></tr></thead>
+      <tbody></tbody></table></div>
+  </div>
   <div class="card card-body mb-3" data-owner>
     <h2 class="h6 text-uppercase text-body-secondary mb-3">New golden / change one</h2>
     <div class="d-flex flex-wrap gap-2 align-items-end">

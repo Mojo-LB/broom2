@@ -42,6 +42,7 @@ assets!(
     "ipxe/snponly.efi",
     "ipxe/signed/snponly-shim.efi",
     "ipxe/signed/snponly.efi",
+    "ipxe/wimboot",
     "scripts/linux-iscsi-hook.sh",
     "scripts/linux-cache.sh",
     "scripts/prep-linux.sh",
@@ -55,6 +56,8 @@ assets!(
     "scripts/broom-stub.ps1",
     "scripts/broom-diskless.ps1",
     "scripts/broom-diskless.sh",
+    "scripts/broom-onboard.ps1",
+    "scripts/broom-report.exe",
     "scripts/broom-fw.cs",
     "scripts/broom-vnc.cs",
 );

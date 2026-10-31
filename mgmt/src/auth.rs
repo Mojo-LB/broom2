@@ -294,13 +294,18 @@ fn is_public(method: &axum::http::Method, path: &str) -> bool {
         "/broom-diskless.sh",
         "/api/diskless/client",
         "/api/diskless/client/base-done",
+        "/boot/onboard",
+        "/api/onboard/report",
+        "/api/onboard/state",
     ];
     // /boot/iso/, /boot/nocloud/: a golden's Ubuntu installer, answered to its maintenance machine only (diskless.rs).
+    // /boot/onboard/: "Add hardware" Windows PE files, answered to the job's machine with the job's token (onboard.rs).
     if OPEN.contains(&path)
         || path.starts_with("/tftp/")
         || path.starts_with("/api/auth/")
         || path.starts_with("/boot/iso/")
         || path.starts_with("/boot/nocloud/")
+        || path.starts_with("/boot/onboard/")
     {
         return true;
     }
