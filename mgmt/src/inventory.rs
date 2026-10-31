@@ -1,7 +1,8 @@
 // inventory.rs — each machine's hardware list (Machines page → Hardware; CSV for all): Windows, board + BIOS, CPU, RAM
 // sticks, graphics cards + driver, drives, network cards + link speed, monitors and the display modes each output
-// offers. The Remote agent (broom-vnc.cs, BuildInventory) sends it once its connection is up and every 30 minutes; kept
-// in the database per machine (config `inventory:<mac>`), so a machine that is off still shows what it was.
+// offers. The Remote agent (broom-vnc.cs, BuildInventory) sends it once its connection is up, 2 minutes later (the games
+// disks mounted by then) and every 30 minutes; kept in the database per machine (config `inventory:<mac>`), so a
+// machine that is off still shows what it was.
 use axum::{
     Json, Router,
     extract::{Query, State},

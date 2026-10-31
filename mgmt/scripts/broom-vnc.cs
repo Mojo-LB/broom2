@@ -229,12 +229,14 @@ public static class BroomVnc {
         }
       });
       // Hardware health pushed over this same connection (metrics.rs), whether or not anyone is watching; the hardware
-      // list (inventory.rs) once now and every 30 minutes.
+      // list (inventory.rs) now, again after 2 minutes (the games disks are mounted by then: broom-games.ps1 runs at
+      // start too) and every 30 minutes.
       var health = Task.Run(async () => {
         int n = 0;
         while (ws.State == WebSocketState.Open) {
           try { string j = BuildMetrics(); if (j != null) await SendText(ws, sendLock, j); } catch { }
-          if (n++ % 120 == 0) { try { await SendText(ws, sendLock, BuildInventory()); } catch { } }
+          if (n % 120 == 0 || n == 8) { try { await SendText(ws, sendLock, BuildInventory()); } catch { } }
+          n++;
           await Task.Delay(15000);
         }
       });
