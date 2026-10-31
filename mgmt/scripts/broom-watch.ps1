@@ -6,8 +6,8 @@
 # Thresholds: Settings -> SSD room (GET /api/client-config "<room> <warn> <reboot>" GB). Started once per boot by
 # broom-bootorder.ps1 as its own task (SYSTEM). ASCII only.
 # Diskless machines (no SSD, no BROOMWIN): broom-diskless.ps1 starts it with -Dir C:\ProgramData\Broom (agent files +
-# the machine's agent key, kept in its base layer) instead of -Vol: only the Remote agent and the boot time, no SSD
-# checks. -Prepare: build the agent's Temp copy, then stop (the first boot does it, so the base keeps it).
+# the machine's agent key, kept in its base layer) instead of -Vol: the Remote agent, the boot time and the games disks
+# (broom-games.ps1, at start and every 5 minutes, as broom-bootorder does on SSD machines), no SSD checks. -Prepare: build the agent's Temp copy, then stop (the first boot does it, so the base keeps it).
 param([string]$Srv, [string]$Vol, [string]$Dir, [switch]$Prepare)
 $ErrorActionPreference = 'SilentlyContinue'
 # Where the agent's files and key are: BROOMWIN's broom folder (SSD machines) or -Dir (diskless).
@@ -87,6 +87,16 @@ function StartAgent {
   try { Start-Process $agentExe -ArgumentList $Srv, $key -WindowStyle Hidden } catch { }
 }
 StartAgent
+# Diskless: the games disks (each its own copy on the server), at start and every 5 minutes (a disk added, its update
+# machine changed). Its own process: it waits for the server and the iSCSI logins.
+$gamesAt = [datetime]::MinValue
+function Games {
+  if ($ssd -or -not $Dir -or -not [IO.File]::Exists("$Dir\broom-games.ps1")) { return }
+  if (((Get-Date) - $gamesAt).TotalMinutes -lt 5) { return }
+  $script:gamesAt = Get-Date
+  try { Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$Dir\broom-games.ps1`" -Srv $Srv" -WindowStyle Hidden } catch { }
+}
+Games
 # Other disks hidden from the guest (Devices / Groups page; the stage leaves broom\hide-disks): every internal disk but
 # the Broom disk taken offline, again every 15 s (the guest is an admin and could bring one back). Offline is kept in
 # the registry, which resets with the session: turned off on the server, the disks are back after the next boot.
@@ -135,5 +145,6 @@ while ($true) {
   }
   StartAgent   # re-ensure the remote agent is up (guest killed it, or it crashed)
   HideDisks
+  Games
   Start-Sleep 15
 }

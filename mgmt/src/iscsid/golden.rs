@@ -12,6 +12,11 @@
 // kernel sees for it (ARP) — may log in to it. Its layers live in the golden's machine folder (on the writeback volume):
 //   <dir>/<mac>/base.ovl, base.blocks, base.gen      the base layer and the version it was built on
 //   <dir>/<mac>/session.ovl, session.blocks, session.gen
+//
+// Games disks for diskless machines (Config.games): the same per-machine target "<games disk iqn>.m<mac>" over a games
+// disk of the GAMES registry (games.rs) — its newest version when the machine PXE-boots, then the machine's session
+// layer (its own writes: a game's settings, saves, shader caches), dropped at its next PXE boot. No base layer. The
+// disk's update machine logs in to the disk itself ("<iqn>.g<k>", writable for it) as SSD machines do.
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -44,6 +49,14 @@ pub struct Config {
     /// The diskless machines that boot it.
     #[serde(default)]
     pub machines: Vec<Machine>,
+    /// A games disk (the GAMES registry, served by games.rs) for these diskless machines: session layer only.
+    #[serde(default)]
+    pub games: bool,
+}
+
+/// The family `c`'s disk lives in.
+fn reg(c: &Config) -> &'static Registry {
+    if c.games { &games::GAMES } else { &GOLDENS }
 }
 
 /// What `prepare` set up.
@@ -72,6 +85,9 @@ pub struct MachineInfo {
 pub struct Info {
     pub disk: games::Info,
     pub machines: Vec<MachineInfo>,
+    /// A games disk's diskless machines (Config.games), not a golden.
+    #[serde(default)]
+    pub games: bool,
 }
 
 /// A machine's open layers, shared by its sessions (reconnects).
@@ -85,6 +101,15 @@ struct Mach {
 static CFGS: Mutex<Vec<Config>> = Mutex::new(Vec::new());
 /// By (golden, mac).
 static MACHS: LazyLock<Mutex<HashMap<(String, String), Mach>>> = LazyLock::new(Default::default);
+
+/// MACHS key of disk `name`: games disks apart from goldens of the same name.
+fn key_name(name: &str, games: bool) -> String {
+    if games {
+        format!("games:{name}")
+    } else {
+        name.to_string()
+    }
+}
 
 /// "AA:BB:CC:DD:EE:FF" / "aa-bb-…" / "aabbccddeeff" → "aabbccddeeff". None = not a MAC.
 pub fn mac12(mac: &str) -> Option<String> {
@@ -136,12 +161,18 @@ fn target(iqn: &str) -> Option<(Config, String)> {
     })
 }
 
-fn config(name: &str) -> Result<Config, String> {
+fn config(name: &str, games: bool) -> Result<Config, String> {
     CFGS.lock()
         .iter()
-        .find(|c| c.disk.name == name)
+        .find(|c| c.disk.name == name && c.games == games)
         .cloned()
-        .ok_or_else(|| format!("golden {name} not served"))
+        .ok_or_else(|| {
+            if games {
+                format!("games disk {name} not served to diskless machines")
+            } else {
+                format!("golden {name} not served")
+            }
+        })
 }
 
 fn machine_dir(c: &Config, mac: &str) -> PathBuf {
@@ -164,7 +195,7 @@ pub fn set(cfgs: Vec<Config>) -> Result<(), String> {
     MACHS.lock().retain(|(g, mac), m| {
         m.users > 0
             || cfgs.iter().any(|c| {
-                &c.disk.name == g
+                &key_name(&c.disk.name, c.games) == g
                     && c.machines
                         .iter()
                         .any(|x| mac12(&x.mac).as_deref() == Some(mac.as_str()))
@@ -173,7 +204,12 @@ pub fn set(cfgs: Vec<Config>) -> Result<(), String> {
     if let Some(p) = cfg_file() {
         let _ = std::fs::write(p, serde_json::to_vec(&cfgs).unwrap());
     }
-    GOLDENS.set(cfgs.into_iter().map(|c| c.disk).collect())
+    GOLDENS.set(
+        cfgs.into_iter()
+            .filter(|c| !c.games)
+            .map(|c| c.disk)
+            .collect(),
+    )
 }
 
 /// At daemon start: the configs of the previous run.
@@ -194,13 +230,28 @@ pub fn owns(iqn: &str) -> bool {
     target(iqn).is_some()
 }
 
+/// The targets of the games-disk copies of the diskless machine at `peer` (SendTargets discovery lists them to it).
+pub fn games_iqns_for(peer: &str) -> Vec<String> {
+    CFGS.lock()
+        .iter()
+        .filter(|c| c.games)
+        .flat_map(|c| {
+            c.machines
+                .iter()
+                .filter(|m| m.ip == peer)
+                .filter_map(|m| machine_iqn(&c.disk.iqn, &m.mac))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 /// The golden's file, for a machine's target.
 pub fn lun(iqn: &str) -> Option<Arc<Lun>> {
     let (c, _) = target(iqn)?;
-    GOLDENS.lun(&format!(
+    reg(&c).lun(&format!(
         "{}.g{}",
         c.disk.iqn,
-        GOLDENS.newest(&c.disk.name)?
+        reg(&c).newest(&c.disk.name)?
     ))
 }
 
@@ -233,16 +284,18 @@ pub fn attach(iqn: &str, peer: &str) -> Result<View, String> {
     let dir = machine_dir(&c, &mac);
     let (s_ovl, s_list, s_gen) = files(&dir, "session");
     let ver = read_gen(&s_gen).ok_or("not prepared for a boot — PXE boot it")?;
-    let below = GOLDENS
+    let below = reg(&c)
         .count(&c.disk.name, ver)
-        .ok_or("its golden version is no longer served — PXE boot it again")?;
+        .ok_or("its disk version is no longer served — PXE boot it again")?;
     let size = below.lun.size;
     let r = (|| -> Result<View, String> {
         let mut layers = below.layers;
         let mut all = MACHS.lock();
-        let st = all.entry((c.disk.name.clone(), mac.clone())).or_default();
+        let st = all
+            .entry((key_name(&c.disk.name, c.games), mac.clone()))
+            .or_default();
         let (b_ovl, b_list, b_gen) = files(&dir, "base");
-        if st.base.is_none() && read_gen(&b_gen) == Some(ver) && b_ovl.exists() {
+        if !c.games && st.base.is_none() && read_gen(&b_gen) == Some(ver) && b_ovl.exists() {
             st.base = Some(Arc::new(Overlay::open(&b_ovl, &b_list, size)?));
         }
         if let Some(b) = &st.base {
@@ -257,21 +310,25 @@ pub fn attach(iqn: &str, peer: &str) -> Result<View, String> {
             ver,
             layers,
             ov: st.session.clone(),
-            reg: &GOLDENS,
+            reg: reg(&c),
             machine: Some(mac.clone()),
         })
     })();
+    let what = if c.games { "games disk" } else { "golden" };
     match &r {
-        Ok(_) => tracing::info!("golden {}: machine {mac} ({peer}) on g{ver}", c.disk.name),
-        Err(_) => GOLDENS.uncount(&c.disk.name, ver),
+        Ok(_) => tracing::info!("{what} {}: machine {mac} ({peer}) on g{ver}", c.disk.name),
+        Err(_) => reg(&c).uncount(&c.disk.name, ver),
     }
     r
 }
 
 pub fn detach(v: &View) {
-    GOLDENS.uncount(&v.disk, v.ver);
+    v.reg.uncount(&v.disk, v.ver);
     let Some(mac) = &v.machine else { return };
-    if let Some(st) = MACHS.lock().get_mut(&(v.disk.clone(), mac.clone())) {
+    if let Some(st) = MACHS.lock().get_mut(&(
+        key_name(&v.disk, std::ptr::eq(v.reg, &games::GAMES)),
+        mac.clone(),
+    )) {
         st.users = st.users.saturating_sub(1);
     }
     // Outside the lock: an fsync.
@@ -286,8 +343,20 @@ pub fn detach(v: &View) {
 /// first). Its session layer is dropped — or, `promote`, becomes its base layer (the first boot's setup is done) when
 /// it was on the version served now. Its base layer is dropped with `drop_base` (new name, new licence…) or when it
 /// was built on another version. Then the new session reads the newest version.
-pub fn prepare(name: &str, mac: &str, promote: bool, drop_base: bool) -> Result<Prepared, String> {
-    let c = config(name)?;
+pub fn prepare(
+    name: &str,
+    mac: &str,
+    promote: bool,
+    drop_base: bool,
+    games: bool,
+) -> Result<Prepared, String> {
+    let c = config(name, games)?;
+    // A games disk keeps no base layer.
+    let (promote, drop_base) = if games {
+        (false, true)
+    } else {
+        (promote, drop_base)
+    };
     let mac = mac12(mac).ok_or_else(|| format!("bad MAC {mac}"))?;
     if !c
         .machines
@@ -296,10 +365,10 @@ pub fn prepare(name: &str, mac: &str, promote: bool, drop_base: bool) -> Result<
     {
         return Err(format!("machine {mac} does not boot golden {name}"));
     }
-    let ver = GOLDENS
+    let ver = reg(&c)
         .newest(name)
-        .ok_or_else(|| format!("golden {name} not served"))?;
-    let key = (name.to_string(), mac.clone());
+        .ok_or_else(|| format!("{name} not served"))?;
+    let key = (key_name(name, games), mac.clone());
     let old = {
         let mut all = MACHS.lock();
         if all.get(&key).is_some_and(|m| m.users > 0) {
@@ -345,12 +414,12 @@ pub fn prepare(name: &str, mac: &str, promote: bool, drop_base: bool) -> Result<
 }
 
 /// Delete machine `mac`'s layers of golden `name` (it is no longer diskless, or forgotten). It must be off.
-pub fn forget(name: &str, mac: &str) -> Result<(), String> {
-    let c = config(name)?;
+pub fn forget(name: &str, mac: &str, games: bool) -> Result<(), String> {
+    let c = config(name, games)?;
     let mac = mac12(mac).ok_or_else(|| format!("bad MAC {mac}"))?;
     {
         let mut all = MACHS.lock();
-        let key = (name.to_string(), mac.clone());
+        let key = (key_name(name, games), mac.clone());
         if all.get(&key).is_some_and(|m| m.users > 0) {
             return Err(format!(
                 "machine {mac} is still connected — shut it down first"
@@ -369,11 +438,13 @@ pub fn forget(name: &str, mac: &str) -> Result<(), String> {
 
 pub fn info() -> Vec<Info> {
     let disks = GOLDENS.info();
+    let gdisks = games::GAMES.info();
     let cfgs = CFGS.lock().clone();
     let all = MACHS.lock();
     cfgs.iter()
         .map(|c| Info {
-            disk: disks
+            games: c.games,
+            disk: (if c.games { &gdisks } else { &disks })
                 .iter()
                 .find(|d| d.name == c.disk.name)
                 .cloned()
@@ -384,7 +455,7 @@ pub fn info() -> Vec<Info> {
                 .filter_map(|m| {
                     let mac = mac12(&m.mac)?;
                     let dir = machine_dir(c, &mac);
-                    let st = all.get(&(c.disk.name.clone(), mac.clone()));
+                    let st = all.get(&(key_name(&c.disk.name, c.games), mac.clone()));
                     let (_, b_list, b_gen) = files(&dir, "base");
                     let (_, s_list, s_gen) = files(&dir, "session");
                     Some(MachineInfo {

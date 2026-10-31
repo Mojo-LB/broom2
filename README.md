@@ -203,6 +203,13 @@ PC down.
   start the golden's copy runs the server's current version of the script, so a newer Broom reaches every machine
   without a new golden version. A golden set up before that: **Update script** (Diskless page) writes the current
   script into it as its next version, without booting it.
+- **Games disks on diskless machines:** a diskless Windows machine has no SSD for its writes, so each one gets its own
+  copy of every games disk of its group on the server (target `<disk iqn>.m<mac>`: the disk's newest version + the
+  machine's own layer in `<writeback>/.games-<disk>/<mac>/`, dropped at its next PXE boot — like SENET's per-boot
+  shadow copy or ggRock's per-PC writeback). `broom-games.ps1` (run by `broom-watch.ps1 -Dir` at start and every 5
+  minutes) logs in to it and attaches its `games.vhdx` writable as the disk's letter. The disk's update machine (a
+  diskless one too) gets the disk itself, writable, as on SSD machines; Save makes the next version, which every
+  machine's copy reads from its next boot.
 - **Remote on diskless machines:** the first boot of each golden version also gets the machine its Remote agent key
   (handed out only on that boot) and the agent's files (`C:\ProgramData\Broom`, SYSTEM and Administrators only), kept
   in its base; every later boot starts the agent (`broom-watch.ps1 -Dir`, its own task), so remote screen, Wake and

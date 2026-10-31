@@ -9,7 +9,8 @@
 #    gets its Remote agent key (agentauth.rs) and the agent's files into C:\ProgramData\Broom, tells the server the
 #    setup is done (POST /api/diskless/client/base-done) and restarts at once - that boot is kept as the machine's base
 #    layer; every later boot starts from it, everything else is wiped at each boot.
-#  - a diskless machine on a later boot: starts the Remote agent (broom-watch.ps1 -Dir, its own task).
+#  - a diskless machine on a later boot: starts the Remote agent and mounts its games disks (broom-watch.ps1 -Dir, its
+#    own task; broom-games.ps1 at start and every 5 minutes).
 #  - the maintenance machine: nothing - what it writes goes into the golden every machine shares (no key, no agent).
 #  - anything else (the server unreachable): nothing.
 # ASCII only. Logs to C:\Windows\Temp\broom-diskless.log (in the session layer: gone at the next boot).
@@ -80,7 +81,8 @@ if ($info.role -eq 'maintenance') {
 }
 if ($info.role -ne 'diskless') { exit }
 
-# The agent's files (broom-watch.ps1, broom-vnc.cs or the release's broom-vnc.exe) from the server's script folder,
+# The agent's files (broom-watch.ps1, broom-games.ps1, broom-vnc.cs or the release's broom-vnc.exe) from the server's
+# script folder,
 # each checked against its scripts.sha256; unchanged ones stay. The folder: SYSTEM + Administrators only (the key).
 function AgentFiles {
   New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -90,7 +92,7 @@ function AgentFiles {
     $p = $l.Trim() -split '\s+'
     if ($p.Count -eq 2 -and $p[0] -match '^[0-9a-f]{64}$') { $sums[$p[1]] = $p[0] }
   }
-  foreach ($f in 'broom-watch.ps1', 'broom-vnc.cs', 'broom-vnc.exe') {
+  foreach ($f in 'broom-watch.ps1', 'broom-games.ps1', 'broom-vnc.cs', 'broom-vnc.exe') {
     $p = "$dir\$f"
     if (-not $sums.ContainsKey($f)) {
       if (Test-Path $p) { Remove-Item -LiteralPath $p -Force }   # not in this release (a local build has no exe)

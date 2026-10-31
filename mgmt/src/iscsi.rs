@@ -130,6 +130,23 @@ pub fn diskless_prepare(
         mac: mac.into(),
         promote,
         drop_base,
+        games: false,
+    })
+    .and_then(|r| r.prepared.ok_or_else(|| "daemon of an older build".into()))
+}
+
+/// Diskless machine `mac` is about to boot: its own copy of games disk `name` reads the newest version again, its
+/// writes of the last boot dropped.
+pub fn diskless_games_prepare(
+    name: &str,
+    mac: &str,
+) -> Result<crate::iscsid::golden::Prepared, String> {
+    call(&Req::DisklessPrepare {
+        name: name.into(),
+        mac: mac.into(),
+        promote: false,
+        drop_base: true,
+        games: true,
     })
     .and_then(|r| r.prepared.ok_or_else(|| "daemon of an older build".into()))
 }
@@ -139,6 +156,17 @@ pub fn diskless_forget(name: &str, mac: &str) -> Result<(), String> {
     call(&Req::DisklessForget {
         name: name.into(),
         mac: mac.into(),
+        games: false,
+    })
+    .map(|_| ())
+}
+
+/// Delete machine `mac`'s own copy (its layer) of games disk `name`.
+pub fn diskless_games_forget(name: &str, mac: &str) -> Result<(), String> {
+    call(&Req::DisklessForget {
+        name: name.into(),
+        mac: mac.into(),
+        games: true,
     })
     .map(|_| ())
 }

@@ -1,5 +1,8 @@
 # Games disks (Images page) as drive letters: the server says which ones this machine gets (its group), one line each
-# "<name> <iqn> <letter> <1 = this machine is that disk's update machine>". Each comes over iSCSI READ-ONLY and holds
+# "<name> <iqn> <letter> <mode>": mode 1 = this machine is that disk's update machine, 0 = a machine with an SSD,
+# 2 = a diskless machine: the iqn is its own copy of the disk on the server (writable, its writes dropped at its next
+# PXE boot), whose games.vhdx it attaches directly (no SSD for a differencing disk). Diskless machines run this from
+# broom-watch.ps1 -Dir. Each comes over iSCSI READ-ONLY and holds
 # games.vhdx; this machine opens it through a differencing VHDX on its SSD (BROOMWIN broom\games-<name>-child.vhdx,
 # deleted by the stage every boot), so a guest's writes stay on this machine until the next boot and the games disk
 # never changes. A disk's update machine gets it writable and attaches games.vhdx itself: the server keeps those
@@ -60,12 +63,13 @@ function SetLetter($vd, $L) {
   if ($q.DriveLetter -ne [char]$L) { Set-Partition -DiskNumber $vd.Number -PartitionNumber $q.PartitionNumber -NewDriveLetter $L }
 }
 
-function GamesDisk($name, $iqn, $L, $upd) {
+function GamesDisk($name, $iqn, $L, $mode) {
+  $upd = $mode -eq '1'; $own = $mode -eq '2'
   $store = "$env:ProgramData\broom\games\$name"
   $vhd = "$store\games.vhdx"
   $ssd = "$env:ProgramData\broom\ssd"
   $child = "$ssd\broom\games-$name-child.vhdx"
-  if (Ready ($(if ($upd) { $vhd } else { $child })) $L) { return }
+  if (Ready ($(if ($upd -or $own) { $vhd } else { $child })) $L) { return }
 
   # 1. Its iSCSI session (not persistent: made again every boot).
   if (-not (Get-IscsiTargetPortal | Where-Object TargetPortalAddress -eq $Srv)) { New-IscsiTargetPortal -TargetPortalAddress $Srv | Out-Null }
@@ -79,7 +83,7 @@ function GamesDisk($name, $iqn, $L, $upd) {
   }
   if (-not $disk) { throw 'the disk did not show up' }
   if ($disk.IsOffline) { Set-Disk -Number $disk.Number -IsOffline $false }   # SAN policy: new shared disks offline
-  if ($upd -and $disk.IsReadOnly) { Set-Disk -Number $disk.Number -IsReadOnly $false }
+  if (($upd -or $own) -and $disk.IsReadOnly) { Set-Disk -Number $disk.Number -IsReadOnly $false }
   $disk = Get-Disk -Number $disk.Number
 
   if ($upd) {
@@ -102,6 +106,17 @@ function GamesDisk($name, $iqn, $L, $upd) {
     $null = Grow (BasicPart $vd.Number)
     SetLetter $vd $L
     Log "$name - UPDATE mode: writable as ${L}: - shut down properly when done, then Save on the server"
+  } elseif ($own) {
+    # 2c. A diskless machine: its own copy of the disk (the server keeps its writes until its next PXE boot), so
+    # games.vhdx is attached as it is, writable - never formatted or grown here (that is the update machine's job).
+    $p = BasicPart $disk.Number
+    if (-not $p) { throw 'the disk is empty: set it up from its update machine first' }
+    MountAt $p $store
+    Hide $p $false
+    if (-not (Test-Path $vhd)) { throw 'no games.vhdx on the disk yet: set it up from its update machine first' }
+    if (-not (Get-DiskImage -ImagePath $vhd).Attached) { DP "select vdisk file=`"$vhd`"", 'attach vdisk' }
+    SetLetter (Get-DiskImage -ImagePath $vhd | Get-Disk) $L
+    Log "$name - diskless: its own copy as ${L}: (writes dropped at the next PXE boot)"
   } else {
     # 2b. Every other machine: games.vhdx read-only under this boot's differencing disk on the SSD (BROOMWIN: C: is
     # a VHDX itself, another VHDX cannot live in it).
@@ -125,7 +140,7 @@ function GamesDisk($name, $iqn, $L, $upd) {
 function Up($name, $L) {
   try { $d = New-Object IO.DriveInfo "${L}:"; $d.IsReady -and $d.VolumeLabel -eq $name.ToUpper() } catch { $false }
 }
-$re = '^([a-z0-9-]+) (\S+) ([D-Z]) ([01])\s*$'
+$re = '^([a-z0-9-]+) (\S+) ([D-Z]) ([012])\s*$'
 # Every disk already up (the 5-minute runs, nearly always) -> nothing to do.
 $lines = @($list -split "`n" | Where-Object { $_ -match $re -and -not (Up $Matches[1] $Matches[3]) })
 if ($lines.Count -eq 0) { exit }
@@ -137,5 +152,5 @@ try {
 foreach ($l in $lines) {
   $null = $l -match $re
   $name = $Matches[1]
-  try { GamesDisk $name $Matches[2] $Matches[3] ($Matches[4] -eq '1') } catch { Log "$name - $($_.Exception.Message)" }
+  try { GamesDisk $name $Matches[2] $Matches[3] $Matches[4] } catch { Log "$name - $($_.Exception.Message)" }
 }

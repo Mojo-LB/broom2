@@ -94,6 +94,7 @@ fn machine_layers_lifecycle() {
             mac: mac.into(),
             ip: pc.into(),
         }],
+        games: false,
     };
     set(vec![cfg.clone()]).unwrap();
     let t = machine_iqn("iqn.test:golden-w11", mac).unwrap();
@@ -107,7 +108,7 @@ fn machine_layers_lifecycle() {
 
     // Not prepared yet → refused; wrong IP → refused.
     assert!(attach(&t, pc).is_err(), "not prepared");
-    let p = prepare("w11", mac, false, false).unwrap();
+    let p = prepare("w11", mac, false, false, false).unwrap();
     assert_eq!(
         p,
         Prepared {
@@ -121,11 +122,14 @@ fn machine_layers_lifecycle() {
     let v = attach(&t, pc).unwrap();
     assert_eq!(read(&v, &lun, 0, 4), [1, 1, 1, 1]);
     write(&v, &lun, 4096, b"name=PC11");
-    assert!(prepare("w11", mac, true, false).is_err(), "still connected");
+    assert!(
+        prepare("w11", mac, true, false, false).is_err(),
+        "still connected"
+    );
     detach(&v);
 
     // Promoted: the setup is the base now; a normal boot's writes land in the session.
-    let p = prepare("w11", mac, true, false).unwrap();
+    let p = prepare("w11", mac, true, false, false).unwrap();
     assert_eq!(
         p,
         Prepared {
@@ -144,7 +148,7 @@ fn machine_layers_lifecycle() {
     assert!(i[0].machines[0].session_bytes > 0);
 
     // Next boot: the session is gone, the base stays.
-    assert!(!prepare("w11", mac, false, false).unwrap().first);
+    assert!(!prepare("w11", mac, false, false, false).unwrap().first);
     let v = attach(&t, pc).unwrap();
     assert_eq!(&read(&v, &lun, 4096, 9), b"name=PC11");
     assert_eq!(read(&v, &lun, 8192, 8), [1u8; 8]);
@@ -165,7 +169,7 @@ fn machine_layers_lifecycle() {
     assert!(GOLDENS.save("w11").unwrap().starts_with("version g1 ready"));
 
     // A new version: the base (built on g0) is dropped, the machine sets itself up again on g1.
-    let p = prepare("w11", mac, true, false).unwrap();
+    let p = prepare("w11", mac, true, false, false).unwrap();
     assert_eq!(
         p,
         Prepared {
@@ -178,12 +182,12 @@ fn machine_layers_lifecycle() {
     assert_eq!(read(&v, &lun, 4096, 4), [1u8; 4], "old base gone");
     write(&v, &lun, 4096, b"name=PC11");
     detach(&v);
-    assert!(!prepare("w11", mac, true, false).unwrap().first);
+    assert!(!prepare("w11", mac, true, false, false).unwrap().first);
     // drop_base (renamed / new licence): set up again.
-    assert!(prepare("w11", mac, false, true).unwrap().first);
+    assert!(prepare("w11", mac, false, true, false).unwrap().first);
 
     // Forget: its folder is gone; it is no longer served once unlisted.
-    forget("w11", mac).unwrap();
+    forget("w11", mac, false).unwrap();
     assert!(!d.join("wb/020000000011").exists());
     set(vec![Config {
         machines: vec![],
@@ -192,5 +196,101 @@ fn machine_layers_lifecycle() {
     .unwrap();
     assert!(!owns(&t));
     set(Vec::new()).unwrap();
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A games disk for diskless machines (Config.games): each machine its own writable copy of the disk's newest version,
+/// no base layer (even when asked to promote), its writes gone at its next boot; an update saved by the disk's update
+/// machine reaches the copy at the machine's next boot. A golden of the same name is another disk.
+#[test]
+fn games_disk_copy_per_machine() {
+    let _one = TEST_LOCK.blocking_lock();
+    let d = std::env::temp_dir().join("broom_test_golden_games");
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("g")).unwrap();
+    let img = d.join("g/games.img");
+    std::fs::write(&img, vec![5u8; 1 << 20]).unwrap();
+    let (pc, upd) = ("10.9.1.11", "10.9.1.99");
+    let mac = "02:00:00:00:01:11";
+    crate::iscsid::TEST_ARP.lock().insert(pc.into(), mac.into());
+    crate::iscsid::TEST_ARP
+        .lock()
+        .insert(upd.into(), "02:00:00:00:01:99".into());
+    let disk = games::Config {
+        name: "g1".into(),
+        iqn: "iqn.test:games-g1".into(),
+        path: img.to_string_lossy().into(),
+        update_ip: Some(upd.into()),
+        update_mac: Some("02:00:00:00:01:99".into()),
+        ..Default::default()
+    };
+    games::set(vec![disk.clone()]).unwrap();
+    set(vec![Config {
+        disk,
+        dir: d.join("wb").to_string_lossy().into(),
+        machines: vec![Machine {
+            mac: mac.into(),
+            ip: pc.into(),
+        }],
+        games: true,
+    }])
+    .unwrap();
+    let t = machine_iqn("iqn.test:games-g1", mac).unwrap();
+    assert!(owns(&t));
+    assert!(!games::GAMES.owns(&t), "the disk's own targets are .g<k>");
+    assert_eq!(
+        games_iqns_for(pc),
+        vec![t.clone()],
+        "discovery lists its copy to it"
+    );
+    assert!(games_iqns_for("10.9.1.12").is_empty(), "and to no one else");
+    assert!(
+        prepare("g1", mac, false, false, false).is_err(),
+        "no golden of that name"
+    );
+    assert_eq!(
+        prepare("g1", mac, true, false, true).unwrap(),
+        Prepared {
+            ver: 0,
+            first: true
+        }
+    );
+    let lun = lun(&t).unwrap();
+    let v = attach(&t, pc).unwrap();
+    assert!(v.ov.is_some(), "its own copy is writable");
+    assert_eq!(read(&v, &lun, 0, 4), [5u8; 4]);
+    write(&v, &lun, 4096, b"settings");
+    assert_eq!(&read(&v, &lun, 4096, 8), b"settings");
+    assert!(attach(&t, "10.9.1.12").is_err(), "another IP");
+    detach(&v);
+
+    // Next boot, even asked to promote: its writes are gone, no base.
+    assert!(prepare("g1", mac, true, false, true).unwrap().first);
+    let v = attach(&t, pc).unwrap();
+    assert_eq!(read(&v, &lun, 4096, 8), [5u8; 8]);
+    detach(&v);
+    assert!(info()[0].games);
+    assert_eq!(info()[0].machines[0].base_ver, None);
+
+    // The update machine saves a new version: the copy reads it after the next boot.
+    let u = games::GAMES.attach("iqn.test:games-g1.g0", upd).unwrap();
+    assert!(u.ov.is_some());
+    write(&u, &lun, 0, b"PATCH");
+    games::GAMES.detach(&u);
+    assert!(
+        games::GAMES
+            .save("g1")
+            .unwrap()
+            .starts_with("version g1 ready")
+    );
+    assert_eq!(prepare("g1", mac, false, false, true).unwrap().ver, 1);
+    let v = attach(&t, pc).unwrap();
+    assert_eq!(&read(&v, &lun, 0, 5), b"PATCH");
+    detach(&v);
+
+    forget("g1", mac, true).unwrap();
+    assert!(!d.join("wb/020000000111").exists());
+    set(Vec::new()).unwrap();
+    games::set(Vec::new()).unwrap();
     let _ = std::fs::remove_dir_all(&d);
 }

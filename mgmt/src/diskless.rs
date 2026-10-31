@@ -248,9 +248,51 @@ fn configs(st: &SharedState) -> Result<Vec<golden::Config>, String> {
                     ip: m.ip.clone().unwrap_or_default(),
                 })
                 .collect(),
+            games: false,
+        });
+    }
+    // Games disks for the diskless Windows machines: each its own copy (golden.rs Config.games), its writes kept on
+    // the server until its next PXE boot. Their layers: <writeback>/.games-<disk>/<mac>/.
+    let dl = diskless_windows_machines(st, &all);
+    for (c, groups) in crate::games::with_groups(st) {
+        let machines: Vec<golden::Machine> = dl
+            .iter()
+            .filter(|m| for_group(&groups, m.grp.as_deref()))
+            .map(|m| golden::Machine {
+                mac: m.mac.clone(),
+                ip: m.ip.clone().unwrap_or_default(),
+            })
+            .collect();
+        if machines.is_empty() {
+            continue;
+        }
+        out.push(golden::Config {
+            dir: wb
+                .join(format!(".games-{}", c.name))
+                .to_string_lossy()
+                .into(),
+            disk: c,
+            machines,
+            games: true,
         });
     }
     Ok(out)
+}
+
+/// The machines that boot a Windows golden diskless (each once).
+pub(crate) fn diskless_windows_machines<'a>(
+    st: &SharedState,
+    all: &'a [Machine],
+) -> Vec<&'a Machine> {
+    let mut out: Vec<&Machine> = Vec::new();
+    for g in goldens(st).iter().filter(|g| g.os == "windows") {
+        for m in machines_of(g, all) {
+            if !out.iter().any(|x| x.id == m.id) {
+                out.push(m);
+            }
+        }
+    }
+    out
 }
 
 /// Why the goldens are not served (last sync); None = fine.
@@ -309,6 +351,9 @@ pub(crate) fn forget_machine(st: &SharedState, m: &Machine) {
     });
     if all.is_empty() {
         return;
+    }
+    for (c, _) in crate::games::with_groups(st) {
+        let _ = crate::iscsi::diskless_games_forget(&c.name, &m.mac);
     }
     let _ = sync(st);
     for g in &all {
@@ -403,7 +448,18 @@ pub(crate) fn served(name: &str) -> Option<golden::Info> {
     crate::iscsi::diskless_status()
         .unwrap_or_default()
         .into_iter()
-        .find(|i| i.disk.name == name)
+        .find(|i| !i.games && i.disk.name == name)
+}
+
+/// Machine `mac`'s own copy of games disk `name` as the daemon serves it (None = not served to it).
+pub(crate) fn games_served(name: &str, mac: &str) -> Option<golden::MachineInfo> {
+    let mac = golden::mac12(mac)?;
+    crate::iscsi::diskless_status()?
+        .into_iter()
+        .find(|i| i.games && i.disk.name == name)?
+        .machines
+        .into_iter()
+        .find(|m| m.mac == mac)
 }
 
 /// Nothing written to it yet: no version saved, no maintenance work — a blank disk to install onto.
@@ -599,6 +655,30 @@ fn boot_script(body: &str, what: &str) -> String {
     )
 }
 
+/// Diskless machine `m` is booting: its copy of every games disk of its group starts over from the disk's newest
+/// version. A failure leaves that disk off this boot (logged). Blocking.
+fn prepare_games(st: &SharedState, m: &Machine) {
+    for (c, groups) in crate::games::with_groups(st) {
+        if !for_group(&groups, m.grp.as_deref()) {
+            continue;
+        }
+        let mut r = Err(String::new());
+        for i in 0..30 {
+            r = crate::iscsi::diskless_games_prepare(&c.name, &m.mac);
+            match &r {
+                Err(e) if e.contains("still connected") && i < 29 => {
+                    std::thread::sleep(std::time::Duration::from_millis(200))
+                }
+                _ => break,
+            }
+        }
+        match r {
+            Ok(p) => tracing::info!("games disk {}: {}'s own copy on g{}", c.name, who(m), p.ver),
+            Err(e) => tracing::warn!("games disk {}: {}'s copy not prepared: {e}", c.name, who(m)),
+        }
+    }
+}
+
 /// Machine `m` boots golden `name` diskless: its earlier sessions closed, its session layer reset (its base kept while
 /// the golden version stays), then iPXE boots its own target (the iBFT tells Windows / Linux where its disk is).
 /// Blocking.
@@ -655,6 +735,10 @@ pub(crate) fn boot_diskless(
         }
     }
     let p = p.ok_or("still connected")?;
+    // Its own copy of each games disk it gets (Windows): the newest version again, last boot's writes dropped.
+    if g.os == "windows" {
+        prepare_games(st, m);
+    }
     if bs.pending.is_some() || drop_base {
         // Promoted (or not: an older version's setup) — either way that report is used up; a dropped base starts over.
         let keep = BaseState {

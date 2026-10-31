@@ -104,21 +104,33 @@ fn ip_of(st: &SharedState, id: i64) -> Option<String> {
 }
 
 fn configs(st: &SharedState) -> Vec<Config> {
+    with_groups(st).into_iter().map(|(c, _)| c).collect()
+}
+
+/// The disks served, each with the groups that get it (no group = every machine): diskless.rs gives each diskless
+/// machine of those groups its own copy (golden.rs Config.games).
+pub(crate) fn with_groups(st: &SharedState) -> Vec<(Config, Vec<String>)> {
     let base = st.db.get_config("iqn_base", "iqn.2026-01.local.broom");
     disks(st)
         .into_iter()
         .filter(|d| img(&d.name).exists())
-        .map(|d| Config {
-            iqn: format!("{base}:games-{}", d.name),
-            path: img(&d.name).to_string_lossy().into(),
-            update_ip: d.update.and_then(|id| ip_of(st, id)),
-            update_mac: d
-                .update
-                .and_then(|id| machine_by_id(st, id).ok())
-                .map(|m| m.mac.to_lowercase()),
-            ram: d.ram,
-            reserve: crate::publish::ram_reserve(st),
-            name: d.name,
+        .map(|d| (d.groups.clone(), d))
+        .map(|(groups, d)| {
+            (
+                Config {
+                    iqn: format!("{base}:games-{}", d.name),
+                    path: img(&d.name).to_string_lossy().into(),
+                    update_ip: d.update.and_then(|id| ip_of(st, id)),
+                    update_mac: d
+                        .update
+                        .and_then(|id| machine_by_id(st, id).ok())
+                        .map(|m| m.mac.to_lowercase()),
+                    ram: d.ram,
+                    reserve: crate::publish::ram_reserve(st),
+                    name: d.name,
+                },
+                groups,
+            )
         })
         .collect()
 }
@@ -143,6 +155,10 @@ pub fn sync_except(st: &SharedState, skip: Option<&str>) -> Result<(), String> {
     } else {
         crate::iscsi::games_set(list)
     };
+    // The diskless machines' own copies follow the disks (added, deleted, their groups).
+    if r.is_ok() {
+        let _ = crate::diskless::sync(st);
+    }
     let mut last = LAST_ERR.lock();
     match &r {
         Err(e) if last.as_deref() != Some(e.as_str()) => {
@@ -525,7 +541,8 @@ async fn for_client(
     else {
         return String::new();
     };
-    let grp = machine_at(&st, &ip).and_then(|m| m.grp);
+    let me = machine_at(&st, &ip);
+    let grp = me.as_ref().and_then(|m| m.grp.clone());
     let cfgs = configs(&st);
     let mut out = String::new();
     for d in disks(&st)
@@ -539,10 +556,23 @@ async fn for_client(
             continue;
         };
         let upd = c.update_ip.as_deref() == Some(ip.as_str());
-        out.push_str(&format!(
-            "{} {}.g{} {} {}\n",
-            d.name, c.iqn, i.ver, d.letter, upd as u8
-        ));
+        // A diskless machine (no SSD for its writes): its own copy of the disk on the server, writable (mode 2). Its
+        // update machine gets the disk itself (mode 1), as on an SSD machine.
+        let own = (!upd)
+            .then(|| {
+                let m = me.as_ref()?;
+                let x = crate::diskless::games_served(&d.name, &m.mac)?;
+                x.session_ver?;
+                crate::iscsid::golden::machine_iqn(&c.iqn, &m.mac)
+            })
+            .flatten();
+        match own {
+            Some(t) => out.push_str(&format!("{} {t} {} 2\n", d.name, d.letter)),
+            None => out.push_str(&format!(
+                "{} {}.g{} {} {}\n",
+                d.name, c.iqn, i.ver, d.letter, upd as u8
+            )),
+        }
     }
     out
 }

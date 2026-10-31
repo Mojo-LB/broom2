@@ -168,9 +168,9 @@ pub async fn writer(w: impl AsyncWrite + Unpin, mut rx: mpsc::Receiver<Out>, exp
 }
 
 type Sessions = HashMap<(String, [u8; 6]), (Arc<Notify>, String)>;
-/// Logged-in sessions by (initiator name, ISID), with the client's IP: a new login with the same ones replaces the old
-/// session (the initiator lost it, e.g. a network blip) — the old connection is told to close instead of waiting for
-/// TCP to time out.
+/// Logged-in sessions by (initiator name + target name, ISID), with the client's IP: a new login with the same ones
+/// replaces the old session (the initiator lost it, e.g. a network blip) — the old connection is told to close instead
+/// of waiting for TCP to time out.
 static ACTIVE: LazyLock<Mutex<Sessions>> = LazyLock::new(Default::default);
 
 /// Close every session of client `ip` (mgmt knows that machine is off: Windows powers off without logging out, and
@@ -357,7 +357,10 @@ async fn login(
                 games,
                 their_mrdsl,
                 burst,
-                key: (name, isid),
+                // The I_T nexus: the same initiator + ISID on ANOTHER target is another session. A Windows machine
+                // booted from iSCSI (iBFT) logs in to its games disks with the boot session's initiator name and ISID:
+                // keyed on those alone, each login replaced the other's session, over and over.
+                key: (format!("{name}\n{}", target.as_deref().unwrap_or("")), isid),
             }));
         }
     }
@@ -409,7 +412,7 @@ pub async fn serve(sock: tokio::net::TcpStream, peer: String) {
         }
         Counted(d.lun.clone())
     });
-    full_feature(&mut r, &tx, &exp, &l, &kick, &local).await;
+    full_feature(&mut r, &tx, &exp, &l, &kick, &local, &peer).await;
     if l.disk.is_some() {
         let mut a = ACTIVE.lock();
         if a.get(&l.key).is_some_and(|(k, _)| Arc::ptr_eq(k, &kick)) {
@@ -485,6 +488,7 @@ async fn full_feature(
     l: &Login,
     kick: &Notify,
     local: &str,
+    peer: &str,
 ) {
     let slots = Arc::new(Semaphore::new(WINDOW as usize));
     // Writes: one receives its data at a time, the others wait their turn here (without a slot: the reader must never
@@ -607,13 +611,17 @@ async fn full_feature(
                 tx.send(Out::new(rsp, Vec::new(), true)).await.ok();
             }
             0x04 => {
-                // Text: SendTargets (discovery) → every target at this portal.
+                // Text: SendTargets (discovery) → every target at this portal, plus the asking diskless machine's own
+                // copies of its games disks (Windows connects only to a target its discovery listed).
                 rsp[0] = 0x24;
                 rsp[1] = 0x80;
                 put32(&mut rsp, 20, 0xffff_ffff);
                 let mut text = Vec::new();
                 if keys(&p.data).iter().any(|(k, _)| k == "SendTargets") {
-                    for iqn in super::iqns() {
+                    for iqn in super::iqns()
+                        .into_iter()
+                        .chain(super::golden::games_iqns_for(peer))
+                    {
                         text.extend(
                             format!("TargetName={iqn}\0TargetAddress={local}:3260,1\0").bytes(),
                         );

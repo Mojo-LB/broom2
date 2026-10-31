@@ -86,11 +86,16 @@ pub enum Req {
         promote: bool,
         #[serde(default)]
         drop_base: bool,
+        /// `name` is a games disk served to diskless machines (golden.rs Config.games).
+        #[serde(default)]
+        games: bool,
     },
-    /// Delete machine `mac`'s layers of golden `name`.
+    /// Delete machine `mac`'s layers of golden (or games disk) `name`.
     DisklessForget {
         name: String,
         mac: String,
+        #[serde(default)]
+        games: bool,
     },
     /// The golden's maintenance work becomes its next version / is thrown away.
     GoldenSave {
@@ -406,8 +411,9 @@ async fn handle(req: Req) -> Resp {
             mac,
             promote,
             drop_base,
+            games,
         } => match tokio::task::spawn_blocking(move || {
-            golden::prepare(&name, &mac, promote, drop_base)
+            golden::prepare(&name, &mac, promote, drop_base, games)
         })
         .await
         .unwrap_or_else(|e| Err(e.to_string()))
@@ -415,7 +421,9 @@ async fn handle(req: Req) -> Resp {
             Ok(p) => r.prepared = Some(p),
             Err(e) => r.err = Some(e),
         },
-        Req::DisklessForget { name, mac } => r.err = golden::forget(&name, &mac).err(),
+        Req::DisklessForget { name, mac, games } => {
+            r.err = golden::forget(&name, &mac, games).err()
+        }
         Req::GoldenSave { name } => {
             match tokio::task::spawn_blocking(move || golden::GOLDENS.save(&name))
                 .await

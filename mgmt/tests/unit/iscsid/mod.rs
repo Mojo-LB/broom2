@@ -175,6 +175,8 @@ async fn wait_games(f: impl Fn(&games::Info) -> bool) {
 /// g0 is no longer served.
 #[tokio::test]
 async fn games_disk_versions() {
+    // The games list is the daemon's (one per process): not while golden.rs's games-copy test sets it.
+    let _one = crate::iscsid::golden::TEST_LOCK.lock().await;
     let d = std::env::temp_dir().join("broom_test_games");
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
@@ -504,6 +506,7 @@ async fn diskless_machine_session() {
                 ip: "127.0.0.2".into(),
             },
         ],
+        games: false,
     };
     golden::set(vec![cfg]).unwrap();
     let mine = golden::machine_iqn("iqn.test:golden-w11tcp", mac).unwrap();
@@ -522,7 +525,7 @@ async fn diskless_machine_session() {
         0x03,
         "not prepared for a boot: refused"
     );
-    golden::prepare("w11tcp", mac, false, false).unwrap();
+    golden::prepare("w11tcp", mac, false, false, false).unwrap();
     let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
     assert_eq!(login(&mut s, &mine).await.bhs[36], 0, "its own disk");
     let data: Vec<u8> = (0..64 << 10).map(|i: u32| (i % 251) as u8).collect();
@@ -557,7 +560,7 @@ async fn diskless_machine_session() {
         "golden file untouched"
     );
     // The other machine's disk, from this IP: refused.
-    golden::prepare("w11tcp", "02:00:00:00:00:32", false, false).unwrap();
+    golden::prepare("w11tcp", "02:00:00:00:00:32", false, false, false).unwrap();
     let mut x = tokio::net::TcpStream::connect(addr).await.unwrap();
     assert_eq!(
         login(&mut x, &other).await.bhs[36],
@@ -566,7 +569,7 @@ async fn diskless_machine_session() {
     );
     drop(s);
     for _ in 0..100 {
-        if golden::prepare("w11tcp", mac, false, false).is_ok() {
+        if golden::prepare("w11tcp", mac, false, false, false).is_ok() {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -579,4 +582,81 @@ async fn diskless_machine_session() {
     golden::set(Vec::new()).unwrap();
     TEST_ARP.lock().remove("127.0.0.1");
     let _ = std::fs::remove_dir_all(&d);
+}
+
+/// One initiator (same name, same ISID) logged in to two targets at once — a Windows machine booted from iSCSI that
+/// also mounts a games disk: two sessions side by side. Only a new login to the SAME target replaces the old session.
+#[tokio::test]
+async fn same_initiator_two_targets() {
+    let dir = std::env::temp_dir().join("broom_test_twin");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (ta, tb) = ("iqn.test:twin-a.g1", "iqn.test:twin-b.g1");
+    for (t, b) in [(ta, 0x0au8), (tb, 0x0bu8)] {
+        let p = dir.join(format!("{b}.img"));
+        std::fs::write(&p, vec![b; 1 << 20]).unwrap();
+        export(Entry {
+            iqn: t.into(),
+            path: p.to_string_lossy().into(),
+            ram: false,
+            reserve: 0,
+            stamp: String::new(),
+            cd: false,
+        })
+        .unwrap();
+    }
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = l.accept().await {
+            tokio::spawn(conn::serve(s, "127.0.0.1".into()));
+        }
+    });
+    async fn login_as(s: &mut tokio::net::TcpStream, target: &str) -> conn::Pdu {
+        let keys = format!(
+            "InitiatorName=iqn.test:pc-boot\0TargetName={target}\0SessionType=Normal\0MaxRecvDataSegmentLength=4096\0MaxBurstLength=65536\0"
+        );
+        s.write_all(&pdu(0x43, 0x80 | 1 << 2 | 3, 1, 0, keys.as_bytes()))
+            .await
+            .unwrap();
+        conn::read_pdu(s).await.unwrap()
+    }
+    let mut a = tokio::net::TcpStream::connect(addr).await.unwrap();
+    assert_eq!(login_as(&mut a, ta).await.bhs[36], 0);
+    let mut b = tokio::net::TcpStream::connect(addr).await.unwrap();
+    assert_eq!(login_as(&mut b, tb).await.bhs[36], 0);
+    // The first session is still there (it was closed at once when sessions were keyed without the target).
+    assert!(
+        read_blocks(&mut a, 10, 1, 0, 8)
+            .await
+            .iter()
+            .all(|&x| x == 0x0a)
+    );
+    assert!(
+        read_blocks(&mut b, 10, 1, 0, 8)
+            .await
+            .iter()
+            .all(|&x| x == 0x0b)
+    );
+    // A second login to target a with the same initiator + ISID replaces the first session there.
+    let mut a2 = tokio::net::TcpStream::connect(addr).await.unwrap();
+    assert_eq!(login_as(&mut a2, ta).await.bhs[36], 0);
+    assert!(
+        read_blocks(&mut a2, 11, 1, 0, 8)
+            .await
+            .iter()
+            .all(|&x| x == 0x0a)
+    );
+    let mut buf = [0u8; 48];
+    let gone = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::io::AsyncReadExt::read(&mut a, &mut buf),
+    )
+    .await;
+    assert!(
+        matches!(gone, Ok(Ok(0)) | Ok(Err(_))),
+        "the replaced session is closed"
+    );
+    TARGETS.lock().remove(ta);
+    TARGETS.lock().remove(tb);
+    let _ = std::fs::remove_dir_all(&dir);
 }
