@@ -195,7 +195,15 @@ PC down.
   sudo sh` on it once before Save. Linux goldens boot their distribution's shim (`\EFI\<distro>\shimx64.efi`), not
   `\EFI\BOOT\BOOTX64.EFI`: that one is shim's fallback, which adds a firmware boot entry and restarts every time.
 - **Windows goldens:** run `irm http://<server>/broom-diskless.ps1 | iex` on the golden (as Administrator) before
-  the first Save: each machine then takes its own name (Devices page) on its first boot, kept as its base.
+  the first Save: each machine then takes its own name (Devices page) on its first boot, kept as its base. At every
+  start the golden's copy runs the server's current version of the script, so a newer Broom reaches every machine
+  without a new golden version. A golden set up before that: **Update script** (Diskless page) writes the current
+  script into it as its next version, without booting it.
+- **Remote on diskless machines:** the first boot of each golden version also gets the machine its Remote agent key
+  (handed out only on that boot) and the agent's files (`C:\ProgramData\Broom`, SYSTEM and Administrators only), kept
+  in its base; every later boot starts the agent (`broom-watch.ps1 -Dir`, its own task), so remote screen, Wake and
+  health work as on SSD machines. A new key (Re-issue on Devices) builds the base again. The maintenance machine gets
+  no key: what it writes goes into the golden.
 - **Add hardware (Windows):** Windows booting from iSCSI only brings up a network card whose *device* it already
   knows (its exact Plug and Play instance ID: bus + slot); a driver alone is not enough. For a PC with a card the
   golden has never seen (a new board, or a card in another slot), pick the golden and that PC under *Add hardware*

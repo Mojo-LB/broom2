@@ -53,6 +53,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/broom-diskless.sh", get(script_sh))
         .route("/api/diskless/client", get(client))
         .route("/api/diskless/client/base-done", post(base_done))
+        .route("/api/diskless/client/agent-key", get(agent_key))
         // Public, for a golden's maintenance machine only: an Ubuntu installer it boots from the server.
         .route("/boot/iso/{golden}/{file}", get(iso_file))
         .route("/boot/nocloud/{golden}/{file}", get(nocloud))
@@ -330,6 +331,10 @@ pub(crate) struct BaseState {
     pub host: Option<String>,
     #[serde(default)]
     pub lic: i64,
+    /// Fingerprint of the machine's agent key the base was built with (agentauth.rs; Windows goldens): the key lives
+    /// in the base, so a new key — or a base from before agents came to diskless machines — means building it again.
+    #[serde(default)]
+    pub akey: String,
 }
 
 fn base_key(golden: &str, mac: &str) -> String {
@@ -350,17 +355,19 @@ fn set_base_state(st: &SharedState, golden: &str, mac: &str, b: &BaseState) {
 }
 
 /// This boot's plan for a machine's layers: (promote the last session to its base, drop its base). Promote when its
-/// first boot on the version it was on reported its setup done; drop the base when the machine's name or licence
-/// changed since the base was built (the golden version changing drops it anyway, in the daemon).
+/// first boot on the version it was on reported its setup done; drop the base when the machine's name, licence or
+/// agent key changed since the base was built (the golden version changing drops it anyway, in the daemon).
 pub(crate) fn base_plan(
     s: &BaseState,
     session_ver: Option<u64>,
     has_base: bool,
     host: Option<&str>,
     lic: i64,
+    akey: &str,
 ) -> (bool, bool) {
     let promote = s.pending.is_some() && s.pending == session_ver;
-    let drop = !promote && has_base && (s.host.as_deref() != host || s.lic != lic);
+    let drop =
+        !promote && has_base && (s.host.as_deref() != host || s.lic != lic || s.akey != akey);
     (promote, drop)
 }
 
@@ -620,12 +627,19 @@ pub(crate) fn boot_diskless(
         i.machines.into_iter().find(|x| x.mac == mac)
     });
     let bs = base_state(st, name, &m.mac);
+    // Windows: the Remote agent's key goes into the base (made now if the machine has none); Linux has no agent.
+    let akey = if g.os == "windows" {
+        crate::agentauth::ensure(st, &m.mac)?
+    } else {
+        bs.akey.clone()
+    };
     let (promote, drop_base) = base_plan(
         &bs,
         mine.as_ref().and_then(|x| x.session_ver),
         mine.as_ref().is_some_and(|x| x.base_ver.is_some()),
         m.hostname.as_deref(),
         m.license_gen,
+        &akey,
     );
     let mut p = None;
     for i in 0..30 {
@@ -751,17 +765,22 @@ pub(crate) fn boot_maint(
 
 // ---------- the machine itself (broom-diskless.ps1) ----------
 
+/// broom-diskless.ps1 with this server's address: what a golden gets installed (and runs at every start).
+pub(crate) fn script_text(st: &SharedState) -> String {
+    let srv = st.db.get_config("dhcp_server_ip", "");
+    crate::assets::text("scripts/broom-diskless.ps1").replace("__SERVER__", &srv)
+}
+
 /// GET /broom-diskless.ps1 — the script installed on a golden (irm … | iex), with this server's address.
 async fn script(
     State(st): State<SharedState>,
 ) -> ([(axum::http::HeaderName, &'static str); 1], String) {
-    let srv = st.db.get_config("dhcp_server_ip", "");
     (
         [(
             axum::http::header::CONTENT_TYPE,
             "text/plain; charset=utf-8",
         )],
-        crate::assets::text("scripts/broom-diskless.ps1").replace("__SERVER__", &srv),
+        script_text(&st),
     )
 }
 
@@ -961,6 +980,7 @@ async fn base_done(
             pending: x.session_ver,
             host: m.hostname.clone(),
             lic: m.license_gen,
+            akey: crate::agentauth::fingerprint(&st, &m.mac),
         },
     );
     tracing::info!(
@@ -969,6 +989,38 @@ async fn base_done(
         x.session_ver.unwrap_or(0)
     );
     Ok(ok())
+}
+
+/// GET /api/diskless/client/agent-key (public) — the asking machine's Remote agent key (hex), for broom-diskless.ps1 to
+/// keep in the base it is building: only to a registered machine (its IP with its MAC behind it) on the first boot of
+/// its golden version (the base is built right then and restarts at once). Anything else: 403. The maintenance
+/// machine never gets one: what it writes goes into the golden, which every machine shares.
+async fn agent_key(
+    State(st): State<SharedState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+) -> Result<Response, ApiError> {
+    let peer = peer.ip().to_canonical().to_string();
+    let st2 = st.clone();
+    let (m, on) = tokio::task::spawn_blocking(move || asking(&st2, &peer))
+        .await
+        .map_err(ise)??;
+    let refuse = |why: &str| {
+        tracing::warn!("diskless: agent key for {} refused ({why})", who(&m));
+        Err((StatusCode::FORBIDDEN, "no key for this machine".to_string()))
+    };
+    let Some((g, x)) = on else {
+        return refuse("not running a diskless golden");
+    };
+    if x.base_ver.is_some() && x.base_ver == x.session_ver {
+        return refuse("not the first boot of its golden version");
+    }
+    let key = crate::agentauth::hand_to_base(&st, &m.mac).map_err(ise)?;
+    tracing::info!(
+        "golden {g}: agent key handed to {} for its base (g{})",
+        who(&m),
+        x.session_ver.unwrap_or(0)
+    );
+    Ok(([(header::CONTENT_TYPE, "text/plain")], key).into_response())
 }
 
 // ---------- API ----------

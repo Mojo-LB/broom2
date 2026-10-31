@@ -665,7 +665,7 @@ async function loadDiskless(){
       <td class="mono">${x.status?x.status.machines.filter(m=>m.connected).length:''}</td>
       <td><select class="form-select form-select-sm d-inline-block w-auto" data-owner data-change="setMaint" data-args="${esc(JSON.stringify([g.name]))}">${opts(g.maint)}</select>${s&&s.update_connected?' <span class="text-success">'+ic('dot','')+' writable</span>':''}</td>
       <td class="mono">${s&&s.update_bytes?gbs(s.update_bytes)+` <button class="btn btn-sm btn-outline-primary" data-owner ${act('saveMaint',g.name)}>Save</button> <button class="btn btn-sm btn-outline-secondary" data-owner ${act('discardMaint',g.name)}>Discard</button>`:'—'}</td>
-      <td data-owner class="text-nowrap"><button class="btn btn-sm btn-outline-secondary" ${act('editGolden',g.name)}>Edit</button> <button class="btn btn-sm btn-outline-danger" ${act('delGolden',g.name)}>Delete</button></td></tr>`;}).join('')
+      <td data-owner class="text-nowrap"><button class="btn btn-sm btn-outline-secondary" ${act('editGolden',g.name)}>Edit</button>${g.os==='windows'?` <button class="btn btn-sm btn-outline-secondary" title="Write Broom's current startup script (broom-diskless.ps1) into this golden as its next version, without booting it. Needed once for goldens set up before the script updated itself." ${act('refreshGolden',g.name)}>Update script</button>`:''} <button class="btn btn-sm btn-outline-danger" ${act('delGolden',g.name)}>Delete</button></td></tr>`;}).join('')
     ||'<tr><td colspan="10" class="mono">no golden yet — create one below</td></tr>';
   // Their machines: each with its own layers (from the daemon) and target.
   const mb=document.querySelector('#dl_machines tbody');
@@ -739,6 +739,7 @@ const saveGolden=()=>dlCall('/api/diskless/golden',{name:v('dl_name'),os:v('dl_o
 const setMaint=(name,el)=>dlCall('/api/diskless/maint',{name,id:el.value?+el.value:null});
 const saveMaint=name=>dlCall('/api/diskless/save',{name},'Save the maintenance work on '+name+' as its next version? Its maintenance machine must be shut down. Every machine gets it at its next boot (and sets itself up again).');
 const discardMaint=name=>dlCall('/api/diskless/discard',{name},'Throw the maintenance work on '+name+' away?');
+const refreshGolden=name=>dlCall('/api/diskless/refresh',{name},'Write Broom\'s current startup script into '+name+' and save it as its next version? Every machine sets itself up again at its next boot. Needs no maintenance machine and no unsaved work.');
 const delGolden=name=>dlCall('/api/diskless/golden/delete',{name},'Delete golden '+name+', all its versions and every machine\'s layers of it?');
 const isoOs=(name,el)=>dlCall('/api/diskless/iso/os',{name,os:el.value});
 const delIso=name=>dlCall('/api/diskless/iso/delete',{name},'Delete '+name+' from the ISO library?');
@@ -1288,7 +1289,7 @@ const ACTIONS={
   loadImages,addImage,setDefault,toggleCache,toggleSsd,togglePreload,editImgGroups,republish,showVersions,exportImage,editBoot,delImage,
   snapshotImage,rollbackImage,versionToImage,deleteVersion,
   loadGames,saveGames,setGamesUpdate,toggleGamesRam,saveGamesUpdate,discardGamesUpdate,editGames,delGames,
-  loadDiskless,dlOsChanged,startOnboard,cancelOnboard,retryOnboard,saveGolden,setMaint,saveMaint,discardMaint,delGolden,editGolden,isoOs,delIso,setPlace,uploadIso,
+  loadDiskless,dlOsChanged,startOnboard,cancelOnboard,retryOnboard,saveGolden,setMaint,saveMaint,discardMaint,refreshGolden,delGolden,editGolden,isoOs,delIso,setPlace,uploadIso,
   loadDrivers,uploadDriver,saveDrvTargets,delDriver,
   loadGroups,editGroup,closeGroup,saveGroup,createGroup,renameGroup,deleteGroup,saveNewMachines,
   loadServer,loadBench,loadBenchHist,logsReload,logsFollow,logsSearch,benchServer,benchRequest:()=>benchAsk(false),benchCancel:()=>benchAsk(true),bSelAll,

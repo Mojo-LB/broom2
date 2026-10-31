@@ -143,35 +143,82 @@ fn base_layer_plan() {
         pending,
         host: Some(host.into()),
         lic,
+        akey: "k1".into(),
     };
     // First boot on g2 reported → promote at the next boot.
     assert_eq!(
-        base_plan(&st(Some(2), "PC01", 0), Some(2), false, Some("PC01"), 0),
+        base_plan(
+            &st(Some(2), "PC01", 0),
+            Some(2),
+            false,
+            Some("PC01"),
+            0,
+            "k1"
+        ),
         (true, false)
     );
     // Reported on g1 but the machine's session is on g2 (a Save in between): not kept.
     assert_eq!(
-        base_plan(&st(Some(1), "PC01", 0), Some(2), false, Some("PC01"), 0),
+        base_plan(
+            &st(Some(1), "PC01", 0),
+            Some(2),
+            false,
+            Some("PC01"),
+            0,
+            "k1"
+        ),
         (false, false)
     );
     // Nothing reported: nothing kept, base untouched.
     assert_eq!(
-        base_plan(&st(None, "PC01", 0), Some(2), true, Some("PC01"), 0),
+        base_plan(&st(None, "PC01", 0), Some(2), true, Some("PC01"), 0, "k1"),
         (false, false)
     );
     // Renamed on the Devices page, or a new licence: set up again.
     assert_eq!(
-        base_plan(&st(None, "PC01", 0), Some(2), true, Some("PC09"), 0),
+        base_plan(&st(None, "PC01", 0), Some(2), true, Some("PC09"), 0, "k1"),
         (false, true)
     );
     assert_eq!(
-        base_plan(&st(None, "PC01", 0), Some(2), true, Some("PC01"), 1),
+        base_plan(&st(None, "PC01", 0), Some(2), true, Some("PC01"), 1, "k1"),
         (false, true)
+    );
+    // A new agent key (Re-issue), or a base built before agents came to diskless machines: set up again.
+    assert_eq!(
+        base_plan(&st(None, "PC01", 0), Some(2), true, Some("PC01"), 0, "k2"),
+        (false, true)
+    );
+    let old = BaseState {
+        akey: String::new(),
+        ..st(None, "PC01", 0)
+    };
+    assert_eq!(
+        base_plan(&old, Some(2), true, Some("PC01"), 0, "k1"),
+        (false, true)
+    );
+    // The first boot's report wins over a key change seen at the same boot: kept, the key compared next time.
+    assert_eq!(
+        base_plan(
+            &st(Some(2), "PC01", 0),
+            Some(2),
+            true,
+            Some("PC01"),
+            0,
+            "k2"
+        ),
+        (true, false)
     );
     // No base to drop.
     assert_eq!(
-        base_plan(&st(None, "PC01", 0), Some(2), false, Some("PC09"), 0),
+        base_plan(&st(None, "PC01", 0), Some(2), false, Some("PC09"), 0, "k2"),
         (false, false)
+    );
+    // A stored state from before the key field still reads (no key = "").
+    assert_eq!(
+        serde_json::from_str::<BaseState>(r#"{"pending":3,"host":"PC01","lic":0}"#)
+            .unwrap()
+            .akey,
+        ""
     );
     // An empty state (never set up) parses from "{}".
     assert_eq!(

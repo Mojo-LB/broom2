@@ -124,6 +124,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/onboard/start", post(start))
         .route("/api/onboard/cancel", post(cancel))
         .route("/api/onboard/retry", post(retry))
+        .route("/api/diskless/refresh", post(refresh))
         // Public: the PC itself (Windows PE, by the job's token; iPXE, by its IP + MAC).
         .route("/api/onboard/report", post(report))
         .route("/api/onboard/state", get(state_q))
@@ -1033,6 +1034,144 @@ fn worker(st: SharedState, token: String) {
     }
 }
 
+/// A golden step that may meet the daemon still counting a client that just left: tried again for up to ~20 s.
+fn retry_connected<T>(f: &dyn Fn() -> Result<T, String>) -> Result<T, String> {
+    for _ in 0..40 {
+        match f() {
+            Err(e) if e.contains("still connected") => {
+                std::thread::sleep(Duration::from_millis(500))
+            }
+            r => return r,
+        }
+    }
+    f()
+}
+
+// ---------- Update Broom's script in a golden ----------
+
+/// Broom's current broom-diskless.ps1 into golden `name`'s C:\Windows\Setup\Scripts (what its startup task runs), and
+/// no machine's agent folder (C:\ProgramData\Broom) left in it. Ok(true) = something changed. Blocking.
+fn write_script(st: &SharedState, name: &str, ver: u64) -> Result<bool, String> {
+    let target = format!("{}.g{ver}", diskless::iqn(st, name));
+    let mnt = work_dir(st)?.join("mnt-refresh");
+    let dev = login(&target)?;
+    let r = (|| {
+        let part = windows_part(&dev, &mnt)?;
+        let m = Mount::new(&part, &mnt, true)?;
+        let ps = ci_path(&m.dir, "Windows/Setup/Scripts/broom-diskless.ps1")
+            .filter(|f| f.is_file())
+            .ok_or("the golden has no C:\\Windows\\Setup\\Scripts\\broom-diskless.ps1 (its startup task) — install it on the golden once from its maintenance machine (Diskless page)")?;
+        let new = diskless::script_text(st);
+        let mut changed = false;
+        if std::fs::read(&ps).ok().as_deref() != Some(new.as_bytes()) {
+            std::fs::write(&ps, &new).map_err(|e| format!("{}: {e}", ps.display()))?;
+            changed = true;
+        }
+        if let Some(d) = ci_path(&m.dir, "ProgramData/Broom").filter(|d| d.is_dir()) {
+            std::fs::remove_dir_all(&d).map_err(|e| format!("{}: {e}", d.display()))?;
+            changed = true;
+        }
+        Ok(changed)
+    })();
+    logout(&target);
+    r
+}
+
+/// The whole "update script" step for golden `name`: its newest version attached to this server (no VM), the script
+/// written, then saved as the next version (nothing changed: the session discarded). Same conditions as Add hardware:
+/// a Windows golden, no maintenance machine, no unsaved work, no job running. Blocking.
+fn refresh_script(st: &SharedState, name: &str) -> Result<String, String> {
+    for t in ["iscsiadm", "ntfs-3g"] {
+        if which(t).is_none() {
+            return Err(format!("{t} is not installed on this server"));
+        }
+    }
+    if let Some(j) = job(st).filter(active) {
+        return Err(format!(
+            "an Add hardware job is {} for {} — wait for it or cancel it",
+            j.state, j.golden
+        ));
+    }
+    let g = diskless::goldens(st)
+        .into_iter()
+        .find(|g| g.name == name)
+        .ok_or_else(|| format!("no golden {name}"))?;
+    if g.os != "windows" {
+        return Err("the startup script is for Windows goldens".into());
+    }
+    if g.maint.is_some() {
+        return Err(format!(
+            "{name} has a maintenance machine — turn maintenance off (Save or Discard its work) first"
+        ));
+    }
+    let info = diskless::served(name).ok_or("the golden is not served")?;
+    if info.disk.ver == 0 {
+        return Err("the golden has no saved version yet".into());
+    }
+    if info.disk.update_bytes > 0 || info.disk.update_connected {
+        return Err("the golden has unsaved work — Save or Discard it first".into());
+    }
+    {
+        let mut v = VM_GOLDEN.lock();
+        if let Some(o) = v.as_ref() {
+            return Err(format!("{o} is being updated on the server right now"));
+        }
+        *v = Some(name.to_string());
+    }
+    let r = diskless::sync(st).and_then(|()| write_script(st, name, info.disk.ver));
+    *VM_GOLDEN.lock() = None;
+    let _ = diskless::sync(st);
+    let discard = || retry_connected(&|| crate::iscsi::golden_discard(name));
+    match r {
+        Ok(true) => match retry_connected(&|| crate::iscsi::golden_save(name)) {
+            Ok(_) => {
+                let ver = diskless::served(name).map_or(0, |i| i.disk.ver);
+                tracing::info!("golden {name}: Broom's startup script updated → g{ver}");
+                Ok(format!(
+                    "Broom's current startup script is in {name}: saved as version g{ver} (every machine sets itself up again at its next boot)"
+                ))
+            }
+            Err(e) => {
+                let _ = discard();
+                Err(format!(
+                    "written, but Save failed: {e} — the golden is unchanged"
+                ))
+            }
+        },
+        Ok(false) => {
+            let _ = discard();
+            Ok(format!(
+                "{name} already has Broom's current startup script — nothing changed"
+            ))
+        }
+        Err(e) => {
+            let tail = match discard() {
+                Ok(()) => "the golden is unchanged",
+                Err(_) => "its work could not be discarded — Discard it on the Diskless page",
+            };
+            Err(format!("{e} - {tail}"))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct RefreshBody {
+    name: String,
+}
+
+/// POST /api/diskless/refresh {name} — Broom's current startup script written into a Windows golden as its next
+/// version, without booting it (goldens set up before the script fetched the server's version by itself).
+async fn refresh(
+    State(st): State<SharedState>,
+    Json(b): Json<RefreshBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let msg = tokio::task::spawn_blocking(move || refresh_script(&st, &b.name))
+        .await
+        .map_err(ise)?
+        .map_err(|e| (StatusCode::CONFLICT, e))?;
+    Ok(Json(serde_json::json!({"ok": true, "status": msg})))
+}
+
 fn fail(st: &SharedState, token: &str, msg: &str) {
     tracing::warn!("add hardware failed: {msg}");
     say(st, token, msg);
@@ -1071,6 +1210,12 @@ async fn start(
             return Err((
                 StatusCode::CONFLICT,
                 format!("a job is already {} for {} — cancel it first", j.state, j.golden),
+            ));
+        }
+        if let Some(g) = VM_GOLDEN.lock().as_ref() {
+            return Err((
+                StatusCode::CONFLICT,
+                format!("{g} is being updated on the server right now — try again in a minute"),
             ));
         }
         preflight().map_err(|e| (StatusCode::CONFLICT, e))?;

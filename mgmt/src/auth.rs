@@ -294,6 +294,7 @@ fn is_public(method: &axum::http::Method, path: &str) -> bool {
         "/broom-diskless.sh",
         "/api/diskless/client",
         "/api/diskless/client/base-done",
+        "/api/diskless/client/agent-key",
         "/boot/onboard",
         "/api/onboard/report",
         "/api/onboard/state",
