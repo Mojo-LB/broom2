@@ -30,6 +30,16 @@ step 'onboarding VM: started'
 if (-not (Test-Path $job)) { done $false @() 'no job file' }
 try { $j = Get-Content -Raw $job | ConvertFrom-Json } catch { done $false @() "job file unreadable: $_" }
 
+# Drivers from Broom's library for these cards (Drivers page; Broom put each package under broom-drv\<name>): into the
+# driver store first, so "the best driver from the driver store" below can be one of them. Broom removes the folder.
+foreach ($d in @($j.drivers)) {
+  if (-not $d) { continue }
+  $p = Join-Path $dir $d
+  if (-not (Test-Path $p)) { step "driver package $d missing"; continue }
+  $o = & pnputil.exe /add-driver (Join-Path $p '*.inf') /subdirs 2>&1 | Out-String
+  step ("driver package {0}: pnputil exit {1}: {2}" -f $d, $LASTEXITCODE, (($o -split "`r?`n" | Where-Object { $_ -match 'Added|Published|Failed|already|Total' }) -join ' | '))
+}
+
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;

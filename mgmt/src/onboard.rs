@@ -68,6 +68,30 @@ pub struct Nic {
     /// Its MAC (12 hex digits) when Windows PE had a driver for it (wmic); "" = not known.
     #[serde(default)]
     pub mac: String,
+    /// pnputil's class name: Net, or Unknown for a card Windows PE has no driver for (then its class code says it is a
+    /// network controller).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub class: String,
+}
+
+/// A network controller by its IDs (PCI class code 02xx: Ethernet, other network controllers).
+fn is_network(n: &Nic) -> bool {
+    n.class.is_empty()
+        || n.class.eq_ignore_ascii_case("Net")
+        || n.hwids
+            .iter()
+            .chain(n.compat.iter())
+            .any(|h| h.to_ascii_uppercase().contains("CC_02"))
+}
+
+/// Card `n` is the one iPXE booted with (`boot_card` = `PCI\VEN_xxxx&DEV_yyyy`).
+fn is_boot_card(n: &Nic, boot_card: &str) -> bool {
+    let b = boot_card.to_ascii_uppercase();
+    !b.is_empty()
+        && n.hwids
+            .iter()
+            .chain(n.compat.iter())
+            .any(|h| h.to_ascii_uppercase().starts_with(&b))
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -98,6 +122,47 @@ pub struct Job {
     /// Steps, newest last (shown on the Diskless page).
     #[serde(default)]
     pub log: Vec<String>,
+    /// The card the PC network-booted with, as iPXE saw it (`PCI\VEN_xxxx&DEV_yyyy`; "" = not known): before Windows PE,
+    /// so Broom knows it even when Windows PE has no driver for it.
+    #[serde(default)]
+    pub boot_card: String,
+    /// Unix time the PC fetched Windows PE (0 = not yet): a report long after that = no network in Windows PE.
+    #[serde(default)]
+    pub winpe_at: u64,
+}
+
+/// iPXE's `${net0/busid}` → `PCI\VEN_xxxx&DEV_yyyy`. iPXE prints it as hex bytes, colon-separated or not: bus type
+/// (1 = PCI), vendor (2 bytes), device (2 bytes). Anything else (another bus, an empty setting) → None.
+pub(crate) fn busid_card(busid: &str) -> Option<String> {
+    let h: String = busid.chars().filter(|c| *c != ':').collect();
+    if h.len() != 10 || !h.chars().all(|c| c.is_ascii_hexdigit()) || !h.starts_with("01") {
+        return None;
+    }
+    Some(format!(
+        "PCI\\VEN_{}&DEV_{}",
+        h[2..6].to_ascii_uppercase(),
+        h[6..10].to_ascii_uppercase()
+    ))
+}
+
+/// How long after Windows PE was fetched a missing report means "no network in Windows PE" (it reports in ~30 s).
+const NO_REPORT_S: u64 = 4 * 60;
+
+/// A hint for a job still waiting: the PC started Windows PE long ago and never reported.
+pub(crate) fn waiting_hint(j: &Job, now: u64) -> Option<String> {
+    if j.state != "waiting" || j.winpe_at == 0 || now.saturating_sub(j.winpe_at) < NO_REPORT_S {
+        return None;
+    }
+    let card = if j.boot_card.is_empty() {
+        "its network card".to_string()
+    } else {
+        format!("its network card ({})", j.boot_card)
+    };
+    Some(format!(
+        "Windows PE started {} min ago and has not reported: it likely has no driver for {card}. Add the card's driver \
+         under Drivers (an extracted driver folder, zipped), then press Retry and network-boot the PC again.",
+        now.saturating_sub(j.winpe_at) / 60
+    ))
 }
 
 /// A network card a golden has had installed.
@@ -241,7 +306,8 @@ pub(crate) fn menu_entry(st: &SharedState, m: &Machine) -> Option<MenuEntry> {
     let j = job(st)?;
     (j.state == "waiting" && j.machine == m.id).then(|| MenuEntry {
         text: format!("Add this PC's network card to {} (Windows PE)", j.golden),
-        chain: format!("/boot/onboard?golden={}", j.golden),
+        // busid: the card iPXE booted with (vendor + device), known before Windows PE (busid_card).
+        chain: format!("/boot/onboard?golden={}&busid=${{net0/busid}}", j.golden),
         default: true,
     })
 }
@@ -299,9 +365,18 @@ pub(crate) fn startnet(srv: &str, token: &str, ip: &str, mask: &str, gw: &str) -
     )
 }
 
-/// The iPXE script booting Windows PE for job `token` (image index 1 of boot.wim = plain Windows PE).
-pub(crate) fn wimboot_script(golden: &str, token: &str) -> String {
+/// The iPXE script booting Windows PE for job `token` (image index 1 of boot.wim = plain Windows PE); `drivers` = the
+/// library's network-card drivers go along (broom-drivers.tar, drivers::winpe_bundle).
+pub(crate) fn wimboot_script(golden: &str, token: &str, drivers: bool) -> String {
     let f = |n: &str| format!("/boot/onboard/{n}?t={token}");
+    let drv = if drivers {
+        format!(
+            "initrd --name broom-drivers.tar {} broom-drivers.tar || goto failed\n",
+            f("broom-drivers.tar")
+        )
+    } else {
+        String::new()
+    };
     format!(
         "#!ipxe\necho Adding this PC's network card to {golden}: starting Windows PE...\n\
          kernel {} index=1 || goto failed\n\
@@ -310,7 +385,7 @@ pub(crate) fn wimboot_script(golden: &str, token: &str) -> String {
          initrd --name boot.sdi {} boot.sdi || goto failed\n\
          initrd --name boot.wim {} boot.wim || goto failed\n\
          initrd --name broom-report.exe {} broom-report.exe || goto failed\n\
-         initrd --name startnet.cmd {}&ip=${{net0/ip}}&mask=${{net0/netmask}}&gw=${{net0/gateway}} startnet.cmd || goto failed\n\
+         {drv}initrd --name startnet.cmd {}&ip=${{net0/ip}}&mask=${{net0/netmask}}&gw=${{net0/gateway}} startnet.cmd || goto failed\n\
          boot || goto failed\n\
          :failed\necho Could not start Windows PE\nsleep 10\nchain /boot.ipxe?mac=${{net0/mac}}&ip=${{net0/ip}}\n",
         f("wimboot"),
@@ -373,6 +448,7 @@ pub(crate) fn parse_pnputil(text: &str) -> Vec<Nic> {
                 let Some(n) = cur.as_mut() else { continue };
                 match k {
                     "Device Description" => n.name = val.to_string(),
+                    "Class Name" => n.class = val.to_string(),
                     "Status" => n.status = val.to_string(),
                     "Hardware IDs" => {
                         list = Some("hw");
@@ -418,7 +494,17 @@ pub(crate) fn parse_pnputil(text: &str) -> Vec<Nic> {
             .take(80)
             .collect();
     }
-    out.retain(|n| !n.hwids.is_empty() && valid_id(&n.instance));
+    // Network cards only: the Net class, or (a card Windows PE has no driver for, listed among the problem devices) a
+    // network-controller class code.
+    out.retain(|n| !n.hwids.is_empty() && valid_id(&n.instance) && is_network(n));
+    for n in out.iter_mut() {
+        n.class = n
+            .class
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .take(32)
+            .collect();
+    }
     out
 }
 
@@ -458,6 +544,7 @@ pub(crate) fn judge(
     nics: &[Nic],
     results: &[serde_json::Value],
     mac: &str,
+    boot_card: &str,
 ) -> Result<String, String> {
     let ok = |inst: &str| {
         results.iter().any(|r| {
@@ -472,7 +559,12 @@ pub(crate) fn judge(
     if installed.is_empty() {
         return Err("no network card could be installed".into());
     }
-    if let Some(b) = nics.iter().find(|n| !mac.is_empty() && n.mac == mac)
+    // The card this PC boots from: by its MAC (Windows PE had a driver), else by what iPXE saw (vendor + device).
+    let boot = nics
+        .iter()
+        .find(|n| !mac.is_empty() && n.mac == mac)
+        .or_else(|| nics.iter().find(|n| is_boot_card(n, boot_card)));
+    if let Some(b) = boot
         && !ok(&b.instance)
     {
         return Err(format!(
@@ -883,7 +975,33 @@ fn install(st: &SharedState, j: &Job) -> Result<(String, Vec<serde_json::Value>)
             for f in ["broom-onboard-result.json", "broom-onboard.log"] {
                 let _ = std::fs::remove_file(dir.join(f));
             }
-            let job_json = serde_json::json!({ "golden": j.golden, "nics": j.nics });
+            // The library's drivers for these cards (by vendor + device) next to the script: it adds them to the
+            // golden's driver store before installing the cards.
+            let nets = crate::drivers::net_drivers(st);
+            let ids: Vec<String> = j
+                .nics
+                .iter()
+                .flat_map(|n| n.hwids.iter().chain(n.compat.iter()).cloned())
+                .chain((!j.boot_card.is_empty()).then(|| j.boot_card.clone()))
+                .collect();
+            let _ = std::fs::remove_dir_all(dir.join("broom-drv"));
+            let mut drv = Vec::new();
+            for d in crate::drivers::matching(&nets, &ids) {
+                crate::drivers::unpack(d, &dir.join("broom-drv").join(&d.name))?;
+                drv.push(format!("broom-drv\\{}", d.name));
+            }
+            if !drv.is_empty() {
+                say(
+                    st,
+                    t,
+                    &format!(
+                        "driver package(s) from the library for these cards: {}",
+                        drv.join(", ").replace("broom-drv\\", "")
+                    ),
+                );
+            }
+            let job_json =
+                serde_json::json!({ "golden": j.golden, "nics": j.nics, "drivers": drv });
             std::fs::write(dir.join("broom-onboard.json"), job_json.to_string())
                 .map_err(|e| e.to_string())?;
             std::fs::write(&ps, crate::assets::text("scripts/broom-onboard.ps1"))
@@ -927,6 +1045,7 @@ fn install(st: &SharedState, j: &Job) -> Result<(String, Vec<serde_json::Value>)
             let m = Mount::new(&part, &mnt, true)?;
             let dir = ci_path(&m.dir, "Windows/Setup/Scripts").ok_or("Scripts folder gone")?;
             std::fs::write(dir.join("broom-diskless.ps1"), &orig).map_err(|e| e.to_string())?;
+            let _ = std::fs::remove_dir_all(dir.join("broom-drv"));
             for f in [
                 "broom-onboard.json",
                 "broom-onboard-result.json",
@@ -942,7 +1061,7 @@ fn install(st: &SharedState, j: &Job) -> Result<(String, Vec<serde_json::Value>)
                 v["msg"].as_str().unwrap_or("")
             ));
         }
-        let msg = judge(&j.nics, &results, &j.mac)?;
+        let msg = judge(&j.nics, &results, &j.mac, &j.boot_card)?;
         Ok((msg, results))
     })();
     logout(&target);
@@ -1187,8 +1306,9 @@ async fn status(State(st): State<SharedState>) -> Result<Json<serde_json::Value>
         j
     });
     let pre = preflight().err();
+    let hint = j.as_ref().and_then(|j| waiting_hint(j, crate::now_secs()));
     Ok(Json(
-        serde_json::json!({ "job": j, "hardware": hardware(&st), "missing": pre }),
+        serde_json::json!({ "job": j, "hardware": hardware(&st), "missing": pre, "hint": hint }),
     ))
 }
 
@@ -1353,6 +1473,17 @@ async fn report(
         None => "",
     };
     say(&st, &token, &format!("reported{sb}: {}", names.join(", ")));
+    // The card the PC network-booted with (iPXE) must be among them: Windows PE without a driver for it, and no
+    // network-class problem device either, would leave the golden without the card that matters.
+    if !j.boot_card.is_empty() && !nics.iter().any(|n| is_boot_card(n, &j.boot_card)) {
+        let e = format!(
+            "Windows PE did not list the card this PC network-boots with ({}) - add its driver under Drivers, then Retry",
+            j.boot_card
+        );
+        update(&st, &token, |j| j.nics = nics.clone());
+        fail(&st, &token, &e);
+        return Ok(e);
+    }
     // Every card already in this golden (a PC like one done before): nothing to install, no new version.
     let known = hardware(&st).remove(&j.golden).unwrap_or_default();
     let have = |n: &Nic| {
@@ -1414,6 +1545,7 @@ fn job_machine(st: &SharedState, peer: &str) -> Result<(Job, Machine), String> {
 async fn boot(
     State(st): State<SharedState>,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     let peer = peer.ip().to_canonical().to_string();
     let st2 = st.clone();
@@ -1424,8 +1556,34 @@ async fn boot(
             .find(|g| g.name == j.golden)
             .ok_or("the golden is gone")?;
         winpe_dir(&st2, g.iso.as_deref().ok_or("the golden has no ISO")?)?;
-        say(&st2, &j.token, &format!("{} boots Windows PE", who(&m)));
-        Ok(wimboot_script(&j.golden, &j.token))
+        let card = q
+            .get("busid")
+            .and_then(|b| busid_card(b))
+            .unwrap_or_default();
+        let drivers = match crate::drivers::winpe_bundle(&st2) {
+            Ok(b) => b.is_some(),
+            Err(e) => {
+                tracing::warn!("add hardware: network-card drivers not added to Windows PE: {e}");
+                false
+            }
+        };
+        update(&st2, &j.token, |j| j.boot_card = card.clone());
+        let what = if card.is_empty() {
+            String::new()
+        } else {
+            format!(" (network card {card})")
+        };
+        let with = if drivers {
+            " with the library's network-card drivers"
+        } else {
+            ""
+        };
+        say(
+            &st2,
+            &j.token,
+            &format!("{} boots Windows PE{with}{what}", who(&m)),
+        );
+        Ok(wimboot_script(&j.golden, &j.token, drivers))
     })
     .await
     .unwrap_or_else(|e| Err(e.to_string()));
@@ -1477,6 +1635,13 @@ async fn file(
         .await
         .map_err(ise)??;
     if let Some(p) = path {
+        if name == "boot.wim" && j.winpe_at == 0 {
+            let st2 = st.clone();
+            let t = j.token.clone();
+            tokio::task::spawn_blocking(move || {
+                update(&st2, &t, |j| j.winpe_at = crate::now_secs())
+            });
+        }
         let res = tower_http::services::ServeFile::new(p)
             .try_call(req)
             .await
@@ -1496,6 +1661,17 @@ async fn file(
             "application/octet-stream",
             crate::assets::bytes("scripts/broom-report.exe").to_vec(),
         )),
+        "broom-drivers.tar" => {
+            let b = tokio::task::spawn_blocking(move || crate::drivers::winpe_bundle(&st))
+                .await
+                .map_err(ise)?
+                .map_err(ise)?
+                .ok_or((
+                    StatusCode::NOT_FOUND,
+                    "no network-card driver in the library".to_string(),
+                ))?;
+            Ok(text("application/x-tar", b.as_ref().clone()))
+        }
         "startnet.cmd" => {
             let srv = st.db.get_config("dhcp_server_ip", "");
             let cmd = startnet(

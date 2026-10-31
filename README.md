@@ -219,7 +219,12 @@ PC down.
   next version and the PC restarts into it. Identical PCs need it once; a PC whose cards are all known finishes at
   once. Needs on the server: `qemu-system-x86_64`, OVMF, `iscsiadm` (open-iscsi), `ntfs-3g` and `/dev/kvm` (nested
   KVM, CPU type host, when Broom itself runs in a VM). The card needs a driver in Windows PE (to report) and in the
-  golden (to install). The Windows PE files come out of the ISO's ISO 9660 part; Microsoft's own ISOs keep them in UDF
+  golden (to install). **Network-card drivers from the library** (Drivers page; packages whose .inf is Class=Net are
+  marked *network card*): every one of them goes to Windows PE along with the reporter, which loads them (`drvload`)
+  before it looks for the network, and the package matching the card is copied into the golden and added to its driver
+  store before the card is installed. iPXE tells Broom the card it booted with (vendor + device) before Windows PE
+  starts, so a card Windows PE still cannot use is named on the Diskless page (and on the PC's screen) with what to do.
+  A card without a driver in Windows PE but a second card that has one is reported too (from the problem devices). The Windows PE files come out of the ISO's ISO 9660 part; Microsoft's own ISOs keep them in UDF
   only: copy `boot.wim`, `boot.sdi`, `bootmgr.efi` and the UEFI `BCD` into `<ISO place>/.winpe/<iso>/` then.
 
 Status: tested end to end on a VM client with Windows 11 24H2 and Ubuntu 26.04 goldens: installed from the library

@@ -575,7 +575,7 @@ async function volRemove(id){if(!await sure('Stop using broom disk '+id+'? It is
 async function loadDrivers(){
   const rows=await j('/api/drivers');
   document.querySelector('#drivers tbody').innerHTML=rows.map(d=>
-    `<tr><td>${esc(d.name)}</td><td class="mono">${gbs(d.size)}</td>
+    `<tr><td>${esc(d.name)}${d.net?' <span class="badge text-bg-info" title="network-card driver: also goes to Windows PE and into a golden for Add hardware">network card</span>':''}</td><td class="mono">${gbs(d.size)}</td>
        <td class="mono" title="${esc(d.hwids.slice(0,40).join('\n'))}${d.hwids.length>40?'\n…':''}">${d.hwids.length}</td>
        <td class="mono" style="white-space:normal">${d.machines.length?esc(d.machines.join(', ')):'—'}</td>
        <td><input class="form-check-input" type="checkbox" id="drv_all_${d.id}" ${d.all_machines?'checked':''}></td>
@@ -745,6 +745,8 @@ async function loadOnboard(){
       +(jb.nics&&jb.nics.length?'<div class="small">'+jb.nics.map(n=>esc(n.name)+' <span class="mono">'+esc(n.instance)+'</span>').join('<br>')+'</div>':'')
       +`<details class="small"><summary>Steps</summary><pre class="mono small mb-0" style="white-space:pre-wrap">${esc((jb.log||[]).join('\n'))}</pre></details>`;}
   else box.innerHTML='';
+  if(jb&&jb.boot_card)box.innerHTML+=`<div class="small">Network card seen at network boot: <span class="mono">${esc(jb.boot_card)}</span></div>`;
+  if(o.hint)box.innerHTML+=`<div class="small text-warning-emphasis">${esc(o.hint)}</div>`;
   const rows=Object.entries(o.hardware||{}).flatMap(([g,l])=>l.map(h=>`<tr><td>${esc(g)}</td><td>${esc(h.name)}</td><td class="mono small" style="overflow-wrap:anywhere">${esc(h.instance)}</td>
     <td class="mono small">${esc(h.service)}${h.inf?' ('+esc(h.inf)+')':''}</td><td class="mono">g${esc(h.ver)}</td><td class="mono small">${h.added?new Date(h.added*1000).toLocaleString():''}</td></tr>`)).join('');
   document.querySelector('#ob_hw tbody').innerHTML=rows||'<tr><td colspan="6" class="mono">none added yet</td></tr>';

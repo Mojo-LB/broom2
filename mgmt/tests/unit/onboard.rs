@@ -1,6 +1,6 @@
 use super::{
-    Job, Nic, WINPE_FILES, active, judge, parse_pnputil, parse_report, parse_wmic, qemu_args,
-    secure_boot, startnet, wimboot_script,
+    Job, Nic, WINPE_FILES, active, busid_card, judge, parse_pnputil, parse_report, parse_wmic,
+    qemu_args, secure_boot, startnet, waiting_hint, wimboot_script,
 };
 
 /// pnputil /enum-devices /class Net /ids as Windows PE 26100 prints it (English), with a miniport and two cards.
@@ -96,7 +96,15 @@ fn pnputil_hostile_or_empty() {
 
 #[test]
 fn wimboot_script_boots_plain_winpe() {
-    let s = wimboot_script("w11", "abc123");
+    let s = wimboot_script("w11", "abc123", false);
+    assert!(
+        !s.contains("broom-drivers.tar"),
+        "no network-card package in the library"
+    );
+    let d = wimboot_script("w11", "abc123", true);
+    assert!(d.contains(
+        "initrd --name broom-drivers.tar /boot/onboard/broom-drivers.tar?t=abc123 broom-drivers.tar || goto failed\n"
+    ));
     assert!(s.starts_with("#!ipxe\n"));
     assert!(s.is_ascii());
     assert!(s.contains("kernel /boot/onboard/wimboot?t=abc123 index=1 || goto failed\n"));
@@ -219,21 +227,21 @@ fn judge_needs_the_boot_card() {
         ]
     };
     assert_eq!(
-        judge(&nics, &r(true, true), "AA:BB:CC:DD:EE:FF").unwrap(),
+        judge(&nics, &r(true, true), "AA:BB:CC:DD:EE:FF", "").unwrap(),
         "2 card(s) installed"
     );
-    let m = judge(&nics, &r(true, false), "aa:bb:cc:dd:ee:ff").unwrap();
+    let m = judge(&nics, &r(true, false), "aa:bb:cc:dd:ee:ff", "").unwrap();
     assert!(
         m.contains("1 card(s) installed") && m.contains("card PCI\\B\\2"),
         "{m}"
     );
     assert!(
-        judge(&nics, &r(false, true), "aa:bb:cc:dd:ee:ff").is_err(),
+        judge(&nics, &r(false, true), "aa:bb:cc:dd:ee:ff", "").is_err(),
         "boot card missing"
     );
-    assert!(judge(&nics, &r(false, false), "").is_err());
+    assert!(judge(&nics, &r(false, false), "", "").is_err());
     // Boot card unknown (no MAC from Windows PE): any card installed is enough.
-    assert!(judge(&nics, &r(false, true), "").is_ok());
+    assert!(judge(&nics, &r(false, true), "", "").is_ok());
 }
 
 #[test]
@@ -248,4 +256,107 @@ fn secure_boot_from_windows_pe() {
     );
     // The section does not reach the card parser.
     assert_eq!(parse_report(&format!("{PNPUTIL}{on}")).len(), 2);
+}
+
+/// iPXE's ${net0/busid}: bus type 1 (PCI) + vendor + device, with or without colons; anything else is not a card ID.
+#[test]
+fn busid_from_ipxe() {
+    assert_eq!(
+        busid_card("01:80:86:10:d3").as_deref(),
+        Some("PCI\\VEN_8086&DEV_10D3")
+    );
+    assert_eq!(
+        busid_card("0110ec8139").as_deref(),
+        Some("PCI\\VEN_10EC&DEV_8139")
+    );
+    assert_eq!(busid_card(""), None, "an empty setting (iPXE without it)");
+    assert_eq!(busid_card("02:12:34:56:78"), None, "another bus");
+    assert_eq!(busid_card("01:80:86:10"), None);
+    assert_eq!(busid_card("01:80:86:10:zz"), None);
+}
+
+/// A job waiting long after Windows PE was fetched tells why (no driver for the card), naming the card iPXE saw.
+#[test]
+fn hint_when_windows_pe_never_reports() {
+    let mut j = Job {
+        state: "waiting".into(),
+        ..Default::default()
+    };
+    assert_eq!(waiting_hint(&j, 10_000), None, "Windows PE not fetched yet");
+    j.winpe_at = 10_000;
+    assert_eq!(
+        waiting_hint(&j, 10_100),
+        None,
+        "still within the time it takes"
+    );
+    let h = waiting_hint(&j, 10_400).unwrap();
+    assert!(
+        h.contains("no driver for its network card.") && h.contains("Retry"),
+        "{h}"
+    );
+    j.boot_card = "PCI\\VEN_8086&DEV_125C".into();
+    assert!(
+        waiting_hint(&j, 10_400)
+            .unwrap()
+            .contains("(PCI\\VEN_8086&DEV_125C)")
+    );
+    j.state = "installing".into();
+    assert_eq!(waiting_hint(&j, 10_400), None, "it reported");
+}
+
+/// Windows PE without a driver for a card lists it among the problem devices (class Unknown): kept when its IDs say
+/// network controller (CC_02xx), other problem devices (a display adapter) dropped; the Net class is always kept.
+#[test]
+fn driverless_network_card_is_reported() {
+    let prob = "Instance ID:                PCI\\VEN_15AD&DEV_07B0&SUBSYS_07B015AD&REV_01\\4&3b4d2e6&0&0010\r\n\
+Device Description:         Ethernet Controller\r\n\
+Class Name:                 Unknown\r\n\
+Status:                     Problem\r\n\
+Hardware IDs:               PCI\\VEN_15AD&DEV_07B0&SUBSYS_07B015AD&REV_01\r\n\
+                            PCI\\VEN_15AD&DEV_07B0&CC_020000\r\n\
+Compatible IDs:             PCI\\VEN_15AD&CC_0200\r\n\
+\r\n\
+Instance ID:                PCI\\VEN_1234&DEV_1111&SUBSYS_11001AF4&REV_02\\3&267a616a&0&08\r\n\
+Device Description:         Video Controller (VGA Compatible)\r\n\
+Class Name:                 Unknown\r\n\
+Status:                     Problem\r\n\
+Hardware IDs:               PCI\\VEN_1234&DEV_1111&SUBSYS_11001AF4&REV_02\r\n\
+                            PCI\\VEN_1234&DEV_1111&CC_030000\r\n";
+    let n = parse_report(&format!(
+        "{PNPUTIL}\r\n{prob}\r\n=== wmic nic ===\r\n{WMIC}"
+    ));
+    let names: Vec<&str> = n.iter().map(|x| x.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec![
+            "Intel(R) 82574L Gigabit Network Connection",
+            "Ethernet Controller",
+            "Ethernet Controller"
+        ],
+        "the two Net-class cards + the driverless vmxnet3, not the display adapter"
+    );
+    assert_eq!(n[2].class, "Unknown");
+    assert_eq!(n[2].mac, "", "no driver: no MAC");
+}
+
+/// The boot card is found by the vendor + device iPXE saw when Windows PE has no MAC for it.
+#[test]
+fn judge_finds_the_boot_card_by_ipxe() {
+    let mut vmx = nic("PCI\\VEN_15AD&DEV_07B0&SUBSYS_07B015AD&REV_01\\4&1", "");
+    vmx.hwids = vec!["PCI\\VEN_15AD&DEV_07B0&SUBSYS_07B015AD&REV_01".into()];
+    let nics = [nic("PCI\\VEN_8086&DEV_10D3\\x", "bc24116a35ec"), vmx];
+    let r = |a: bool, b: bool| {
+        vec![
+            serde_json::json!({"instance": "PCI\\VEN_8086&DEV_10D3\\x", "ok": a}),
+            serde_json::json!({"instance": "PCI\\VEN_15AD&DEV_07B0&SUBSYS_07B015AD&REV_01\\4&1", "ok": b}),
+        ]
+    };
+    // The PC's MAC is the vmxnet3's (no driver in Windows PE → no MAC): iPXE's card decides.
+    let mac = "bc:24:11:d1:74:40";
+    assert!(judge(&nics, &r(true, false), mac, "PCI\\VEN_15AD&DEV_07B0").is_err());
+    assert!(judge(&nics, &r(false, true), mac, "PCI\\VEN_15AD&DEV_07B0").is_ok());
+    assert!(
+        judge(&nics, &r(true, false), mac, "").is_ok(),
+        "boot card unknown: any card"
+    );
 }
