@@ -162,6 +162,13 @@ Upload the powered-off VM folder (only `.vmx` / `.vmdk` are sent, in parallel ch
   agent runs, PCs that just booted, and exempt groups / IPs. Block outside DNS (53, 853) on the router.
 - **Remote:** a small agent (`broom-vnc`) dials out to the server; the wall streams only the page shown, the single
   view uses H.264 on Chrome / Edge. Ctrl+Alt+Del, Windows key, Alt+Tab and Paste from the toolbar.
+- **Hardware list** (Machines page → Hardware; **Hardware CSV** for all): Windows, computer, board + BIOS, CPU, RAM
+  sticks, graphics cards + driver version, drives, network cards + link speed, monitors and each output's current mode
+  and the modes it offers — sent by the agent once connected and every 30 minutes, kept per machine.
+- **Display** (Machines page, owner): resolution + refresh per machine (picked from the modes its monitor offers, in
+  its Hardware panel) or for the selected machines / a group (typed, e.g. `1920x1080@165`; a machine's own setting wins
+  over its group's). The agent applies it to the main output at every start — only a mode the monitor offers, tested
+  first — and at once when changed.
 - **Power** (Machines page; staff too): tick machines (or all a filter shows, e.g. one group), then **Turn on**
   (Wake-on-LAN: on in the PC's firmware), **Restart** or **Shut down** (now, or after 30 s / 1 / 5 min with an optional
   message on screen; through the PC's agent, which runs Windows' `shutdown`) or **Cancel** a countdown. A machine

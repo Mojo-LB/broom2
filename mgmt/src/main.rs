@@ -14,6 +14,7 @@ mod devices;
 mod dhcp;
 mod disk;
 mod diskless;
+mod display;
 mod disks;
 mod dns;
 mod dnsrec;
@@ -28,6 +29,7 @@ mod goldenram;
 mod groups;
 mod hash;
 mod images;
+mod inventory;
 mod iscsi;
 mod iscsid;
 mod iso9660;
@@ -588,6 +590,8 @@ async fn main() {
         .merge(devices::routes()) // Devices page: edit / bulk / CSV / detail
         .merge(monitor::routes()) // online status, Wake-on-LAN
         .merge(power::routes()) // turn on / restart / shut down machines (Machines page)
+        .merge(inventory::routes()) // each machine's hardware list (Machines page)
+        .merge(display::routes()) // resolution + refresh per machine / group (Machines page)
         .merge(bench::routes()) // Benchmark page + client measurements
         .merge(vnc::routes()) // Remote page: screen + mouse/keys of a Windows machine
         .merge(agentauth::routes()) // Remote: agent keys (handed to the stage, re-issued)

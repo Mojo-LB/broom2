@@ -230,10 +230,17 @@ async fn agent(
         return (StatusCode::FORBIDDEN, "no agent key yet").into_response();
     };
     ws.max_message_size(16 << 20)
-        .on_upgrade(move |s| run_agent(s, mac, host, grp, key))
+        .on_upgrade(move |s| run_agent(s, st, mac, host, grp, key))
 }
 
-async fn run_agent(ws: WebSocket, mac: String, host: String, grp: Option<String>, key: [u8; 32]) {
+async fn run_agent(
+    ws: WebSocket,
+    st: SharedState,
+    mac: String,
+    host: String,
+    grp: Option<String>,
+    key: [u8; 32],
+) {
     let (mut tx, mut rx) = ws.split();
     // Both sides proven before anything else; every text to the agent from here on is signed.
     let Some(session) = crate::agentauth::handshake(&mut tx, &mut rx, &key, &host).await else {
@@ -242,6 +249,11 @@ async fn run_agent(ws: WebSocket, mac: String, host: String, grp: Option<String>
     let (to_agent, mut queue) = mpsc::channel::<Message>(QUEUE);
     let id = register(&mac, &host, grp, to_agent);
     tracing::info!("remote: agent of {host} connected");
+    // Its screen mode, if one is set (display.rs): a diskless machine starts from its golden at every boot.
+    {
+        let (st, mac) = (st.clone(), mac.clone());
+        tokio::task::spawn_blocking(move || crate::display::on_connect(&st, &mac));
+    }
     let writer = async {
         let mut ping = tokio::time::interval(PING);
         let mut n: u64 = 0;
@@ -270,6 +282,11 @@ async fn run_agent(ws: WebSocket, mac: String, host: String, grp: Option<String>
                 }
                 // The agent also pushes hardware health here (metrics.rs), not for the viewer.
                 Message::Text(t) if t.contains("\"metrics\"") => crate::metrics::store(&mac, &t),
+                // …and its hardware list (inventory.rs), kept in the database.
+                Message::Text(t) if t.starts_with("{\"t\":\"inventory\"") => {
+                    let (st, mac) = (st.clone(), mac.clone());
+                    tokio::task::spawn_blocking(move || crate::inventory::store(&st, &mac, t.as_str()));
+                }
                 Message::Close(_) => break,
                 _ => {} // pong / other text
             }

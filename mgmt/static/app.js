@@ -108,14 +108,57 @@ function renderMachines(){
           ? `<button class="btn btn-sm btn-outline-secondary" ${act('wake',m.mac)}>Wake</button>
              <button class="btn btn-sm btn-outline-secondary" ${act('manage',m.id)} data-owner>Manage</button>
              ${basePick(m)}
-             ${m.remote?`<button class="btn btn-sm btn-outline-primary" ${act('remoteTo',m.hostname)} title="See and control this machine">Remote</button>`:''}`
+             ${m.remote?`<button class="btn btn-sm btn-outline-primary" ${act('remoteTo',m.hostname)} title="See and control this machine">Remote</button>`:''}
+             <button class="btn btn-sm btn-outline-secondary" ${act('hwToggle',m.id)} title="What it is made of (sent by its Broom agent)">Hardware</button>`
           : `<button class="btn btn-sm btn-outline-primary" ${act('regMachine',m.mac,m.ip,m.hostname)} data-owner>Register</button>`}</div></td>
-     </tr>`).join('') || '<tr><td colspan=8 class="mono">no matching machines</td></tr>';
+     </tr>${hwOpen.has(m.id)?`<tr><td></td><td colspan="7">${hwHtml(hwData[m.id],m.id)}</td></tr>`:''}`).join('') || '<tr><td colspan=8 class="mono">no matching machines</td></tr>';
   document.getElementById('m_count').textContent=rows.length+' machines';
   mSelCount();
   document.getElementById('m_page').textContent='Page '+mPage+'/'+pages;
   const ps=document.getElementById('m_psize');if(ps)ps.value=M_PAGE===Infinity?'0':String(M_PAGE);
 }
+// Hardware list (inventory.rs): opened under its row, fetched when opened.
+const hwOpen=new Set(),hwData={};
+async function hwToggle(id){
+  if(hwOpen.has(id)){hwOpen.delete(id);renderMachines();return;}
+  try{hwData[id]=await j('/api/machines/inventory?id='+encodeURIComponent(id));hwOpen.add(id);renderMachines();}
+  catch(e){toast(e.message,true)}}
+function hwHtml(r,id){
+  const v=r&&r.inventory,d=(r&&r.display)||{};
+  // Resolution + refresh (display.rs): its own setting, from the modes its monitor offers; "" = as its group / Windows.
+  const cur=d.own||'';
+  const modes=[...new Set([cur,...((r&&r.modes)||[])].filter(Boolean))];
+  const disp=`<div class="d-flex flex-wrap gap-2 align-items-center small mb-2"><span class="text-body-secondary">Display</span>
+    <select class="form-select form-select-sm w-auto" data-owner data-change="hwDisplay" data-args="${esc(JSON.stringify([id]))}">
+      <option value=""${cur?'':' selected'}>${esc(d.group?'as its group ('+d.group+')':'Windows\' choice')}</option>
+      ${modes.map(x=>`<option value="${esc(x)}"${x===cur?' selected':''}>${esc(x.replace('x','×').replace('@',' @ ')+' Hz')}</option>`).join('')}</select>
+    <span class="text-body-secondary">${esc(d.effective?'applied at each start: '+d.effective:'')}</span></div>`;
+  if(!v)return disp+'<span class="text-body-secondary small">No hardware list yet: its Broom agent sends one once it is connected (Remote).</span>';
+  const GB=b=>(b/2**30).toFixed(0)+' GB',row=(k,input)=>input?`<tr><th class="text-nowrap pe-3 fw-normal text-body-secondary">${esc(k)}</th><td>${input}</td></tr>`:'';
+  const list=(a,f)=>(a||[]).map(f).filter(Boolean).join('<br>');
+  return `<table class="table table-sm mb-1 small"><tbody>
+    ${row('Windows',esc([v.os,v.build].filter(Boolean).join(' ')))}
+    ${row('Computer',esc([v.maker,v.model].filter(Boolean).join(' ')))}
+    ${row('Board',esc(v.board||''))}${row('BIOS',esc(v.bios||''))}
+    ${row('CPU',list(v.cpus,c=>esc(`${c.name} — ${c.cores} cores / ${c.threads} threads`)))}
+    ${row('RAM',esc(v.ram_total?GB(v.ram_total):'')+(v.ram&&v.ram.length?'<br>'+list(v.ram,r=>esc(`${r.slot}: ${GB(r.size)} ${r.speed} MT/s ${r.maker} ${r.part}`)):''))}
+    ${row('Graphics',list(v.gpus,g=>esc(`${g.name} — driver ${g.driver}`)))}
+    ${row('Drives',list(v.drives,d=>esc(`${d.model} — ${GB(d.size)} (${d.bus})`)))}
+    ${row('Network',list(v.nics,n=>esc(`${n.name} — ${n.speed?(n.speed/1e6)+' Mb/s':'no link'}${n.up?'':' (down)'} ${n.mac||''}`)))}
+    ${row('Monitors',list(v.monitors,m=>esc(`${m.maker} ${m.name}`)))}
+    ${row('Displays',list(v.displays,d=>esc(`${d.device}${d.primary?' (main)':''}: ${d.w}×${d.h} @ ${d.hz} Hz — ${(d.modes||[]).length} modes offered`)))}
+    </tbody></table><div class="small text-body-secondary">reported ${esc(new Date(v.at*1000).toLocaleString())}</div>`.replace('<table',disp+'<table');}
+async function hwDisplay(id,el){
+  try{const r=await j('/api/machines/display',mk({ids:[id],mode:el.value}));toast(el.value?'Display '+el.value+(r.sent?' sent':' set: applied at its next start'):'Display setting removed');
+    hwData[id]=await j('/api/machines/inventory?id='+encodeURIComponent(id));renderMachines();}
+  catch(e){toast(e.message,true)}}
+// The same for the selected machines, or for a group (new machines of it too).
+async function mDisplay(to){
+  const out=document.getElementById('m_pres'),mode=document.getElementById('m_disp').value.trim();
+  const body=to==='grp'?{group:document.getElementById('m_dgrp').value.trim(),mode}:{ids:[...mSel],mode};
+  if(to==='sel'&&!body.ids.length){say(out,' ✗ select machines first (the boxes on the left)');return;}
+  try{const r=await j('/api/machines/display',mk(body));say(out,' ✓ display '+(mode||'setting removed')+' — sent to '+r.sent+' running machine(s), the others at their next start');}
+  catch(e){say(out,' ✗ '+e.message);}}
 // Power (power.rs): the selected machines (kept across refreshes and pages) → turn on / restart / shut down / cancel.
 const mSel=new Set();
 function mSelCount(){for(const id of [...mSel])if(!allMachines.some(m=>m.id===id))mSel.delete(id);
@@ -1319,7 +1362,7 @@ const ACTIONS={
   loadImages,addImage,setDefault,toggleCache,toggleSsd,togglePreload,editImgGroups,republish,showVersions,exportImage,editBoot,delImage,
   snapshotImage,rollbackImage,versionToImage,deleteVersion,
   loadGames,saveGames,setGamesUpdate,toggleGamesRam,saveGamesUpdate,discardGamesUpdate,editGames,delGames,
-  loadDiskless,dlOsChanged,mPower,mSelOne,mSelAll,startOnboard,cancelOnboard,retryOnboard,saveGolden,setMaint,saveMaint,discardMaint,refreshGolden,delGolden,editGolden,isoOs,delIso,setPlace,uploadIso,
+  loadDiskless,dlOsChanged,mPower,mSelOne,mSelAll,hwToggle,hwDisplay,mDisplay,startOnboard,cancelOnboard,retryOnboard,saveGolden,setMaint,saveMaint,discardMaint,refreshGolden,delGolden,editGolden,isoOs,delIso,setPlace,uploadIso,
   loadDrivers,uploadDriver,saveDrvTargets,delDriver,
   loadGroups,editGroup,closeGroup,saveGroup,createGroup,renameGroup,deleteGroup,saveNewMachines,
   loadServer,loadBench,loadBenchHist,logsReload,logsFollow,logsSearch,benchServer,benchRequest:()=>benchAsk(false),benchCancel:()=>benchAsk(true),bSelAll,

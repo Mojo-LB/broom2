@@ -185,6 +185,7 @@ const HTML_HELPERS: &[&str] = &[
     "mxBadge",
     "opts",
     "osPill",
+    "hwHtml",
     "pwBadge",
     "rate",
     "row",
