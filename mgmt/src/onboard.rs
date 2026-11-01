@@ -1127,8 +1127,9 @@ fn worker(st: SharedState, token: String) {
                     &st,
                     &token,
                     &format!(
-                        "{msg} - saved as {name} version g{} ({s})",
-                        ver.unwrap_or(0)
+                        "{msg} - saved as {name} version g{} ({s}){}",
+                        ver.unwrap_or(0),
+                        diskless::held(&st, &name)
                     ),
                 );
                 update(&st, &token, |j| {

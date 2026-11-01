@@ -109,6 +109,7 @@ pub(crate) fn staff_may(method: &axum::http::Method, path: &str) -> bool {
         "/api/power",
         "/api/vm/start",
         "/api/vm/stop",
+        "/api/versions/pin",
         "/api/games/save",
         "/api/games/discard",
         "/api/password",

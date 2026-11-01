@@ -51,6 +51,7 @@ fn machines_of_a_golden() {
         groups: groups.iter().map(|s| s.to_string()).collect(),
         maint: None,
         ram: false,
+        pins: Default::default(),
     };
     let ids = |g: &Golden| {
         machines_of(g, &all)

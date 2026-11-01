@@ -82,6 +82,9 @@ pub struct Golden {
     pub maint: Option<i64>,
     #[serde(default)]
     pub ram: bool,
+    /// Groups held on a version (group → version; a group not listed gets the newest): pins.rs.
+    #[serde(default)]
+    pub pins: std::collections::BTreeMap<String, u64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -241,6 +244,9 @@ fn configs(st: &SharedState) -> Result<Vec<golden::Config>, String> {
                 update_mac,
                 ram: g.ram,
                 reserve: crate::publish::ram_reserve(st),
+                retain: true,
+                min_free_pct: crate::pins::min_free_pct(st),
+                keep_from: crate::pins::keep_from(&g.pins),
             },
             dir: wb.join(&g.name).to_string_lossy().into(),
             machines: machines_of(&g, &all)
@@ -327,6 +333,19 @@ async fn sync_now(st: SharedState) -> Result<(), ApiError> {
         .await
         .map_err(ise)?
         .map_err(|e| (StatusCode::CONFLICT, e))
+}
+
+/// Every golden's pins through `f` (pins.rs), as one step.
+pub(crate) fn edit_pins(
+    st: &SharedState,
+    f: &dyn Fn(&Golden) -> std::collections::BTreeMap<String, u64>,
+) -> Result<(), ApiError> {
+    edit(st, |list| {
+        for g in list.iter_mut() {
+            g.pins = f(g);
+        }
+        Ok(())
+    })
 }
 
 /// Groups page: every golden's groups through `f` (name, groups → new groups), as one step. No group = no machine.
@@ -664,9 +683,13 @@ fn prepare_games(st: &SharedState, m: &Machine) {
         if !for_group(&groups, m.grp.as_deref()) {
             continue;
         }
+        let pin = crate::games::disks(st)
+            .into_iter()
+            .find(|d| d.name == c.name)
+            .and_then(|d| crate::pins::pin_for(&d.pins, m.grp.as_deref()));
         let mut r = Err(String::new());
         for i in 0..30 {
-            r = crate::iscsi::diskless_games_prepare(&c.name, &m.mac);
+            r = crate::iscsi::diskless_games_prepare(&c.name, &m.mac, pin);
             match &r {
                 Err(e) if e.contains("still connected") && i < 29 => {
                     std::thread::sleep(std::time::Duration::from_millis(200))
@@ -725,7 +748,13 @@ pub(crate) fn boot_diskless(
     );
     let mut p = None;
     for i in 0..30 {
-        match crate::iscsi::diskless_prepare(name, &m.mac, promote, drop_base) {
+        match crate::iscsi::diskless_prepare(
+            name,
+            &m.mac,
+            promote,
+            drop_base,
+            crate::pins::pin_for(&g.pins, m.grp.as_deref()),
+        ) {
             Ok(x) => {
                 p = Some(x);
                 break;
@@ -1250,6 +1279,10 @@ async fn upsert(
             groups: groups.clone(),
             maint: old.as_ref().and_then(|o| o.maint),
             ram: old.as_ref().is_some_and(|o| o.ram),
+            pins: old
+                .as_ref()
+                .map(|o| crate::pins::pruned(&o.pins, &groups, false))
+                .unwrap_or_default(),
         };
         match list.iter().position(|x| x.name == name) {
             Some(i) => list[i] = g,
@@ -1448,8 +1481,20 @@ async fn save(
     .await
     .map_err(ise)?
     .map_err(|e| (StatusCode::CONFLICT, e))?;
+    let msg = format!("{msg}{}", held(&st, &b.name));
     tracing::info!("golden {}: {msg}", b.name);
     Ok(Json(serde_json::json!({"ok": true, "status": msg})))
+}
+
+/// Groups of golden `name` held on an older version than its newest (for a message after a new version).
+pub(crate) fn held(st: &SharedState, name: &str) -> String {
+    let (Some(g), Some(i)) = (
+        goldens(st).into_iter().find(|g| g.name == name),
+        served(name),
+    ) else {
+        return String::new();
+    };
+    crate::pins::held_note(&g.pins, i.disk.ver)
 }
 
 /// Save / Discard wait for the maintenance VM to be off (its disk is still attached until then).

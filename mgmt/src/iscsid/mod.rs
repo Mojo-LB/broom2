@@ -89,6 +89,15 @@ pub enum Req {
         /// `name` is a games disk served to diskless machines (golden.rs Config.games).
         #[serde(default)]
         games: bool,
+        /// The version to boot (its group is held on it); None = the newest.
+        #[serde(default)]
+        ver: Option<u64>,
+    },
+    /// Drop the oldest version of golden / games disk `name` (games::Registry::drop_oldest). Answers it in `msg`.
+    VersionDrop {
+        name: String,
+        #[serde(default)]
+        golden: bool,
     },
     /// Delete machine `mac`'s layers of golden (or games disk) `name`.
     DisklessForget {
@@ -412,8 +421,9 @@ async fn handle(req: Req) -> Resp {
             promote,
             drop_base,
             games,
+            ver,
         } => match tokio::task::spawn_blocking(move || {
-            golden::prepare(&name, &mac, promote, drop_base, games)
+            golden::prepare(&name, &mac, promote, drop_base, games, ver)
         })
         .await
         .unwrap_or_else(|e| Err(e.to_string()))
@@ -434,6 +444,21 @@ async fn handle(req: Req) -> Resp {
             }
         }
         Req::GoldenDiscard { name } => r.err = golden::GOLDENS.discard(&name).err(),
+        Req::VersionDrop { name, golden: g } => {
+            match tokio::task::spawn_blocking(move || {
+                if g {
+                    golden::GOLDENS.drop_oldest(&name)
+                } else {
+                    games::drop_oldest(&name)
+                }
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()))
+            {
+                Ok(v) => r.msg = v.to_string(),
+                Err(e) => r.err = Some(e),
+            }
+        }
         Req::DisklessStatus => r.goldens = golden::info(),
     }
     r

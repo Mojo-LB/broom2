@@ -42,6 +42,7 @@ mod monitor;
 mod ntfsread;
 mod onboard;
 mod overlay;
+mod pins;
 mod power;
 mod preflight;
 mod publish;
@@ -596,6 +597,7 @@ async fn main() {
         .merge(power::routes()) // turn on / restart / shut down machines (Machines page)
         .merge(inventory::routes()) // each machine's hardware list (Machines page)
         .merge(display::routes()) // resolution + refresh per machine / group (Machines page)
+        .merge(pins::routes()) // versions kept + which one each group gets (Diskless / iSCSI Disks / Groups)
         .merge(vmmaint::routes()) // Maintain in the browser: a golden + games disks in a VM, its screen here
         .merge(bench::routes()) // Benchmark page + client measurements
         .merge(vnc::routes()) // Remote page: screen + mouse/keys of a Windows machine

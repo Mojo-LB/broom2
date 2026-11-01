@@ -124,6 +124,7 @@ pub fn diskless_prepare(
     mac: &str,
     promote: bool,
     drop_base: bool,
+    ver: Option<u64>,
 ) -> Result<crate::iscsid::golden::Prepared, String> {
     call(&Req::DisklessPrepare {
         name: name.into(),
@@ -131,6 +132,7 @@ pub fn diskless_prepare(
         promote,
         drop_base,
         games: false,
+        ver,
     })
     .and_then(|r| r.prepared.ok_or_else(|| "daemon of an older build".into()))
 }
@@ -140,6 +142,7 @@ pub fn diskless_prepare(
 pub fn diskless_games_prepare(
     name: &str,
     mac: &str,
+    ver: Option<u64>,
 ) -> Result<crate::iscsid::golden::Prepared, String> {
     call(&Req::DisklessPrepare {
         name: name.into(),
@@ -147,6 +150,7 @@ pub fn diskless_games_prepare(
         promote: false,
         drop_base: true,
         games: true,
+        ver,
     })
     .and_then(|r| r.prepared.ok_or_else(|| "daemon of an older build".into()))
 }
@@ -177,6 +181,17 @@ pub fn golden_save(name: &str) -> Result<String, String> {
 
 pub fn golden_discard(name: &str) -> Result<(), String> {
     call(&Req::GoldenDiscard { name: name.into() }).map(|_| ())
+}
+
+/// Drop the oldest kept version of golden (`golden`) / games disk `name` → the version dropped.
+pub fn version_drop(name: &str, golden: bool) -> Result<u64, String> {
+    let r = call(&Req::VersionDrop {
+        name: name.into(),
+        golden,
+    })?;
+    r.msg.parse().map_err(|_| {
+        "the iSCSI daemon is of an older build — it is replaced once no machine uses it".to_string()
+    })
 }
 
 /// Close every iSCSI session of client `ip` (that machine is off). Err from a daemon of a build without it.

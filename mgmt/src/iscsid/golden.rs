@@ -341,14 +341,16 @@ pub fn detach(v: &View) {
 
 /// Machine `mac` is about to boot golden `name` (mgmt, at its PXE boot; its earlier sessions must be gone — KickPeer
 /// first). Its session layer is dropped — or, `promote`, becomes its base layer (the first boot's setup is done) when
-/// it was on the version served now. Its base layer is dropped with `drop_base` (new name, new licence…) or when it
-/// was built on another version. Then the new session reads the newest version.
+/// it was on the version it boots now. Its base layer is dropped with `drop_base` (new name, new licence…) or when it
+/// was built on another version. Then the new session reads version `want` (its group is held on it, mgmt) — the
+/// newest when None or no longer kept.
 pub fn prepare(
     name: &str,
     mac: &str,
     promote: bool,
     drop_base: bool,
     games: bool,
+    want: Option<u64>,
 ) -> Result<Prepared, String> {
     let c = config(name, games)?;
     // A games disk keeps no base layer.
@@ -365,9 +367,17 @@ pub fn prepare(
     {
         return Err(format!("machine {mac} does not boot golden {name}"));
     }
-    let ver = reg(&c)
+    let newest = reg(&c)
         .newest(name)
         .ok_or_else(|| format!("{name} not served"))?;
+    let ver = match want {
+        Some(v) if reg(&c).serves(name, v) => v,
+        Some(v) => {
+            tracing::warn!("{name}: version g{v} is no longer kept — machine {mac} gets g{newest}");
+            newest
+        }
+        None => newest,
+    };
     let key = (key_name(name, games), mac.clone());
     let old = {
         let mut all = MACHS.lock();

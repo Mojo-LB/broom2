@@ -170,6 +170,11 @@ fn split_top<'a>(e: &'a str, sep: &str) -> Vec<&'a str> {
 /// Helpers that return escaped / fixed HTML or text made from numbers (each one read when added here).
 const HTML_HELPERS: &[&str] = &[
     "act",
+    "verPicks",
+    "verCell",
+    "verOpts",
+    "verPanel",
+    "verRow",
     "bBar",
     "baseBadge",
     "basePick",

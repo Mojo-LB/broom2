@@ -525,7 +525,7 @@ async fn diskless_machine_session() {
         0x03,
         "not prepared for a boot: refused"
     );
-    golden::prepare("w11tcp", mac, false, false, false).unwrap();
+    golden::prepare("w11tcp", mac, false, false, false, None).unwrap();
     let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
     assert_eq!(login(&mut s, &mine).await.bhs[36], 0, "its own disk");
     let data: Vec<u8> = (0..64 << 10).map(|i: u32| (i % 251) as u8).collect();
@@ -560,7 +560,7 @@ async fn diskless_machine_session() {
         "golden file untouched"
     );
     // The other machine's disk, from this IP: refused.
-    golden::prepare("w11tcp", "02:00:00:00:00:32", false, false, false).unwrap();
+    golden::prepare("w11tcp", "02:00:00:00:00:32", false, false, false, None).unwrap();
     let mut x = tokio::net::TcpStream::connect(addr).await.unwrap();
     assert_eq!(
         login(&mut x, &other).await.bhs[36],
@@ -569,7 +569,7 @@ async fn diskless_machine_session() {
     );
     drop(s);
     for _ in 0..100 {
-        if golden::prepare("w11tcp", mac, false, false, false).is_ok() {
+        if golden::prepare("w11tcp", mac, false, false, false, None).is_ok() {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -659,4 +659,176 @@ async fn same_initiator_two_targets() {
     TARGETS.lock().remove(ta);
     TARGETS.lock().remove(tb);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// WRITE `data` at `lba` on an update session (R2T bursts answered as they come).
+async fn write_blocks(s: &mut tokio::net::TcpStream, itt: u32, cmdsn: u32, lba: u32, data: &[u8]) {
+    s.write_all(&scsi_cmd(
+        itt,
+        cmdsn,
+        0xa0,
+        0x2a,
+        lba,
+        (data.len() / 512) as u16,
+    ))
+    .await
+    .unwrap();
+    let mut sent = 0;
+    while sent < data.len() {
+        let r = conn::read_pdu(s).await.unwrap();
+        assert_eq!(r.bhs[0], 0x31, "R2T");
+        let g = |at: usize| u32::from_be_bytes(r.bhs[at..at + 4].try_into().unwrap()) as usize;
+        let (off, len) = (g(40), g(44));
+        let chunks: Vec<&[u8]> = data[off..off + len].chunks(32768).collect();
+        for (i, chunk) in chunks.iter().enumerate() {
+            let mut p = pdu(
+                0x05,
+                if i + 1 == chunks.len() { 0x80 } else { 0 },
+                itt,
+                0,
+                chunk,
+            );
+            p[8..16].fill(0);
+            p[20..24].copy_from_slice(&r.bhs[20..24]); // TTT
+            p[36..40].copy_from_slice(&(i as u32).to_be_bytes());
+            p[40..44].copy_from_slice(&((off + i * 32768) as u32).to_be_bytes());
+            s.write_all(&p).await.unwrap();
+        }
+        sent += len;
+    }
+    let r = conn::read_pdu(s).await.unwrap();
+    assert_eq!((r.bhs[0], r.bhs[3]), (0x21, 0), "write GOOD");
+}
+
+/// Keeping versions (Config.retain): saved versions stay served (nothing merged while space is fine), each reads its
+/// own bytes; dropping the oldest merges only its next layer, so every newer version reads as before; a version a
+/// group is held on (keep_from) or a machine uses is never dropped, nor the last one; a drop cut off by a restart is
+/// finished up to its target only.
+#[tokio::test]
+async fn games_disk_keeps_versions() {
+    let _one = crate::iscsid::golden::TEST_LOCK.lock().await;
+    let d = std::env::temp_dir().join("broom_test_keep");
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("k")).unwrap();
+    let img = d.join("k/games.img");
+    std::fs::write(&img, vec![0x11u8; 1 << 20]).unwrap();
+    let iqn = "iqn.test:keep";
+    let cfg = |keep_from: Option<u64>| games::Config {
+        name: "k".into(),
+        iqn: iqn.into(),
+        path: img.to_string_lossy().into(),
+        update_ip: Some("127.0.0.1".into()),
+        retain: true,
+        min_free_pct: 0, // never short of space here
+        keep_from,
+        ..Default::default()
+    };
+    games::set(vec![cfg(None)]).unwrap();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = l.accept().await {
+            tokio::spawn(conn::serve(s, "127.0.0.1".into()));
+        }
+    });
+    let info = || games::info().into_iter().find(|i| i.name == "k").unwrap();
+    let wait_off = || async {
+        for _ in 0..100 {
+            if !info().update_connected {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("update still connected");
+    };
+    // g1 writes 0xA1 at blocks 8..16 and 64..72; g2 writes 0xB2 at 8..16 (over g1) and 128..136.
+    let fill = |b: u8| vec![b; 8 * 512];
+    for (ver, b, at) in [(0u64, 0xa1u8, [8u32, 64]), (1, 0xb2, [8, 128])] {
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        assert_eq!(login(&mut s, &format!("{iqn}.g{ver}")).await.bhs[36], 0);
+        write_blocks(&mut s, 10, 1, at[0], &fill(b)).await;
+        write_blocks(&mut s, 11, 2, at[1], &fill(b)).await;
+        drop(s);
+        wait_off().await;
+        games::save("k").unwrap();
+    }
+    games::tick();
+    let i = info();
+    assert_eq!(i.ver, 2);
+    assert_eq!(
+        i.versions.iter().map(|v| v.ver).collect::<Vec<_>>(),
+        [0, 1, 2],
+        "every version kept"
+    );
+    assert!(i.versions[1].bytes > 0 && i.versions[1].saved > 0);
+    let read = |ver: u64, lba: u32| async move {
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let ok = login(&mut s, &format!("{iqn}.g{ver}")).await.bhs[36] == 0;
+        if !ok {
+            return None;
+        }
+        Some(read_blocks(&mut s, 20, 1, lba, 8).await[0])
+    };
+    assert_eq!(read(0, 8).await, Some(0x11), "g0 still served as it was");
+    assert_eq!(
+        (read(1, 8).await, read(1, 64).await, read(1, 128).await),
+        (Some(0xa1), Some(0xa1), Some(0x11))
+    );
+    assert_eq!(
+        (read(2, 8).await, read(2, 64).await, read(2, 128).await),
+        (Some(0xb2), Some(0xa1), Some(0xb2))
+    );
+
+    // A machine still on g0: not dropped.
+    let mut on0 = tokio::net::TcpStream::connect(addr).await.unwrap();
+    login(&mut on0, &format!("{iqn}.g0")).await;
+    assert!(games::drop_oldest("k").unwrap_err().contains("in use"));
+    drop(on0);
+    for _ in 0..100 {
+        if info().versions[0].sessions == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    // g0 dropped: g1 is now inside the file; g1 and g2 read exactly as before.
+    assert_eq!(games::drop_oldest("k").unwrap(), 0);
+    let i = info();
+    assert_eq!(i.versions.iter().map(|v| v.ver).collect::<Vec<_>>(), [1, 2]);
+    assert_eq!(read(0, 8).await, None, "g0 no longer served");
+    assert_eq!(
+        (read(1, 8).await, read(1, 64).await, read(1, 128).await),
+        (Some(0xa1), Some(0xa1), Some(0x11))
+    );
+    assert_eq!(
+        (read(2, 8).await, read(2, 64).await, read(2, 128).await),
+        (Some(0xb2), Some(0xa1), Some(0xb2))
+    );
+    // A group held on g1: g1 stays.
+    games::set(vec![cfg(Some(1))]).unwrap();
+    assert!(games::drop_oldest("k").unwrap_err().contains("held"));
+    games::set(vec![cfg(None)]).unwrap();
+
+    // A drop of g1 cut off by a restart (marker written, nothing merged yet): finished up to its target at the next
+    // start — g2 kept and right.
+    games::set(Vec::new()).unwrap();
+    std::fs::write(d.join("k/merging"), "2").unwrap();
+    games::set(vec![cfg(None)]).unwrap();
+    let i = info();
+    assert_eq!(
+        i.versions.iter().map(|v| v.ver).collect::<Vec<_>>(),
+        [2],
+        "finished up to g2"
+    );
+    assert!(!d.join("k/merging").exists());
+    assert_eq!(
+        (read(2, 8).await, read(2, 64).await, read(2, 128).await),
+        (Some(0xb2), Some(0xa1), Some(0xb2))
+    );
+    assert!(
+        games::drop_oldest("k")
+            .unwrap_err()
+            .contains("only one version")
+    );
+    games::set(Vec::new()).unwrap();
+    let _ = std::fs::remove_dir_all(&d);
 }

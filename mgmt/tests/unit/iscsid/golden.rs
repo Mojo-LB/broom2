@@ -108,7 +108,7 @@ fn machine_layers_lifecycle() {
 
     // Not prepared yet → refused; wrong IP → refused.
     assert!(attach(&t, pc).is_err(), "not prepared");
-    let p = prepare("w11", mac, false, false, false).unwrap();
+    let p = prepare("w11", mac, false, false, false, None).unwrap();
     assert_eq!(
         p,
         Prepared {
@@ -123,13 +123,13 @@ fn machine_layers_lifecycle() {
     assert_eq!(read(&v, &lun, 0, 4), [1, 1, 1, 1]);
     write(&v, &lun, 4096, b"name=PC11");
     assert!(
-        prepare("w11", mac, true, false, false).is_err(),
+        prepare("w11", mac, true, false, false, None).is_err(),
         "still connected"
     );
     detach(&v);
 
     // Promoted: the setup is the base now; a normal boot's writes land in the session.
-    let p = prepare("w11", mac, true, false, false).unwrap();
+    let p = prepare("w11", mac, true, false, false, None).unwrap();
     assert_eq!(
         p,
         Prepared {
@@ -148,7 +148,11 @@ fn machine_layers_lifecycle() {
     assert!(i[0].machines[0].session_bytes > 0);
 
     // Next boot: the session is gone, the base stays.
-    assert!(!prepare("w11", mac, false, false, false).unwrap().first);
+    assert!(
+        !prepare("w11", mac, false, false, false, None)
+            .unwrap()
+            .first
+    );
     let v = attach(&t, pc).unwrap();
     assert_eq!(&read(&v, &lun, 4096, 9), b"name=PC11");
     assert_eq!(read(&v, &lun, 8192, 8), [1u8; 8]);
@@ -168,8 +172,32 @@ fn machine_layers_lifecycle() {
     GOLDENS.detach(&g);
     assert!(GOLDENS.save("w11").unwrap().starts_with("version g1 ready"));
 
+    // Its group held on g0 (pins): it boots g0 still, its base kept; a version no longer kept → the newest.
+    assert_eq!(
+        prepare("w11", mac, false, false, false, Some(0)).unwrap(),
+        Prepared {
+            ver: 0,
+            first: false
+        }
+    );
+    let v = attach(&t, pc).unwrap();
+    assert_eq!(read(&v, &lun, 0, 7), [1u8; 7], "g0's bytes");
+    detach(&v);
+    assert_eq!(
+        prepare("w11", mac, false, false, false, Some(9))
+            .unwrap()
+            .ver,
+        1
+    );
+    assert_eq!(
+        prepare("w11", mac, false, false, false, Some(0))
+            .unwrap()
+            .ver,
+        0
+    );
+
     // A new version: the base (built on g0) is dropped, the machine sets itself up again on g1.
-    let p = prepare("w11", mac, true, false, false).unwrap();
+    let p = prepare("w11", mac, true, false, false, None).unwrap();
     assert_eq!(
         p,
         Prepared {
@@ -182,9 +210,9 @@ fn machine_layers_lifecycle() {
     assert_eq!(read(&v, &lun, 4096, 4), [1u8; 4], "old base gone");
     write(&v, &lun, 4096, b"name=PC11");
     detach(&v);
-    assert!(!prepare("w11", mac, true, false, false).unwrap().first);
+    assert!(!prepare("w11", mac, true, false, false, None).unwrap().first);
     // drop_base (renamed / new licence): set up again.
-    assert!(prepare("w11", mac, false, true, false).unwrap().first);
+    assert!(prepare("w11", mac, false, true, false, None).unwrap().first);
 
     // Forget: its folder is gone; it is no longer served once unlisted.
     forget("w11", mac, false).unwrap();
@@ -245,11 +273,11 @@ fn games_disk_copy_per_machine() {
     );
     assert!(games_iqns_for("10.9.1.12").is_empty(), "and to no one else");
     assert!(
-        prepare("g1", mac, false, false, false).is_err(),
+        prepare("g1", mac, false, false, false, None).is_err(),
         "no golden of that name"
     );
     assert_eq!(
-        prepare("g1", mac, true, false, true).unwrap(),
+        prepare("g1", mac, true, false, true, None).unwrap(),
         Prepared {
             ver: 0,
             first: true
@@ -265,7 +293,7 @@ fn games_disk_copy_per_machine() {
     detach(&v);
 
     // Next boot, even asked to promote: its writes are gone, no base.
-    assert!(prepare("g1", mac, true, false, true).unwrap().first);
+    assert!(prepare("g1", mac, true, false, true, None).unwrap().first);
     let v = attach(&t, pc).unwrap();
     assert_eq!(read(&v, &lun, 4096, 8), [5u8; 8]);
     detach(&v);
@@ -283,7 +311,7 @@ fn games_disk_copy_per_machine() {
             .unwrap()
             .starts_with("version g1 ready")
     );
-    assert_eq!(prepare("g1", mac, false, false, true).unwrap().ver, 1);
+    assert_eq!(prepare("g1", mac, false, false, true, None).unwrap().ver, 1);
     let v = attach(&t, pc).unwrap();
     assert_eq!(&read(&v, &lun, 0, 5), b"PATCH");
     detach(&v);

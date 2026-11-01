@@ -694,7 +694,7 @@ async function applyDhcp(){const b={};['mode','iface','server_ip','subnet','netm
 
 // ---- games disks (Games page) ----
 let gmDisks=[];
-async function loadGames(){const [g]=await Promise.all([j('/api/games'),loadVols()]);const tb=document.querySelector('#games tbody');if(!tb)return;
+async function loadGames(){const [g]=await Promise.all([j('/api/games'),loadVols(),loadVersions()]);const tb=document.querySelector('#games tbody');if(!tb)return;
   gmDisks=g.disks;
   document.getElementById('gm_grouplist').innerHTML=g.groups.map(x=>`<option value="${esc(x)}">`).join('');
   const opts=sel=>'<option value="">— none —</option>'+g.machines.map(m=>
@@ -702,12 +702,12 @@ async function loadGames(){const [g]=await Promise.all([j('/api/games'),loadVols
   tb.innerHTML=g.disks.map(x=>{const d=x.disk,s=x.status;
     return `<tr><td>${esc(d.name)}</td><td class="mono">${esc(d.letter)}:</td><td class="mono">${d.size_gb} GB</td>
       <td>${d.groups.length?esc(d.groups.join(', ')):'<span class="mono">all</span>'}</td>
-      <td class="mono">${s?'g'+s.ver+(s.layers?` <span title="versions not merged into the disk yet (${gbs(s.layer_bytes)})">+${s.layers} ${s.merging?'merging…':'to merge'}</span>`:''):'<span class="text-danger">not served</span>'}</td>
+      <td class="mono text-nowrap">${s?verCell('games',d.name,s):'<span class="text-danger">not served</span>'}</td>
       <td class="mono">${s?s.sessions+(s.old_sessions?` <span title="still on an older version until they reboot">(${s.old_sessions} older)</span>`:''):''}</td>
       <td><select class="form-select form-select-sm d-inline-block w-auto" data-owner data-change="setGamesUpdate" data-args="${esc(JSON.stringify([d.name]))}">${opts(d.update)}</select>${d.update!=null&&!x.update_ip?' <span class="text-danger" title="no fixed IP or lease known">no IP</span>':''}${s&&s.update_connected?' <span class="text-success">'+ic('dot','')+' writable</span>':''}</td>
       <td class="mono">${s&&s.update_bytes?gbs(s.update_bytes)+` <button class="btn btn-sm btn-outline-primary" ${act('saveGamesUpdate',d.name)}>Save</button> <button class="btn btn-sm btn-outline-secondary" ${act('discardGamesUpdate',d.name)}>Discard</button>`:'—'}</td>
       <td>${volCell('games',d.name,x.volume)}</td>
-      <td data-owner><button class="btn btn-sm btn-outline-secondary" ${act('toggleGamesRam',d.name,!d.ram)} title="RAM: the disk is served from a copy in the server's RAM (loaded in the background; needs about as much free RAM as the data on it — games barely compress). Disk: read from its file (the page cache keeps what is read most).">${d.ram?(s&&s.ram?'Cache: RAM':(s&&s.ram_loading?'Cache: RAM (loading…)':'Cache: RAM (not loaded)')):'Cache: disk'}</button> <button class="btn btn-sm btn-outline-secondary" ${act('editGames',d.name)}>Edit</button> <button class="btn btn-sm btn-outline-danger" ${act('delGames',d.name)}>Delete</button></td></tr>`;}).join('')
+      <td data-owner><button class="btn btn-sm btn-outline-secondary" ${act('toggleGamesRam',d.name,!d.ram)} title="RAM: the disk is served from a copy in the server's RAM (loaded in the background; needs about as much free RAM as the data on it — games barely compress). Disk: read from its file (the page cache keeps what is read most).">${d.ram?(s&&s.ram?'Cache: RAM':(s&&s.ram_loading?'Cache: RAM (loading…)':'Cache: RAM (not loaded)')):'Cache: disk'}</button> <button class="btn btn-sm btn-outline-secondary" ${act('editGames',d.name)}>Edit</button> <button class="btn btn-sm btn-outline-danger" ${act('delGames',d.name)}>Delete</button></td></tr>`+verRow('games',d.name,10);}).join('')
     ||'<tr><td colspan="10" class="mono">no iSCSI disk yet</td></tr>';
   const m=document.getElementById('gm_msg');if(m&&g.error)say(m,' ✗ not served: '+g.error);}
 async function gamesCall(url,body,q){if(q&&!await sure(q))return;await post(url,body,'gm_msg',r=>r.status||'saved',loadGames);}
@@ -720,11 +720,45 @@ const delGames=name=>gamesCall('/api/games/delete',{name},'Delete iSCSI disk '+n
 function editGames(name){const d=gmDisks.find(x=>x.disk.name===name).disk;
   for(const [k,val] of [['gm_name',d.name],['gm_letter',d.letter],['gm_size',d.size_gb],['gm_groups',d.groups.join(', ')]])document.getElementById(k).value=val;}
 
+// ---- versions of goldens / iSCSI disks (pins.rs): kept until a drive runs short, a group held on one ----
+let verData=null;const verOpen=new Set();
+async function loadVersions(){verData=await j('/api/versions').catch(()=>verData);return verData;}
+const verEntry=(kind,name)=>verData&&(kind==='golden'?verData.goldens:verData.games).find(x=>x.name===name);
+const pinOf=(pins,g)=>{for(const [k,x] of Object.entries(pins||{}))if(k.toLowerCase()===String(g).toLowerCase())return x;return null;};
+function verOpts(vers,cur){return `<option value=""${cur==null?' selected':''}>newest</option>`+[...vers].sort((a,b)=>b-a).map(x=>`<option value="${esc(x)}"${x===cur?' selected':''}>g${esc(x)}</option>`).join('');}
+// The Version column: the newest, how many are kept, the panel's button.
+function verCell(kind,name,s){const n=(s.versions&&s.versions.length)||(s.layers+1);
+  return `g${esc(s.ver)}${s.merging?' (merging…)':''} <button class="btn btn-sm btn-outline-secondary py-0" ${act('verToggle',kind,name)} title="versions kept, which one each group boots">${esc(n)} kept</button>`;}
+function verRow(kind,name,cols){return verOpen.has(kind+':'+name)?`<tr><td colspan="${esc(cols)}">${verPanel(kind,verEntry(kind,name))}</td></tr>`:'';}
+function verPanel(kind,e){if(!e)return '<span class="small text-body-secondary">no version information (not served, or the iSCSI daemon is of an older build)</span>';
+  const held=v=>Object.entries(e.pins||{}).filter(([,x])=>x===v).map(([k])=>k).join(', ');
+  const rows=[...(e.versions||[])].reverse().map(x=>`<tr><td class="mono">g${esc(x.ver)}${x.ver===e.newest?' <span class="badge text-bg-primary">newest</span>':''}</td>
+    <td class="mono">${esc(x.bytes?gbs(x.bytes):'(in the disk file)')}</td><td class="small">${esc(x.saved?new Date(x.saved*1000).toLocaleString():'')}</td>
+    <td class="small">${esc(x.sessions?x.sessions+' on it now':'')}</td><td class="small">${esc(held(x.ver))}</td></tr>`).join('');
+  const vers=(e.versions||[]).map(x=>x.ver);
+  const fs=e.fs_size?gbs(e.fs_free)+' free of '+gbs(e.fs_size)+' on its drive':'';
+  return `<div class="small mb-1 text-body-secondary">Every saved version is kept until its drive has less than ${esc(verData.min_free_pct)}% free; then the oldest goes — never one a group is held on or a machine is on now.${esc(fs?' '+fs+'.':'')}</div>
+    <div class="table-responsive"><table class="table table-sm w-auto mb-2"><thead><tr><th>Version</th><th>Its own data</th><th>Saved</th><th>In use</th><th>Held for</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="d-flex flex-wrap gap-3 align-items-center"><b class="small">Version each group boots</b>${verPicks(kind,e,vers)}
+    <button class="btn btn-sm btn-outline-danger" data-owner ${act('verDrop',kind,e.name)}>Drop the oldest version</button></div>`;}
+// A version picker per group that gets it: changing one holds that group there at once (machines: next boot).
+function verPicks(kind,e,vers){return (e.groups||[]).map(g=>`<label class="d-flex align-items-center gap-1 small">${esc(g)} <select class="form-select form-select-sm w-auto py-0" data-change="verPin" data-args="${esc(JSON.stringify([kind,e.name,g]))}">${verOpts(vers,pinOf(e.pins,g))}</select></label>`).join('')
+    ||'<span class="small text-body-secondary">for every machine — hold a group on a version from the Groups page</span>';}
+const verReload=kind=>kind==='golden'?loadDiskless():loadGames();
+async function verToggle(kind,name){const k=kind+':'+name;if(verOpen.has(k))verOpen.delete(k);else verOpen.add(k);verReload(kind);}
+async function verPin(kind,name,group,el){
+  try{const r=await j('/api/versions/pin',mk({kind,name,group,ver:el.value===''?null:+el.value}));toast(r.status);}catch(e){toast(e.message,true);}
+  verReload(kind);}
+async function verDrop(kind,name){if(!await sure('Drop the oldest kept version of '+name+' now? It can no longer be booted or gone back to. (Not possible while a machine is on it or a group is held on it.)'))return;
+  try{const r=await j('/api/versions/drop-oldest',mk({kind,name}));toast(r.status);}catch(e){toast(e.message,true);}
+  verReload(kind);}
+const verKeepFree=()=>post('/api/versions/keep-free',{pct:+v('ver_pct')},'ver_msg',()=>'saved',loadDiskless);
+
 // ---- diskless goldens (Diskless page) ----
 let dlData=null;
 const mac12=m=>(m||'').toLowerCase().replace(/[^0-9a-f]/g,'');
 async function loadDiskless(){
-  const [d,vl]=await Promise.all([j('/api/diskless'),j('/api/volumes').catch(()=>({volumes:[]}))]);
+  const [d,vl]=await Promise.all([j('/api/diskless'),j('/api/volumes').catch(()=>({volumes:[]})),loadVersions()]);
   dlData=d;const tb=document.querySelector('#dl_goldens tbody');if(!tb)return;
   const opts=sel=>'<option value="">— none —</option>'+d.machines.map(m=>
     `<option value="${esc(m.id)}"${m.id===sel?' selected':''}>${esc(m.name)}${m.group?' ('+esc(m.group)+')':''}</option>`).join('');
@@ -732,12 +766,13 @@ async function loadDiskless(){
     return `<tr><td><b>${esc(g.name)}</b></td><td>${osPill(g.os)}</td><td class="mono">${esc(g.size_gb)} GB</td>
       <td><div class="mono small" style="max-width:16rem;white-space:normal;overflow-wrap:anywhere">${esc(g.iso||'—')}</div></td>
       <td>${g.groups.length?esc(g.groups.join(', ')):'<span class="text-body-secondary">none</span>'}</td>
-      <td class="mono">${s?'g'+esc(s.ver)+(s.layers?' +'+esc(s.layers)+(s.merging?' merging…':' to merge'):''):'<span class="text-danger">not served</span>'}</td>
+      <td class="mono text-nowrap">${s?verCell('golden',g.name,s):'<span class="text-danger">not served</span>'}</td>
       <td class="mono">${x.status?x.status.machines.filter(m=>m.connected).length:''}</td>
       <td><select class="form-select form-select-sm d-inline-block w-auto" data-owner data-change="setMaint" data-args="${esc(JSON.stringify([g.name]))}">${opts(g.maint)}</select>${s&&s.update_connected?' <span class="text-success">'+ic('dot','')+' writable</span>':''}</td>
       <td class="mono">${s&&s.update_bytes?gbs(s.update_bytes)+` <button class="btn btn-sm btn-outline-primary" data-owner ${act('saveMaint',g.name)}>Save</button> <button class="btn btn-sm btn-outline-secondary" data-owner ${act('discardMaint',g.name)}>Discard</button>`:'—'}</td>
-      <td data-owner class="text-nowrap"><button class="btn btn-sm btn-outline-secondary" ${act('editGolden',g.name)}>Edit</button>${g.os==='windows'?` <button class="btn btn-sm btn-outline-secondary" title="Write Broom's current startup script (broom-diskless.ps1) into this golden as its next version, without booting it. Needed once for goldens set up before the script updated itself." ${act('refreshGolden',g.name)}>Update script</button>`:''} <button class="btn btn-sm btn-outline-danger" ${act('delGolden',g.name)}>Delete</button></td></tr>`;}).join('')
+      <td data-owner class="text-nowrap"><button class="btn btn-sm btn-outline-secondary" ${act('editGolden',g.name)}>Edit</button>${g.os==='windows'?` <button class="btn btn-sm btn-outline-secondary" title="Write Broom's current startup script (broom-diskless.ps1) into this golden as its next version, without booting it. Needed once for goldens set up before the script updated itself." ${act('refreshGolden',g.name)}>Update script</button>`:''} <button class="btn btn-sm btn-outline-danger" ${act('delGolden',g.name)}>Delete</button></td></tr>`+verRow('golden',g.name,10);}).join('')
     ||'<tr><td colspan="10" class="mono">no golden yet — create one below</td></tr>';
+  const vp=document.getElementById('ver_pct');if(vp&&verData&&document.activeElement!==vp)vp.value=verData.min_free_pct;
   // Their machines: each with its own layers (from the daemon) and target.
   const mb=document.querySelector('#dl_machines tbody');
   const rows=d.goldens.flatMap(x=>x.machines.map(m=>{const st=x.status?x.status.machines.find(y=>y.mac===mac12(m.mac)):null;
@@ -893,16 +928,19 @@ function editGroup(n){if(!grData)return;grCur=n;const g=grData,lc=n.toLowerCase(
     esc(m.name)+(m.grp&&m.grp.toLowerCase()!==lc?` <span class="mono">(${esc(m.grp)})</span>`:''))).join('')||'—';
   document.getElementById('gr_images').innerHTML=g.images.map(i=>box(i.id,!i.groups.length||grIn(i,n),
     esc(i.name)+' '+osPill(i.os)+(i.groups.length?'':all),!i.groups.length,i.groups.length?'':allT)).join('')||'—';
-  document.getElementById('gr_disks').innerHTML=g.disks.map(d=>box(d.name,!d.groups.length||grIn(d,n),
-    esc(d.name)+' ('+esc(d.letter)+':)'+(d.groups.length?'':all),!d.groups.length,d.groups.length?'':allT)).join('')||'—';
-  document.getElementById('gr_goldens').innerHTML=(g.goldens||[]).map(d=>box(d.name,grIn(d,n),esc(d.name)+' '+osPill(d.os))).join('')||'—';
+  // Each with the version this group boots (pins.rs): newest, or held on a kept one.
+  const pick=(key,d)=>`<select class="form-select form-select-sm w-auto py-0" data-ver="${esc(key)}" title="the version this group's machines boot">${verOpts(d.versions||[],pinOf(d.pins,n))}</select>`;
+  document.getElementById('gr_disks').innerHTML=g.disks.map(d=>'<div class="d-flex align-items-center gap-2">'+box(d.name,!d.groups.length||grIn(d,n),
+    esc(d.name)+' ('+esc(d.letter)+':)'+(d.groups.length?'':all),!d.groups.length,d.groups.length?'':allT)+pick('d'+d.name,d)+'</div>').join('')||'—';
+  document.getElementById('gr_goldens').innerHTML=(g.goldens||[]).map(d=>'<div class="d-flex align-items-center gap-2">'+box(d.name,grIn(d,n),esc(d.name)+' '+osPill(d.os))+pick('g'+d.name,d)+'</div>').join('')||'—';
   document.getElementById('gr_drivers').innerHTML=g.drivers.map(d=>box(d.id,d.all||grIn(d,n),
     esc(d.name)+(d.all?all:''),d.all,d.all?'for every machine — change it on the Drivers page':'')).join('')||'—';
   document.getElementById('gr_hide').checked=(g.hide_disks||[]).some(x=>x.toLowerCase()===lc);}
 function closeGroup(){grCur=null;const e=document.getElementById('gr_edit');if(e)e.style.display='none';}
 async function saveGroup(){const m=document.getElementById('gr_emsg');
   const ids=(id,num)=>[...document.querySelectorAll('#'+id+' input:checked:not(:disabled)')].map(e=>num?+e.dataset.v:e.dataset.v);
-  const body={name:grCur,machines:ids('gr_machines',1),images:ids('gr_images',1),disks:ids('gr_disks',0),goldens:ids('gr_goldens',0),drivers:ids('gr_drivers',1),hide_disks:document.getElementById('gr_hide').checked};
+  const versions=Object.fromEntries([...document.querySelectorAll('#gr_edit select[data-ver]')].map(e=>[e.dataset.ver,e.value===''?null:+e.value]));
+  const body={name:grCur,machines:ids('gr_machines',1),images:ids('gr_images',1),disks:ids('gr_disks',0),goldens:ids('gr_goldens',0),drivers:ids('gr_drivers',1),hide_disks:document.getElementById('gr_hide').checked,versions};
   try{await j('/api/groups/set',mk(body));say(m,' ✓ saved');}
   catch(e){if(/EVERY machine/.test(e.message)&&await sure(e.message+'.\n\nSave anyway?')){
       try{await j('/api/groups/set',mk({...body,allow_all:true}));say(m,' ✓ saved');}catch(e2){say(m,' ✗ '+e2.message);}}
@@ -1415,7 +1453,7 @@ const ACTIONS={
   loadImages,addImage,setDefault,toggleCache,toggleSsd,togglePreload,editImgGroups,republish,showVersions,exportImage,editBoot,delImage,
   snapshotImage,rollbackImage,versionToImage,deleteVersion,
   loadGames,saveGames,setGamesUpdate,toggleGamesRam,saveGamesUpdate,discardGamesUpdate,editGames,delGames,
-  loadDiskless,dlOsChanged,mPower,mSelOne,mSelAll,hwToggle,hwDisplay,mDisplay,startOnboard,cancelOnboard,retryOnboard,vmStart,vmStop,vmGamesSave,vmGamesDiscard,saveGolden,setMaint,saveMaint,discardMaint,refreshGolden,delGolden,editGolden,isoOs,delIso,setPlace,uploadIso,
+  loadDiskless,dlOsChanged,mPower,mSelOne,mSelAll,hwToggle,hwDisplay,mDisplay,startOnboard,cancelOnboard,retryOnboard,verToggle,verPin,verDrop,verKeepFree,vmStart,vmStop,vmGamesSave,vmGamesDiscard,saveGolden,setMaint,saveMaint,discardMaint,refreshGolden,delGolden,editGolden,isoOs,delIso,setPlace,uploadIso,
   loadDrivers,uploadDriver,saveDrvTargets,delDriver,
   loadGroups,editGroup,closeGroup,saveGroup,createGroup,renameGroup,deleteGroup,saveNewMachines,
   loadServer,loadBench,loadBenchHist,logsReload,logsFollow,logsSearch,benchServer,benchRequest:()=>benchAsk(false),benchCancel:()=>benchAsk(true),bSelAll,

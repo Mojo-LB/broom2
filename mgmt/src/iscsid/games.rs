@@ -8,6 +8,10 @@
 // once. Clients connect to the newest gen when they boot; a client already playing keeps its gen until it reboots.
 // Once no client has used an older gen for a while, the layers are merged into games.img in the background — safe
 // while clients of the newest gen read: merging only writes blocks a layer covers, and they read those from the layer.
+// Keeping versions (Config.retain, mgmt sets it): older gens stay — groups can be held on one (pins, Config.keep_from)
+// and every version can be gone back to — until the file system holding the disk has less than min_free_pct % free;
+// then the oldest gen nobody uses or needs goes (its layer merged into games.img alone: safe for every newer gen, for
+// the same reason), one at a time, until there is room again.
 //
 // RAM option, per disk: games.img copied into RAM (ramimg.rs) in the background, served from the file meanwhile. The
 // copy stays right while layers sit on top of it (a merge only rewrites blocks the layers cover); once a merge drops
@@ -50,6 +54,27 @@ pub struct Config {
     /// RAM bytes that must stay free next to the copy (not loaded otherwise).
     #[serde(default)]
     pub reserve: u64,
+    /// Keep older versions until space runs short (else: merged once nobody uses them).
+    #[serde(default)]
+    pub retain: bool,
+    /// With `retain`: below this % of free space on the disk's file system, the oldest unneeded version goes.
+    #[serde(default)]
+    pub min_free_pct: u8,
+    /// The oldest version machines must still be able to get (a group held on it): never dropped.
+    #[serde(default)]
+    pub keep_from: Option<u64>,
+}
+
+/// One version still kept.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct VerInfo {
+    pub ver: u64,
+    /// Its own blocks (what it changed over the version before); 0 for the oldest (inside the disk file).
+    pub bytes: u64,
+    /// When it was saved (unix seconds; 0 = not known).
+    pub saved: u64,
+    /// Sessions reading it now.
+    pub sessions: usize,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -75,6 +100,44 @@ pub struct Info {
     pub ram: bool,
     #[serde(default)]
     pub ram_loading: bool,
+    /// The versions still kept, oldest first (empty from a daemon of a build without it).
+    #[serde(default)]
+    pub versions: Vec<VerInfo>,
+    /// Free space on the disk's file system (bytes, total) — what keeping versions is measured against.
+    #[serde(default)]
+    pub fs_free: u64,
+    #[serde(default)]
+    pub fs_size: u64,
+}
+
+/// (free, total) bytes of the file system holding `p`.
+pub fn fs_space(p: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(p.as_os_str().as_bytes()).ok()?;
+    // SAFETY: statvfs fills the struct we pass; c is a valid NUL-terminated path.
+    unsafe {
+        let mut v: libc::statvfs = std::mem::zeroed();
+        if libc::statvfs(c.as_ptr(), &mut v) != 0 {
+            return None;
+        }
+        let f = v.f_frsize as u64;
+        Some((v.f_bavail as u64 * f, v.f_blocks as u64 * f))
+    }
+}
+
+/// The file system holding `dir` has less than `pct` % free.
+fn short(dir: &Path, pct: u8) -> bool {
+    fs_space(dir)
+        .is_some_and(|(free, size)| size > 0 && (free as u128) * 100 < (size as u128) * pct as u128)
+}
+
+/// When `p` was last changed (unix seconds; 0 = unknown).
+fn mtime(p: &Path) -> u64 {
+    std::fs::metadata(p)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs())
 }
 
 /// What a session of one gen reads: games.img under `layers` (oldest first); `ov` = its writes (the update machine).
@@ -408,10 +471,32 @@ impl Registry {
             Ok(())
         })?;
         self.load_ram(&name);
-        // A merge cut off by a crash / restart: games.img is half merged, only the newest gen reads it right → finish.
-        if dir.join("merging").exists() {
-            tracing::warn!("{} {name}: finishing a merge cut off earlier", self.what);
-            self.merge_if_idle(&name, Duration::ZERO);
+        // A merge cut off by a crash / restart: games.img is half merged, only the gens from its target on read it
+        // right → finish merging the layers up to that target.
+        if let Ok(t) = std::fs::read_to_string(dir.join("merging")) {
+            let job = self.with(|d| {
+                let s = d.get_mut(&name)?;
+                let t = t.trim().parse().unwrap_or(s.ver).min(s.ver);
+                let layers: Vec<(u64, Arc<Overlay>)> = s
+                    .layers
+                    .iter()
+                    .filter(|l| l.ver <= t)
+                    .map(|l| (l.ver, l.ov.clone()))
+                    .collect();
+                (!layers.is_empty()).then(|| {
+                    s.merging = Some(t);
+                    (t, layers)
+                })
+            });
+            if let Some((t, layers)) = job {
+                tracing::warn!(
+                    "{} {name}: finishing a merge (up to g{t}) cut off earlier",
+                    self.what
+                );
+                let _ = self.merge(&name, t, layers);
+            } else {
+                let _ = std::fs::remove_file(dir.join("merging"));
+            }
         }
         Ok(())
     }
@@ -551,10 +636,31 @@ impl Registry {
         });
     }
 
-    /// Every 30 s: merge each disk's layers into its file once no session has used an older gen for GRACE. Blocking.
+    /// Every 30 s, each disk: keeping versions → the oldest unneeded one goes while space is short; else its layers
+    /// are merged into its file once no session has used an older gen for GRACE. Blocking.
     pub fn tick(&'static self) {
         for name in self.with(|d| d.keys().cloned().collect::<Vec<_>>()) {
-            self.merge_if_idle(&name, GRACE);
+            let keep = self.with(|d| {
+                d.get(&name)
+                    .filter(|s| s.cfg.retain)
+                    .map(|s| (s.cfg.min_free_pct, s.dir.clone()))
+            });
+            match keep {
+                Some((pct, dir)) => {
+                    if short(&dir, pct) {
+                        match self.drop_oldest(&name) {
+                            Ok(g) => tracing::warn!(
+                                "{} {name}: less than {pct}% free on its drive — oldest version g{g} dropped",
+                                self.what
+                            ),
+                            Err(e) => {
+                                tracing::debug!("{} {name}: no version dropped: {e}", self.what)
+                            }
+                        }
+                    }
+                }
+                None => self.merge_if_idle(&name, GRACE),
+            }
         }
     }
 
@@ -572,10 +678,56 @@ impl Registry {
             s.merging = Some(target); // older gens are not served from now on
             let layers: Vec<(u64, Arc<Overlay>)> =
                 s.layers.iter().map(|l| (l.ver, l.ov.clone())).collect();
-            Some((target, layers, s.cfg.path.clone(), s.dir.clone()))
+            Some((target, layers))
         });
-        let Some((target, layers, path, dir)) = job else {
-            return;
+        if let Some((target, layers)) = job {
+            let _ = self.merge(name, target, layers);
+        }
+    }
+
+    /// Drop the disk's oldest version: its next one's layer is merged into the file, so every gen from that one on
+    /// reads as before and the oldest is no longer served. Not while a machine uses it or a group is held on it, nor
+    /// the newest. → the version dropped. Blocking.
+    pub fn drop_oldest(&'static self, name: &str) -> Result<u64, String> {
+        let what = self.what;
+        let (target, layer, dropped) = self.with(|d| -> Result<_, String> {
+            let s = d.get_mut(name).ok_or(format!("{what} {name} not served"))?;
+            if s.merging.is_some() {
+                return Err("a merge is running".into());
+            }
+            let first = s.layers.first().ok_or("only one version left")?;
+            let t = first.ver;
+            if let Some(g) = s
+                .sessions
+                .iter()
+                .filter(|(g, n)| **g < t && **n > 0)
+                .map(|(g, _)| *g)
+                .min()
+            {
+                return Err(format!("g{g} is in use by a machine"));
+            }
+            if let Some(k) = s.cfg.keep_from.filter(|k| *k < t) {
+                return Err(format!("g{k} is held for a group"));
+            }
+            s.merging = Some(t);
+            Ok((t, (first.ver, first.ov.clone()), s.base_ver))
+        })?;
+        self.merge(name, target, vec![layer])?;
+        Ok(dropped)
+    }
+
+    /// Merge `layers` (the disk's oldest, oldest first, up to gen `target`) into its file; gens below `target` are no
+    /// longer served (s.merging is already set to it). Blocking.
+    fn merge(
+        &'static self,
+        name: &str,
+        target: u64,
+        layers: Vec<(u64, Arc<Overlay>)>,
+    ) -> Result<(), String> {
+        let Some((path, dir)) =
+            self.with(|d| d.get(name).map(|s| (s.cfg.path.clone(), s.dir.clone())))
+        else {
+            return Err("not served".into());
         };
         let what = self.what;
         let marker = dir.join("merging");
@@ -592,8 +744,10 @@ impl Registry {
             crate::versions::write_durable(&dir.join("base.gen"), target.to_string().as_bytes())
                 .map_err(|e| format!("base.gen: {e}"))
         })();
-        self.with(|d| {
-            let Some(s) = d.get_mut(name) else { return };
+        let out = self.with(|d| {
+            let Some(s) = d.get_mut(name) else {
+                return Ok(());
+            };
             s.merging = None;
             match r {
                 Ok(()) => {
@@ -603,7 +757,7 @@ impl Registry {
                     s.merges += 1;
                     if let Err(e) = to_file(s) {
                         tracing::error!("{what} {name}: {e}");
-                        return; // layers kept: still served right from the stale copy; retried at the next tick
+                        return Err(e); // layers kept: still served right from the stale copy; retried later
                     }
                     s.base_ver = target;
                     s.layers.retain(|l| l.ver > target);
@@ -612,11 +766,21 @@ impl Registry {
                     }
                     let _ = std::fs::remove_file(&marker);
                     tracing::info!("{what} {name}: versions up to g{target} merged into {path}");
+                    Ok(())
                 }
-                Err(e) => tracing::error!("{what} {name}: merge failed (retried later): {e}"),
+                Err(e) => {
+                    tracing::error!("{what} {name}: merge failed (retried later): {e}");
+                    Err(e)
+                }
             }
         });
         self.load_ram(name);
+        out
+    }
+
+    /// Gen `k` of disk `name` can be booted now.
+    pub(super) fn serves(&self, name: &str, k: u64) -> bool {
+        self.with(|d| d.get(name).is_some_and(|s| served(s, k)))
     }
 
     /// Freeze the update into a new gen, served at once (machines get it at their next boot). The update machine must
@@ -711,6 +875,26 @@ impl Registry {
                     read_bytes: s.lun.read_bytes.load(std::sync::atomic::Ordering::Relaxed),
                     ram: s.lun.is_ram(),
                     ram_loading: s.ram_loading,
+                    versions: std::iter::once(VerInfo {
+                        ver: s.base_ver,
+                        bytes: 0,
+                        saved: if s.base_ver == 0 {
+                            0
+                        } else {
+                            mtime(&s.dir.join("base.gen"))
+                        },
+                        sessions: s.sessions.get(&s.base_ver).copied().unwrap_or(0),
+                    })
+                    .filter(|v| served(s, v.ver))
+                    .chain(s.layers.iter().map(|l| VerInfo {
+                        ver: l.ver,
+                        bytes: l.ov.used(),
+                        saved: mtime(&layer_dir(&s.dir, l.ver)),
+                        sessions: s.sessions.get(&l.ver).copied().unwrap_or(0),
+                    }))
+                    .collect(),
+                    fs_free: fs_space(&s.dir).map_or(0, |x| x.0),
+                    fs_size: fs_space(&s.dir).map_or(0, |x| x.1),
                 })
                 .collect()
         })
@@ -746,6 +930,10 @@ pub fn merge_if_idle(name: &str, grace: Duration) {
 
 pub fn save(name: &str) -> Result<String, String> {
     GAMES.save(name)
+}
+
+pub fn drop_oldest(name: &str) -> Result<u64, String> {
+    GAMES.drop_oldest(name)
 }
 
 pub fn discard(name: &str) -> Result<(), String> {

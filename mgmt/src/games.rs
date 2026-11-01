@@ -45,6 +45,9 @@ pub struct Disk {
     /// Served from a copy in the server's RAM (the iSCSI daemon) instead of reading games.img.
     #[serde(default)]
     pub ram: bool,
+    /// Groups held on a version (group → version; a group not listed gets the newest): pins.rs.
+    #[serde(default)]
+    pub pins: std::collections::BTreeMap<String, u64>,
 }
 
 pub(crate) fn disks(st: &SharedState) -> Vec<Disk> {
@@ -133,6 +136,9 @@ pub(crate) fn with_groups(st: &SharedState) -> Vec<(Config, Vec<String>)> {
                         .map(|m| m.mac.to_lowercase()),
                     ram: d.ram,
                     reserve: crate::publish::ram_reserve(st),
+                    retain: true,
+                    min_free_pct: crate::pins::min_free_pct(st),
+                    keep_from: crate::pins::keep_from(&d.pins),
                     name: d.name,
                 },
                 groups,
@@ -294,6 +300,9 @@ async fn upsert(
             groups: groups.clone(),
             update: old.and_then(|i| list[i].update),
             ram: old.is_some_and(|i| list[i].ram),
+            pins: old
+                .map(|i| crate::pins::pruned(&list[i].pins, &groups, true))
+                .unwrap_or_default(),
         };
         if let Some(o) = list.iter().find(|o| clash(&d, o)) {
             return Err(bad(format!(
@@ -512,6 +521,15 @@ async fn save(
     .await
     .map_err(ise)?
     .map_err(|e| (StatusCode::CONFLICT, e))?;
+    let newest = crate::iscsi::games_status()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|i| i.name == b.name)
+        .map_or(0, |i| i.ver);
+    let msg = format!(
+        "{msg}{}",
+        crate::pins::held_note(&find(&st, &b.name)?.pins, newest)
+    );
     tracing::info!("iSCSI disk {}: {msg}", b.name);
     Ok(Json(serde_json::json!({"ok": true, "status": msg})))
 }
@@ -585,11 +603,15 @@ async fn for_client(
                 crate::iscsid::golden::machine_iqn(&c.iqn, &m.mac)
             })
             .flatten();
+        // The version its group is held on (pins.rs) while still kept; the update machine always works on the newest.
+        let ver = crate::pins::pin_for(&d.pins, grp.as_deref())
+            .filter(|v| !upd && i.versions.iter().any(|x| x.ver == *v))
+            .unwrap_or(i.ver);
         match own {
             Some(t) => out.push_str(&format!("{} {t} {} 2\n", d.name, d.letter)),
             None => out.push_str(&format!(
                 "{} {}.g{} {} {}\n",
-                d.name, c.iqn, i.ver, d.letter, upd as u8
+                d.name, c.iqn, ver, d.letter, upd as u8
             )),
         }
     }

@@ -48,6 +48,7 @@ fn rename_everywhere(st: &SharedState, from: &str, to: Option<&str>) -> Result<(
     for key in ["groups", "hide_disks_groups", "dns_exempt_groups"] {
         edit_names(st, key, |v| *v = swap(v, from, to))?;
     }
+    crate::pins::rename_group(st, from, to)?; // the versions it is held on follow it
     rename_new_machines(st, from, to)
 }
 
@@ -120,15 +121,40 @@ async fn list(State(st): State<SharedState>) -> Json<serde_json::Value> {
         .iter()
         .map(|i| serde_json::json!({"id": i.id, "name": i.name, "os": i.os, "groups": i.groups}))
         .collect();
+    // The versions kept of each golden / games disk (version pickers).
+    let (dl, gs) = tokio::task::spawn_blocking(|| {
+        (
+            crate::iscsi::diskless_status().unwrap_or_default(),
+            crate::iscsi::games_status().unwrap_or_default(),
+        )
+    })
+    .await
+    .unwrap_or_default();
+    let kept = |i: Option<&crate::iscsid::games::Info>| -> Vec<u64> {
+        i.map(|i| {
+            let mut v: Vec<u64> = i.versions.iter().map(|x| x.ver).collect();
+            if v.is_empty() {
+                v.push(i.ver);
+            }
+            v
+        })
+        .unwrap_or_default()
+    };
     let disks: Vec<_> = crate::games::disks(&st)
         .iter()
-        .map(|d| serde_json::json!({"name": d.name, "letter": d.letter, "groups": d.groups}))
+        .map(|d| {
+            serde_json::json!({"name": d.name, "letter": d.letter, "groups": d.groups, "pins": d.pins,
+                "versions": kept(gs.iter().find(|x| x.name == d.name))})
+        })
         .collect();
     let drivers: Vec<_> = st.db.drivers().unwrap_or_default().iter().map(|d| serde_json::json!({"id": d.id, "name": d.name, "all": d.all_machines, "groups": d.groups})).collect();
     // Diskless goldens: their groups' machines boot them (no group = no machine).
     let goldens: Vec<_> = crate::diskless::goldens(&st)
         .iter()
-        .map(|g| serde_json::json!({"name": g.name, "os": g.os, "groups": g.groups}))
+        .map(|g| {
+            serde_json::json!({"name": g.name, "os": g.os, "groups": g.groups, "pins": g.pins,
+                "versions": kept(dl.iter().find(|x| !x.games && x.disk.name == g.name).map(|x| &x.disk))})
+        })
         .collect();
     Json(serde_json::json!({
         "groups": all(&st), "machines": machines, "images": images, "disks": disks, "drivers": drivers,
@@ -433,6 +459,10 @@ struct SetBody {
     /// Diskless golden names its machines boot; None = unchanged (a client that doesn't know them).
     #[serde(default)]
     goldens: Option<Vec<String>>,
+    /// The version it gets of a golden ("g<name>") / iSCSI disk ("d<name>"): a number holds it there, null = the
+    /// newest (pins.rs). Ones not listed are unchanged.
+    #[serde(default)]
+    versions: Option<std::collections::BTreeMap<String, Option<u64>>>,
 }
 
 /// POST /api/groups/set {name, machines, images, disks, drivers, allow_all} — exactly these are the group's. Images /
@@ -487,7 +517,29 @@ async fn set(
             if !v.iter().any(|g| same(g, &n2)) {
                 v.push(n2.clone());
             }
-        })
+        })?;
+        crate::pins::prune(&st2)?; // versions held for goldens / disks the group no longer gets
+        for (k, ver) in b.versions.iter().flatten() {
+            let (golden, disk) = match k.split_at(k.len().min(1)) {
+                ("g", n) => (true, n),
+                ("d", n) => (false, n),
+                _ => continue,
+            };
+            let gets = if golden {
+                crate::diskless::goldens(&st2)
+                    .iter()
+                    .any(|g| g.name == disk && g.groups.iter().any(|x| same(x, &n2)))
+            } else {
+                crate::games::disks(&st2).iter().any(|d| {
+                    d.name == disk && (d.groups.is_empty() || d.groups.iter().any(|x| same(x, &n2)))
+                })
+            };
+            if gets {
+                let m = crate::pins::set(&st2, golden, disk, &n2, *ver)?;
+                tracing::info!("versions: {m}");
+            }
+        }
+        Ok(())
     })
     .await
     .map_err(ise)??;
