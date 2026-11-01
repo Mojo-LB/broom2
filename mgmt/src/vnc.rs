@@ -318,7 +318,7 @@ struct ViewQuery {
 
 /// The browser's Origin names this server (a WebSocket is not covered by the same-origin policy: a page elsewhere
 /// could open one with the admin's cookie if SameSite let it through). No Origin = not a browser.
-fn same_origin(h: &HeaderMap) -> bool {
+pub(crate) fn same_origin(h: &HeaderMap) -> bool {
     let Some(origin) = h.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else {
         return true;
     };

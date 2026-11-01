@@ -55,6 +55,7 @@ mod users;
 mod versions;
 mod vhdx;
 mod vmdk;
+mod vmmaint;
 mod vnc;
 mod volumes;
 mod winstage;
@@ -499,6 +500,8 @@ async fn main() {
         }
         // The iSCSI daemon (its own process: survives this one's restarts) checked / started, missing targets restored
         // (background: a RAM copy is slow).
+        // A maintenance VM left running by the previous process keeps its disks writable (before the first sync).
+        vmmaint::restore(&state);
         let st = state.clone();
         tokio::task::spawn_blocking(move || publish::start_iscsi(&st));
         // Windows goldens: made again from image.img (same bytes as before the restart) + their RAM copies when set to
@@ -593,6 +596,7 @@ async fn main() {
         .merge(power::routes()) // turn on / restart / shut down machines (Machines page)
         .merge(inventory::routes()) // each machine's hardware list (Machines page)
         .merge(display::routes()) // resolution + refresh per machine / group (Machines page)
+        .merge(vmmaint::routes()) // Maintain in the browser: a golden + games disks in a VM, its screen here
         .merge(bench::routes()) // Benchmark page + client measurements
         .merge(vnc::routes()) // Remote page: screen + mouse/keys of a Windows machine
         .merge(agentauth::routes()) // Remote: agent keys (handed to the stage, re-issued)

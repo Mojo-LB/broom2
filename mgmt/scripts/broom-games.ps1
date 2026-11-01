@@ -8,11 +8,14 @@
 # never changes. A disk's update machine gets it writable and attaches games.vhdx itself: the server keeps those
 # writes apart until the admin saves them. Run by broom-bootorder.ps1 (SYSTEM, at startup + every 5 minutes): does
 # what is missing, nothing once every drive is there. Errors -> %SystemRoot%\Temp\broom-games.log. ASCII only.
-param([string]$Srv)
+# -LinesFile: the lines come from that file instead (the maintenance VM on the server, broom-diskless.ps1): there the
+# disks are local disks of the VM, named "serial:<disk serial>", always in update mode.
+param([string]$Srv, [string]$LinesFile)
 $ErrorActionPreference = 'Stop'
 # The run at startup comes before the network is up (DHCP): wait for the server up to ~90 s instead of giving up
 # until the next run 5 minutes later.
 $list = $null
+if ($LinesFile) { $list = [IO.File]::ReadAllText($LinesFile) }
 $until = (Get-Date).AddSeconds(90)
 while ($null -eq $list -and (Get-Date) -lt $until) {
   try { $list = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 -Uri "http://$Srv/api/games/for").Content } catch { Start-Sleep 3 }
@@ -65,21 +68,34 @@ function SetLetter($vd, $L) {
 
 function GamesDisk($name, $iqn, $L, $mode) {
   $upd = $mode -eq '1'; $own = $mode -eq '2'
-  $store = "$env:ProgramData\broom\games\$name"
+  # The maintenance VM: a local disk found by its serial, update mode only. Its folder is outside ProgramData\broom
+  # and is let go again once games.vhdx is attached (below): no mount point is ever saved into the golden.
+  $local = $iqn -like 'serial:*'
+  if ($local -and -not $upd) { throw 'a VM disk is always in update mode' }
+  $store = if ($local) { "$env:SystemRoot\Temp\broom-vm-games\$name" } else { "$env:ProgramData\broom\games\$name" }
   $vhd = "$store\games.vhdx"
   $ssd = "$env:ProgramData\broom\ssd"
   $child = "$ssd\broom\games-$name-child.vhdx"
   if (Ready ($(if ($upd -or $own) { $vhd } else { $child })) $L) { return }
 
+  $disk = $null
+  if ($local) {
+    # 1'. The VM's disk with that serial.
+    $serial = $iqn.Substring(7)
+    for ($i = 0; $i -lt 30 -and -not $disk; $i++) {
+      $disk = Get-Disk | Where-Object { $_.SerialNumber -and $_.SerialNumber.Trim() -eq $serial } | Select-Object -First 1
+      if (-not $disk) { Start-Sleep 1 }
+    }
+  } else {
   # 1. Its iSCSI session (not persistent: made again every boot).
   if (-not (Get-IscsiTargetPortal | Where-Object TargetPortalAddress -eq $Srv)) { New-IscsiTargetPortal -TargetPortalAddress $Srv | Out-Null }
   $sess = Get-IscsiSession | Where-Object { $_.TargetNodeAddress -eq $iqn -and $_.IsConnected }
   if (-not $sess) { $null = Connect-IscsiTarget -NodeAddress $iqn -TargetPortalAddress $Srv }
-  $disk = $null
   for ($i = 0; $i -lt 30 -and -not $disk; $i++) {
     $sess = Get-IscsiSession | Where-Object { $_.TargetNodeAddress -eq $iqn -and $_.IsConnected }
     if ($sess) { $disk = Get-Disk -iSCSISession $sess -ErrorAction SilentlyContinue }
     if (-not $disk) { Start-Sleep 1 }
+  }
   }
   if (-not $disk) { throw 'the disk did not show up' }
   if ($disk.IsOffline) { Set-Disk -Number $disk.Number -IsOffline $false }   # SAN policy: new shared disks offline
@@ -105,6 +121,12 @@ function GamesDisk($name, $iqn, $L, $mode) {
     if ($vd.PartitionStyle -eq 'RAW') { NewNtfs $vd.Number $name.ToUpper() }
     $null = Grow (BasicPart $vd.Number)
     SetLetter $vd $L
+    if ($local) {
+      # games.vhdx stays attached (its file is open); the folder it was reached through goes, so the golden saved
+      # from this VM never holds a mount point.
+      Remove-PartitionAccessPath -DiskNumber $p.DiskNumber -PartitionNumber $p.PartitionNumber -AccessPath "$store\"
+      Remove-Item -LiteralPath $store -Force -ErrorAction SilentlyContinue
+    }
     Log "$name - UPDATE mode: writable as ${L}: - shut down properly when done, then Save on the server"
   } elseif ($own) {
     # 2c. A diskless machine: its own copy of the disk (the server keeps its writes until its next PXE boot), so

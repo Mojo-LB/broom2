@@ -635,7 +635,7 @@ pub(crate) fn preflight() -> Result<(), String> {
     }
 }
 
-fn which(t: &str) -> Option<PathBuf> {
+pub(crate) fn which(t: &str) -> Option<PathBuf> {
     [
         "/usr/bin",
         "/usr/sbin",
@@ -650,7 +650,7 @@ fn which(t: &str) -> Option<PathBuf> {
 }
 
 /// (code, vars template) of a non-Secure-Boot OVMF.
-fn ovmf() -> Option<(PathBuf, PathBuf)> {
+pub(crate) fn ovmf() -> Option<(PathBuf, PathBuf)> {
     [
         (
             "/usr/share/OVMF/OVMF_CODE_4M.fd",
@@ -714,7 +714,7 @@ pub(crate) fn qemu_args(disk: &str, code: &str, vars: &str, qmp: &str) -> Vec<St
 }
 
 /// Run a command to its end (at most `t`); stdout+stderr on success.
-fn sh(cmd: &str, args: &[&str], t: Duration) -> Result<String, String> {
+pub(crate) fn sh(cmd: &str, args: &[&str], t: Duration) -> Result<String, String> {
     let mut c = Command::new(cmd)
         .args(args)
         .stdin(Stdio::null())
@@ -755,7 +755,7 @@ fn sh(cmd: &str, args: &[&str], t: Duration) -> Result<String, String> {
 const PORTAL: &str = "127.0.0.1:3260";
 
 /// The golden's writable target attached to this server: its block device.
-fn login(target: &str) -> Result<PathBuf, String> {
+pub(crate) fn login(target: &str) -> Result<PathBuf, String> {
     let t = Duration::from_secs(30);
     let _ = sh(
         "iscsiadm",
@@ -780,7 +780,7 @@ fn login(target: &str) -> Result<PathBuf, String> {
     Err(format!("{target}: no disk appeared after the iSCSI login"))
 }
 
-fn logout(target: &str) {
+pub(crate) fn logout(target: &str) {
     let t = Duration::from_secs(30);
     let _ = sh(
         "iscsiadm",
@@ -1336,6 +1336,12 @@ async fn start(
             return Err((
                 StatusCode::CONFLICT,
                 format!("{g} is being updated on the server right now — try again in a minute"),
+            ));
+        }
+        if crate::vmmaint::owns_golden(&b.golden) {
+            return Err((
+                StatusCode::CONFLICT,
+                format!("{} is running in the VM (Maintain in the browser) — shut it down first", b.golden),
             ));
         }
         preflight().map_err(|e| (StatusCode::CONFLICT, e))?;

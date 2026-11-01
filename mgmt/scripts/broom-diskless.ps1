@@ -12,6 +12,8 @@
 #  - a diskless machine on a later boot: starts the Remote agent and mounts its games disks (broom-watch.ps1 -Dir, its
 #    own task; broom-games.ps1 at start and every 5 minutes).
 #  - the maintenance machine: nothing - what it writes goes into the golden every machine shares (no key, no agent).
+#    The maintenance VM on the server (Diskless page, Maintain in the browser: vmmaint.rs) also gets its games disks,
+#    writable, under their letters (broom-games.ps1 -LinesFile).
 #  - anything else (the server unreachable): nothing.
 # ASCII only. Logs to C:\Windows\Temp\broom-diskless.log (in the session layer: gone at the next boot).
 $ErrorActionPreference = 'Stop'
@@ -74,9 +76,33 @@ if ($me -eq $dst) {
 }
 
 step ("role {0}, golden {1} g{2}, first boot: {3}, name: {4}" -f $info.role, $info.golden, $info.ver, $info.first, $info.host)
+# The server's scripts.sha256: a downloaded script runs only if it matches.
+function Fetch($f, $to) {
+  $sum = $null
+  foreach ($l in ((Text "http://$srv/tftp/broom-scripts/scripts.sha256") -split "`n")) {
+    $p = $l.Trim() -split '\s+'
+    if ($p.Count -eq 2 -and $p[1] -eq $f) { $sum = $p[0] }
+  }
+  if (-not $sum) { throw "$f is not in the server's scripts.sha256" }
+  Invoke-WebRequest -UseBasicParsing -TimeoutSec 60 -OutFile $to "http://$srv/tftp/broom-scripts/$f"
+  if ((Get-FileHash -Algorithm SHA256 $to).Hash.ToLower() -ne $sum) { Remove-Item -LiteralPath $to -Force; throw "$f does not match scripts.sha256" }
+}
 if ($info.role -eq 'maintenance') {
-  # Its writes go into the golden: no machine's key or agent files may end up there.
-  if (Test-Path $dir) { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; step "removed $dir from the golden" }
+  # Its writes go into the golden: no machine's key or agent files may end up there. .NET's Directory.Delete does not
+  # follow a folder mount point (it only removes it), so a volume mounted inside is never emptied with it.
+  if (Test-Path $dir) {
+    try { [IO.Directory]::Delete($dir, $true); step "removed $dir from the golden" } catch { step "could not remove ${dir}: $_" }
+  }
+  # The maintenance VM on the server: its games disks (found by their disk serial), writable, under their letters.
+  if ($info.vm -and $info.games) {
+    try {
+      $gs = "$env:SystemRoot\Temp\broom-games-vm.ps1"; $lf = "$env:SystemRoot\Temp\broom-games-vm.txt"
+      Fetch 'broom-games.ps1' $gs
+      [IO.File]::WriteAllText($lf, [string]$info.games, [Text.Encoding]::ASCII)
+      & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $gs -Srv $srv -LinesFile $lf
+      step ("VM: games disks {0} (log: broom-games.log)" -f (($info.games -split "`n" | Where-Object { $_ } | ForEach-Object { ($_ -split ' ')[0] }) -join ', '))
+    } catch { step "VM games disks FAILED: $_" }
+  }
   exit
 }
 if ($info.role -ne 'diskless') { exit }

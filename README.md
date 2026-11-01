@@ -218,6 +218,17 @@ PC down.
   minutes) logs in to it and attaches its `games.vhdx` writable as the disk's letter. The disk's update machine (a
   diskless one too) gets the disk itself, writable, as on SSD machines; Save makes the next version, which every
   machine's copy reads from its next boot.
+- **Maintain in the browser (Windows):** the Diskless page runs a golden in a VM on the server (QEMU/KVM, 4 CPU
+  threads, 8 GB, internet through QEMU's NAT) and shows its screen in the browser (**Open the screen**: noVNC,
+  through Broom's signed-in WebSocket; QEMU's VNC is only a Unix socket). Tick games disks to attach them **writable**
+  under their letters, as for an update machine: install or update games, shut the VM down, then **Save** each disk —
+  every machine gets it at its next boot. An owner can tick *Keep Windows changes* (Windows / app updates): Save or
+  Discard the golden afterwards; without it the VM's Windows changes are thrown away when it stops, so staff (who may
+  start it) update games but never change the golden. The VM writes through the server's own iSCSI sessions (the
+  daemon lets 127.0.0.1 write while the VM holds the disks) and runs in its own systemd unit `broom-vm-<golden>`, so
+  restarting Broom does not stop it. One VM at a time; the golden needs no maintenance machine. Needs
+  `qemu-system-x86`, `ovmf`, `open-iscsi` and KVM, as Add hardware. In the VM, Steam and other sign-ins are lost with
+  the Windows changes unless they are kept.
 - **Remote on diskless machines:** the first boot of each golden version also gets the machine its Remote agent key
   (handed out only on that boot) and the agent's files (`C:\ProgramData\Broom`, SYSTEM and Administrators only), kept
   in its base; every later boot starts the agent (`broom-watch.ps1 -Dir`, its own task), so remote screen, Wake and

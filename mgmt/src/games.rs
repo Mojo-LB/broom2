@@ -120,9 +120,15 @@ pub(crate) fn with_groups(st: &SharedState) -> Vec<(Config, Vec<String>)> {
                 Config {
                     iqn: format!("{base}:games-{}", d.name),
                     path: img(&d.name).to_string_lossy().into(),
-                    update_ip: d.update.and_then(|id| ip_of(st, id)),
+                    // The maintenance VM on this server holds it (vmmaint.rs): it writes through 127.0.0.1.
+                    update_ip: if crate::vmmaint::owns_games(&d.name) {
+                        Some("127.0.0.1".into())
+                    } else {
+                        d.update.and_then(|id| ip_of(st, id))
+                    },
                     update_mac: d
                         .update
+                        .filter(|_| !crate::vmmaint::owns_games(&d.name))
                         .and_then(|id| machine_by_id(st, id).ok())
                         .map(|m| m.mac.to_lowercase()),
                     ram: d.ram,
@@ -498,6 +504,7 @@ async fn save(
     Json(b): Json<NameBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     find(&st, &b.name)?;
+    vm_off(&b.name)?;
     let (name, st2) = (b.name.clone(), st.clone());
     let msg = tokio::task::spawn_blocking(move || {
         with_update_off(&st2, &name, || crate::iscsi::games_save(&name))
@@ -509,12 +516,24 @@ async fn save(
     Ok(Json(serde_json::json!({"ok": true, "status": msg})))
 }
 
+/// Save / Discard wait for the maintenance VM to be off (the disk is still attached to it until then).
+fn vm_off(name: &str) -> Result<(), ApiError> {
+    if crate::vmmaint::owns_games(name) {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("{name} is attached to the VM (Maintain in the browser) — shut it down first"),
+        ));
+    }
+    Ok(())
+}
+
 /// POST /api/games/discard {name} — throw the disk's update away.
 async fn discard(
     State(st): State<SharedState>,
     Json(b): Json<NameBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     find(&st, &b.name)?;
+    vm_off(&b.name)?;
     let (name, st2) = (b.name.clone(), st.clone());
     tokio::task::spawn_blocking(move || {
         with_update_off(&st2, &name, || crate::iscsi::games_discard(&name))

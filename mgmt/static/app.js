@@ -772,7 +772,7 @@ async function loadDiskless(){
   const sc=document.getElementById('dl_scriptcmd');if(sc)sc.textContent='irm http://'+srv+'/broom-diskless.ps1 | iex';
   const sh=document.getElementById('dl_scriptcmd_sh');if(sh)sh.textContent='curl -fsS http://'+srv+'/broom-diskless.sh | sudo sh';
   const m=document.getElementById('dl_msg');if(m)say(m,d.error?' ✗ not served: '+d.error:'');
-  loadOnboard().catch(()=>{});}
+  loadOnboard().catch(()=>{});loadVm().catch(()=>{});}
 // "Add hardware": a new PC's network card installed into a Windows golden (onboard.rs).
 let obTimer=null;
 async function loadOnboard(){
@@ -797,6 +797,39 @@ async function loadOnboard(){
   clearTimeout(obTimer);
   if(jb&&(jb.state==='waiting'||jb.state==='installing')&&pageFromPath()==='diskless')obTimer=setTimeout(()=>loadOnboard().catch(()=>{}),4000);
 }
+// "Maintain in the browser" (vmmaint.rs): a Windows golden + games disks in a VM on the server, its screen at /vm-console.
+let vmTimer=null;
+async function loadVm(){
+  const r=await j('/api/vm').catch(()=>null);const box=document.getElementById('vm_box');if(!r||!box)return;
+  const s=r.session,run=s&&['starting','running','stopping'].includes(s.state);
+  const gs=document.getElementById('vm_golden'),keepG=gs.value;
+  gs.innerHTML=r.goldens.map(g=>`<option value="${esc(g.name)}"${g.name===keepG?' selected':''}>${esc(g.name)}</option>`).join('');
+  const was=new Set([...document.querySelectorAll('#vm_games input:checked')].map(i=>i.value));
+  document.getElementById('vm_games').innerHTML=r.games.filter(d=>d.served).map(d=>`<label class="form-check mb-0"><input class="form-check-input" type="checkbox" value="${esc(d.name)}"${was.has(d.name)?' checked':''}> ${esc(d.name)} <span class="mono">(${esc(d.letter)}:)</span></label>`).join('')||'<span class="text-body-secondary">none</span>';
+  document.getElementById('vm_form').style.display=run?'none':'';
+  document.getElementById('vm_problem').textContent=r.problem?'Not possible on this server yet: '+r.problem:'';
+  if(!s){box.innerHTML='';return;}
+  const cls={running:'text-success',failed:'text-danger',stopped:'text-body-secondary'}[s.state]||'text-primary';
+  const games=(s.games||[]).map(g=>g.name+' ('+g.letter+':)').join(', ');
+  let h=`<div><b>${esc(s.golden)}</b> · <span class="${esc(cls)}">${esc(s.state)}</span> · started ${esc(new Date(s.started*1000).toLocaleString())} by ${esc(s.by)}`
+    +(s.ended?' · ended '+esc(new Date(s.ended*1000).toLocaleString()):'')+`</div><div class="small">games disks: ${esc(games||'none')} · Windows changes ${s.keep?'kept for Save / Discard':'thrown away at the end'}</div>`;
+  if(s.msg&&!run)h+=`<div class="small">${esc(s.msg)}</div>`;
+  if(run)h+=`<div class="d-flex flex-wrap gap-2 mt-2"><a class="btn btn-sm btn-primary" href="/vm-console" target="_blank" rel="noopener">Open the screen</a>
+    <button class="btn btn-sm btn-outline-warning" ${act('vmStop',false)}>Shut down</button>
+    <button class="btn btn-sm btn-outline-danger" ${act('vmStop',true)} title="like pulling the plug — only if Windows hangs">Turn off</button></div>`;
+  else{const pend=r.games.filter(d=>(s.games||[]).some(g=>g.name===d.name)&&d.update_bytes>0);
+    if(pend.length)h+='<div class="d-flex flex-wrap gap-2 align-items-center mt-2 small">'+pend.map(d=>`<span><b>${esc(d.name)}</b>: ${gbs(d.update_bytes)} written</span>
+      <button class="btn btn-sm btn-outline-primary" ${act('vmGamesSave',d.name)}>Save</button>
+      <button class="btn btn-sm btn-outline-secondary" ${act('vmGamesDiscard',d.name)}>Discard</button>`).join(' ')+'</div>';}
+  box.innerHTML=h;
+  clearTimeout(vmTimer);
+  if(run&&pageFromPath()==='diskless')vmTimer=setTimeout(()=>loadVm().catch(()=>{}),5000);
+}
+function vmStart(){const games=[...document.querySelectorAll('#vm_games input:checked')].map(i=>i.value),keep=!!document.getElementById('vm_keep')?.checked;
+  post('/api/vm/start',{golden:v('vm_golden'),games,keep},'vm_msg',()=>'started — Open the screen',loadVm);}
+const vmStop=force=>sure(force?'Turn the VM off at once, like pulling the plug? Unsaved work in Windows is lost; use it only if Windows hangs.':'Press the VM\'s power button? Windows shuts down (close what you are doing first).').then(ok=>ok&&post('/api/vm/stop',{force},'vm_msg',r=>r.msg,loadVm));
+const vmGamesSave=name=>sure('Save the VM\'s changes to '+name+' as its new version? Each machine gets it at its next boot.').then(ok=>ok&&post('/api/games/save',{name},'vm_msg',r=>r.status||'saved',loadVm));
+const vmGamesDiscard=name=>sure('Throw the VM\'s changes to '+name+' away?').then(ok=>ok&&post('/api/games/discard',{name},'vm_msg',()=>'discarded',loadVm));
 const startOnboard=()=>post('/api/onboard/start',{golden:v('ob_golden'),machine:+v('ob_machine')},'ob_msg',r=>r.status||'started',loadOnboard);
 const retryOnboard=()=>post('/api/onboard/retry',{},'ob_msg',r=>r.status||'running',loadOnboard);
 const cancelOnboard=()=>sure('Cancel adding hardware? A running VM is stopped and its work thrown away.').then(ok=>ok&&post('/api/onboard/cancel',{},'ob_msg',()=>'cancelled',loadOnboard));
@@ -1382,7 +1415,7 @@ const ACTIONS={
   loadImages,addImage,setDefault,toggleCache,toggleSsd,togglePreload,editImgGroups,republish,showVersions,exportImage,editBoot,delImage,
   snapshotImage,rollbackImage,versionToImage,deleteVersion,
   loadGames,saveGames,setGamesUpdate,toggleGamesRam,saveGamesUpdate,discardGamesUpdate,editGames,delGames,
-  loadDiskless,dlOsChanged,mPower,mSelOne,mSelAll,hwToggle,hwDisplay,mDisplay,startOnboard,cancelOnboard,retryOnboard,saveGolden,setMaint,saveMaint,discardMaint,refreshGolden,delGolden,editGolden,isoOs,delIso,setPlace,uploadIso,
+  loadDiskless,dlOsChanged,mPower,mSelOne,mSelAll,hwToggle,hwDisplay,mDisplay,startOnboard,cancelOnboard,retryOnboard,vmStart,vmStop,vmGamesSave,vmGamesDiscard,saveGolden,setMaint,saveMaint,discardMaint,refreshGolden,delGolden,editGolden,isoOs,delIso,setPlace,uploadIso,
   loadDrivers,uploadDriver,saveDrvTargets,delDriver,
   loadGroups,editGroup,closeGroup,saveGroup,createGroup,renameGroup,deleteGroup,saveNewMachines,
   loadServer,loadBench,loadBenchHist,logsReload,logsFollow,logsSearch,benchServer,benchRequest:()=>benchAsk(false),benchCancel:()=>benchAsk(true),bSelAll,

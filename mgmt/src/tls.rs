@@ -151,7 +151,7 @@ fn own_names(st: &SharedState) -> Vec<String> {
 }
 
 /// The IPv4 addresses on this host's interfaces (getifaddrs).
-fn local_ipv4s() -> Vec<String> {
+pub(crate) fn local_ipv4s() -> Vec<String> {
     let mut out = Vec::new();
     // SAFETY: getifaddrs fills a list freed with freeifaddrs; each entry read only while the list lives.
     unsafe {

@@ -10,6 +10,19 @@
     <span id="dl_msg" class="msg"></span>
   </div>
   <div class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">Maintain in the browser (VM on the server)</h2>
+    <div class="small text-body-secondary mb-2">Runs a Windows golden in a virtual machine on this server — its screen in this browser, internet through the server — so no PC leaves the room. <b>Games</b>: tick the games disks; they are attached writable (as for an update machine) under their letters: install or update games, shut the VM down, then <b>Save</b> each disk — every machine gets it at its next boot. <b>Windows / apps</b> (owner): tick <i>Keep Windows changes</i>, then Save or Discard the golden in the Goldens table; without it the VM's Windows changes are thrown away when it stops. One VM at a time (4 CPU threads, 8 GB RAM). The golden needs broom-diskless.ps1 and no maintenance machine.</div>
+    <div id="vm_form" class="d-flex flex-wrap gap-3 align-items-end">
+      <div><label class="form-label small mb-1" for="vm_golden">Golden</label><select class="form-select form-select-sm" id="vm_golden"></select></div>
+      <div><span class="form-label small mb-1 d-block">Games disks (writable)</span><div id="vm_games" class="d-flex flex-wrap gap-3 small"></div></div>
+      <div class="form-check mb-1" data-owner><input class="form-check-input" type="checkbox" id="vm_keep"><label class="form-check-label small" for="vm_keep">Keep Windows changes</label></div>
+      <button class="btn btn-sm btn-primary" data-click="vmStart">Start VM</button>
+    </div>
+    <span id="vm_msg" class="msg"></span>
+    <div id="vm_problem" class="small text-danger"></div>
+    <div id="vm_box" class="mt-2"></div>
+  </div>
+  <div class="card card-body mb-3">
     <h2 class="h6 text-uppercase text-body-secondary mb-3">Diskless machines</h2>
     <div class="table-responsive"><table class="table table-sm table-hover align-middle" id="dl_machines">
       <thead><tr><th>Golden</th><th>Machine</th><th>MAC</th><th>IP</th><th title="writes since its last boot — gone at the next one">Session</th><th title="its own first-boot setup, kept while the golden version stays">Base</th><th>Connected</th><th>iSCSI target</th></tr></thead>

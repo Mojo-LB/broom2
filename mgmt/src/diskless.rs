@@ -222,14 +222,16 @@ fn configs(st: &SharedState) -> Result<Vec<golden::Config>, String> {
         let maint = g.maint.and_then(|id| all.iter().find(|m| m.id == id));
         // "Add hardware" (onboard.rs) running: its VM on this server writes the golden, through 127.0.0.1 (no LAN
         // host can send from the loopback address).
-        let (update_ip, update_mac) = if crate::onboard::vm_owns(&g.name) {
-            (Some("127.0.0.1".to_string()), None)
-        } else {
-            (
-                maint.and_then(|m| ip_of(st, m)),
-                maint.map(|m| m.mac.to_lowercase()),
-            )
-        };
+        // Same for the maintenance VM (vmmaint.rs, Maintain in the browser).
+        let (update_ip, update_mac) =
+            if crate::onboard::vm_owns(&g.name) || crate::vmmaint::owns_golden(&g.name) {
+                (Some("127.0.0.1".to_string()), None)
+            } else {
+                (
+                    maint.and_then(|m| ip_of(st, m)),
+                    maint.map(|m| m.mac.to_lowercase()),
+                )
+            };
         out.push(golden::Config {
             disk: crate::iscsid::games::Config {
                 name: g.name.clone(),
@@ -990,6 +992,10 @@ async fn client(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Response, ApiError> {
+    // The maintenance VM on this server (vmmaint.rs): reaches us through QEMU's NAT, from our own address.
+    if let Some(v) = crate::vmmaint::client_answer(&st, peer.ip().to_canonical()) {
+        return Ok(Json(v).into_response());
+    }
     let peer = peer.ip().to_canonical().to_string();
     let st2 = st.clone();
     let (m, on) = tokio::task::spawn_blocking(move || asking(&st2, &peer))
@@ -1434,6 +1440,7 @@ async fn save(
     Json(b): Json<NameBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     find(&st, &b.name)?;
+    vm_off(&b.name)?;
     let (name, st2) = (b.name.clone(), st.clone());
     let msg = tokio::task::spawn_blocking(move || {
         with_maint_off(&st2, &name, || crate::iscsi::golden_save(&name))
@@ -1445,12 +1452,24 @@ async fn save(
     Ok(Json(serde_json::json!({"ok": true, "status": msg})))
 }
 
+/// Save / Discard wait for the maintenance VM to be off (its disk is still attached until then).
+fn vm_off(name: &str) -> Result<(), ApiError> {
+    if crate::vmmaint::owns_golden(name) {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("{name} is running in the VM (Maintain in the browser) — shut it down first"),
+        ));
+    }
+    Ok(())
+}
+
 /// POST /api/diskless/discard {name} — throw the maintenance work away.
 async fn discard(
     State(st): State<SharedState>,
     Json(b): Json<NameBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     find(&st, &b.name)?;
+    vm_off(&b.name)?;
     let (name, st2) = (b.name.clone(), st.clone());
     tokio::task::spawn_blocking(move || {
         with_maint_off(&st2, &name, || crate::iscsi::golden_discard(&name))

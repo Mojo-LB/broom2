@@ -107,6 +107,8 @@ pub(crate) fn staff_may(method: &axum::http::Method, path: &str) -> bool {
     const STAFF_POST: &[&str] = &[
         "/api/wake",
         "/api/power",
+        "/api/vm/start",
+        "/api/vm/stop",
         "/api/games/save",
         "/api/games/discard",
         "/api/password",
