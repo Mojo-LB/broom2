@@ -570,6 +570,22 @@ fn iscsi_uri(st: &SharedState, iqn: &str) -> String {
     format!("iscsi:{}::::{iqn}", st.db.get_config("dhcp_server_ip", ""))
 }
 
+/// iPXE line put before a Windows disk boot from `client` (its IP): the iBFT gets no gateway when the server is on the
+/// client's subnet. Windows booted from iSCSI turns the iBFT's gateway into a host route to its disk's server through
+/// that gateway (Microsoft's design: a gateway on the boot NIC is taken as needed to reach the target), also when the
+/// server is on the same subnet. Every disk read then goes through the router, and a router with connection tracking
+/// drops Windows' new connections to the server, since the server's replies come straight back (seen 2 Nov 2026 with
+/// a MikroTik: the startup script never reached the server, no agent, no games disk). Without a gateway Windows talks
+/// to the server directly and gets the router from its own DHCP later, once its disk is connected.
+/// See lists.ipxe.org/pipermail/ipxe-devel/2011-February/000286.html.
+pub(crate) fn ibft_gateway_line(os: &str, server: &str, client: &str) -> &'static str {
+    if os == "windows" && crate::tls::on_subnet_of(server, client) {
+        "set net0/gateway 0.0.0.0\n"
+    } else {
+        ""
+    }
+}
+
 /// EFI loaders a Linux golden is booted from, the first one found: its distribution's shim. Booting such a disk from
 /// its default \EFI\BOOT\BOOTX64.EFI runs shim's fallback instead, which adds a firmware boot entry for the disk and
 /// restarts the PC — at every boot, since the disk is gone without the network boot (seen with Ubuntu 26.04).
@@ -794,7 +810,8 @@ pub(crate) fn boot_diskless(
     );
     Ok(boot_script(
         &format!(
-            "echo Booting {name} from the server (diskless)...\n{}",
+            "echo Booting {name} from the server (diskless)...\n{}{}",
+            ibft_gateway_line(&g.os, &st.db.get_config("dhcp_server_ip", ""), peer),
             san_boot(&g.os, &iscsi_uri(st, &t))
         ),
         name,
@@ -824,6 +841,7 @@ pub(crate) fn boot_maint(
     }
     let info = served(name).ok_or_else(|| format!("golden {name} is not served"))?;
     let disk = iscsi_uri(st, &format!("{}.g{}", iqn(st, name), info.disk.ver));
+    let gw = ibft_gateway_line(&g.os, &st.db.get_config("dhcp_server_ip", ""), peer);
     if let Some(ip) = ip_of(st, m) {
         let _ = crate::iscsi::kick_peer(&ip); // its previous boot's sessions: their writes are flushed
     }
@@ -857,7 +875,7 @@ pub(crate) fn boot_maint(
                 &format!(
                     "echo Installing onto {name} from {iso}\n\
                      echo If the installer asks to press a key to boot from CD/DVD, press one now.\n\
-                     sanhook --drive 0x80 {disk} || goto failed\n\
+                     {gw}sanhook --drive 0x80 {disk} || goto failed\n\
                      sanboot --drive 0x81 {} || goto failed",
                     iscsi_uri(st, &t)
                 ),
@@ -868,7 +886,7 @@ pub(crate) fn boot_maint(
             tracing::info!("golden {name}: {} boots it for maintenance", who(m));
             Ok(boot_script(
                 &format!(
-                    "echo Booting {name} for maintenance (writable)...\n{}",
+                    "echo Booting {name} for maintenance (writable)...\n{gw}{}",
                     san_boot(&g.os, &disk)
                 ),
                 name,

@@ -334,3 +334,26 @@ fn boot_scripts_let_their_drives_go() {
     ));
     assert!(failed.ends_with("chain /boot.ipxe?mac=${net0/mac}&ip=${net0/ip}\n"));
 }
+
+#[test]
+fn windows_gets_no_ibft_gateway_on_the_servers_subnet() {
+    // This host's own address stands in for the server's: a client on its subnet → no gateway for Windows.
+    if let Some((own, _)) = crate::tls::local_ipv4_nets().into_iter().next() {
+        let srv = own.to_string();
+        assert_eq!(
+            ibft_gateway_line("windows", &srv, &srv),
+            "set net0/gateway 0.0.0.0\n"
+        );
+        assert_eq!(
+            ibft_gateway_line("linux", &srv, &srv),
+            "",
+            "Linux keeps its gateway"
+        );
+    }
+    // A server address this host does not have (or none set): nothing changes.
+    assert_eq!(
+        ibft_gateway_line("windows", "203.0.113.77", "203.0.113.78"),
+        ""
+    );
+    assert_eq!(ibft_gateway_line("windows", "", "192.168.88.121"), "");
+}

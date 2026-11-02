@@ -181,3 +181,36 @@ fn pinned_self_signed_handshake() {
         "another certificate"
     );
 }
+
+#[test]
+fn subnets() {
+    let ip = |s: &str| s.parse::<std::net::Ipv4Addr>().unwrap();
+    let m24 = ip("255.255.255.0");
+    assert!(same_subnet(ip("192.168.88.111"), m24, ip("192.168.88.121")));
+    assert!(!same_subnet(
+        ip("192.168.88.111"),
+        m24,
+        ip("192.168.89.121")
+    ));
+    assert!(!same_subnet(ip("192.168.88.111"), m24, ip("10.77.0.21")));
+    assert!(same_subnet(
+        ip("10.0.0.1"),
+        ip("255.0.0.0"),
+        ip("10.77.0.21")
+    ));
+    assert!(!same_subnet(
+        ip("10.0.0.1"),
+        ip("255.255.255.255"),
+        ip("10.0.0.2")
+    ));
+    // Against this host's own interfaces: an address of its own is on its own subnet; a foreign "local" never is.
+    if let Some((own, _)) = local_ipv4_nets().into_iter().next() {
+        assert!(on_subnet_of(&own.to_string(), &own.to_string()));
+    }
+    assert!(
+        !on_subnet_of("203.0.113.77", "203.0.113.78"),
+        "not one of this host's addresses"
+    );
+    assert!(!on_subnet_of("", "192.168.88.121"));
+    assert!(!on_subnet_of("192.168.88.111", "not an ip"));
+}

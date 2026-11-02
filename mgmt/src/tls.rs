@@ -152,6 +152,14 @@ fn own_names(st: &SharedState) -> Vec<String> {
 
 /// The IPv4 addresses on this host's interfaces (getifaddrs).
 pub(crate) fn local_ipv4s() -> Vec<String> {
+    local_ipv4_nets()
+        .into_iter()
+        .map(|(ip, _)| ip.to_string())
+        .collect()
+}
+
+/// The IPv4 addresses on this host's interfaces with their netmasks (getifaddrs), loopback left out.
+pub(crate) fn local_ipv4_nets() -> Vec<(std::net::Ipv4Addr, std::net::Ipv4Addr)> {
     let mut out = Vec::new();
     // SAFETY: getifaddrs fills a list freed with freeifaddrs; each entry read only while the list lives.
     unsafe {
@@ -159,21 +167,47 @@ pub(crate) fn local_ipv4s() -> Vec<String> {
         if libc::getifaddrs(&mut list) != 0 {
             return out;
         }
+        let v4 = |a: *const libc::sockaddr| {
+            (!a.is_null() && i32::from((*a).sa_family) == libc::AF_INET).then(|| {
+                let sin = &*(a as *const libc::sockaddr_in);
+                std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr))
+            })
+        };
         let mut p = list;
         while !p.is_null() {
-            let a = (*p).ifa_addr;
-            if !a.is_null() && i32::from((*a).sa_family) == libc::AF_INET {
-                let sin = &*(a as *const libc::sockaddr_in);
-                let ip = std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
-                if !ip.is_loopback() {
-                    out.push(ip.to_string());
-                }
+            if let Some(ip) = v4((*p).ifa_addr).filter(|ip| !ip.is_loopback()) {
+                let mask = v4((*p).ifa_netmask).unwrap_or(std::net::Ipv4Addr::BROADCAST);
+                out.push((ip, mask));
             }
             p = (*p).ifa_next;
         }
         libc::freeifaddrs(list);
     }
     out
+}
+
+/// `other` is on the subnet of this host's address `local` (its interface's netmask). False when `local` is not one
+/// of this host's addresses or either is not an IPv4 address.
+pub(crate) fn on_subnet_of(local: &str, other: &str) -> bool {
+    let (Ok(l), Ok(o)) = (
+        local.trim().parse::<std::net::Ipv4Addr>(),
+        other.trim().parse::<std::net::Ipv4Addr>(),
+    ) else {
+        return false;
+    };
+    local_ipv4_nets()
+        .into_iter()
+        .any(|(ip, mask)| ip == l && same_subnet(l, mask, o))
+}
+
+/// `a` and `b` are on one subnet with netmask `mask`.
+pub(crate) fn same_subnet(
+    a: std::net::Ipv4Addr,
+    mask: std::net::Ipv4Addr,
+    b: std::net::Ipv4Addr,
+) -> bool {
+    let m = u32::from(mask);
+    u32::from(a) & m == u32::from(b) & m
 }
 
 /// How long a self-signed certificate is valid. Apple's systems refuse any TLS server certificate valid for more than
