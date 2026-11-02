@@ -76,6 +76,18 @@ if ($me -eq $dst) {
 }
 
 step ("role {0}, golden {1} g{2}, first boot: {3}, name: {4}" -f $info.role, $info.golden, $info.ver, $info.first, $info.host)
+# The LAN's router: when the server is on this machine's subnet, its boot gave Windows no gateway (Windows would send
+# its whole disk through the router otherwise), so the default route is added now that the disk is connected - on the
+# network card that reaches the server, for this boot only (not kept in the base or the golden).
+if ($info.gateway) {
+  try {
+    if (-not (Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue)) {
+      $if = (Find-NetRoute -RemoteIPAddress $srv -ErrorAction Stop | Select-Object -First 1).InterfaceIndex
+      New-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -InterfaceIndex $if -NextHop $info.gateway -PolicyStore ActiveStore -ErrorAction Stop | Out-Null
+      step "default route via $($info.gateway) added (interface $if)"
+    }
+  } catch { step "default route via $($info.gateway) NOT added: $_" }
+}
 # The server's scripts.sha256: a downloaded script runs only if it matches.
 function Fetch($f, $to) {
   $sum = $null

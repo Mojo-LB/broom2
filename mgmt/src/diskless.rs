@@ -586,6 +586,35 @@ pub(crate) fn ibft_gateway_line(os: &str, server: &str, client: &str) -> &'stati
     }
 }
 
+/// The router each machine (MAC, lower case) was given by the LAN's DHCP, when its last boot left it out of the iBFT
+/// (ibft_gateway_line): Windows then has no default route, and its startup script adds this one once Windows runs
+/// (GET /api/diskless/client "gateway"; not kept: a route of that boot only).
+static ROUTERS: parking_lot::Mutex<std::collections::BTreeMap<String, String>> =
+    parking_lot::Mutex::new(std::collections::BTreeMap::new());
+
+/// Remember (or forget) machine `mac`'s router for its startup script: kept only when this boot's script left the
+/// gateway out (`line` non-empty) and iPXE reported a valid IPv4 router from the LAN's DHCP.
+pub(crate) fn note_router(mac: &str, line: &str, router: Option<&str>) {
+    let mac = mac.to_lowercase();
+    let r = router.map(str::trim).filter(|r| {
+        r.parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|ip| !ip.is_unspecified())
+    });
+    match (line.is_empty(), r) {
+        (false, Some(r)) => {
+            ROUTERS.lock().insert(mac, r.to_string());
+        }
+        _ => {
+            ROUTERS.lock().remove(&mac);
+        }
+    }
+}
+
+/// Machine `mac`'s router for its startup script (note_router), if its boot left it out of the iBFT.
+pub(crate) fn router_of(mac: &str) -> Option<String> {
+    ROUTERS.lock().get(&mac.to_lowercase()).cloned()
+}
+
 /// EFI loaders a Linux golden is booted from, the first one found: its distribution's shim. Booting such a disk from
 /// its default \EFI\BOOT\BOOTX64.EFI runs shim's fallback instead, which adds a firmware boot entry for the disk and
 /// restarts the PC — at every boot, since the disk is gone without the network boot (seen with Ubuntu 26.04).
@@ -728,6 +757,7 @@ pub(crate) fn boot_diskless(
     name: &str,
     m: &Machine,
     peer: &str,
+    router: Option<&str>,
 ) -> Result<String, String> {
     from_machine(m, m.ip.as_deref(), peer)?;
     let g = goldens(st)
@@ -808,10 +838,11 @@ pub(crate) fn boot_diskless(
             ""
         }
     );
+    let gw = ibft_gateway_line(&g.os, &st.db.get_config("dhcp_server_ip", ""), peer);
+    note_router(&m.mac, gw, router);
     Ok(boot_script(
         &format!(
-            "echo Booting {name} from the server (diskless)...\n{}{}",
-            ibft_gateway_line(&g.os, &st.db.get_config("dhcp_server_ip", ""), peer),
+            "echo Booting {name} from the server (diskless)...\n{gw}{}",
             san_boot(&g.os, &iscsi_uri(st, &t))
         ),
         name,
@@ -827,6 +858,7 @@ pub(crate) fn boot_maint(
     what: &str,
     m: &Machine,
     peer: &str,
+    router: Option<&str>,
 ) -> Result<String, String> {
     from_machine(m, ip_of(st, m).as_deref(), peer)?;
     let g = goldens(st)
@@ -842,6 +874,7 @@ pub(crate) fn boot_maint(
     let info = served(name).ok_or_else(|| format!("golden {name} is not served"))?;
     let disk = iscsi_uri(st, &format!("{}.g{}", iqn(st, name), info.disk.ver));
     let gw = ibft_gateway_line(&g.os, &st.db.get_config("dhcp_server_ip", ""), peer);
+    note_router(&m.mac, gw, router);
     if let Some(ip) = ip_of(st, m) {
         let _ = crate::iscsi::kick_peer(&ip); // its previous boot's sessions: their writes are flushed
     }
@@ -1052,6 +1085,7 @@ async fn client(
         let first = x.base_ver.is_none() || x.base_ver != x.session_ver;
         serde_json::json!({
             "role": "diskless", "golden": g, "ver": x.session_ver, "first": first, "host": m.hostname,
+            "gateway": router_of(&m.mac),
         })
     } else {
         let role = if goldens(&st).iter().any(|g| g.maint == Some(m.id)) {
@@ -1059,7 +1093,7 @@ async fn client(
         } else {
             "none"
         };
-        serde_json::json!({"role": role, "host": m.hostname})
+        serde_json::json!({"role": role, "host": m.hostname, "gateway": router_of(&m.mac)})
     };
     if q.get("fmt").map(String::as_str) == Some("env") {
         return Ok((

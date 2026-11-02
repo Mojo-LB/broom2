@@ -309,6 +309,14 @@ pub async fn capture(State(st): State<SharedState>, Query(q): Q) -> impl IntoRes
 }
 
 /// Golden / action names from the query: [a-z0-9-] only (logged and echoed into the script).
+/// `gw` from the query: the router the LAN's DHCP gave iPXE (the menu passes `${net0/gateway}`), IPv4 only.
+fn router(q: &HashMap<String, String>) -> Option<String> {
+    q.get("gw")
+        .and_then(|g| g.trim().parse::<std::net::Ipv4Addr>().ok())
+        .filter(|ip| !ip.is_unspecified())
+        .map(|ip| ip.to_string())
+}
+
 fn word(q: &HashMap<String, String>, k: &str) -> String {
     q.get(k)
         .map_or("", String::as_str)
@@ -344,10 +352,12 @@ pub async fn diskless(
     let peer = peer.ip().to_canonical().to_string();
     st.saw_pxe(&mac, Some(&peer));
     let st2 = st.clone();
-    let r =
-        tokio::task::spawn_blocking(move || crate::diskless::boot_diskless(&st2, &name, &m, &peer))
-            .await
-            .unwrap_or_else(|e| Err(e.to_string()));
+    let gw = router(&q);
+    let r = tokio::task::spawn_blocking(move || {
+        crate::diskless::boot_diskless(&st2, &name, &m, &peer, gw.as_deref())
+    })
+    .await
+    .unwrap_or_else(|e| Err(e.to_string()));
     script(match r {
         Ok(s) => s,
         Err(e) => {
@@ -373,8 +383,9 @@ pub async fn maint(
     let peer = peer.ip().to_canonical().to_string();
     st.saw_pxe(&mac, Some(&peer));
     let st2 = st.clone();
+    let gw = router(&q);
     let r = tokio::task::spawn_blocking(move || {
-        crate::diskless::boot_maint(&st2, &name, &what, &m, &peer)
+        crate::diskless::boot_maint(&st2, &name, &what, &m, &peer, gw.as_deref())
     })
     .await
     .unwrap_or_else(|e| Err(e.to_string()));
@@ -440,7 +451,7 @@ fn menu_script(
         items.push_str(&format!("item {key}{label} [{}] {}\n", i + 1, img.name));
         // The server logs the boot and returns its script (image / golden names are URL-safe: [A-Za-z0-9_-]).
         targets.push_str(&format!(
-            ":{label}\nchain {}&mac=${{net0/mac}}&ip=${{net0/ip}} || goto start\n\n",
+            ":{label}\nchain {}&mac=${{net0/mac}}&ip=${{net0/ip}}&gw=${{net0/gateway}} || goto start\n\n",
             img.chain
         ));
         if img.is_default {

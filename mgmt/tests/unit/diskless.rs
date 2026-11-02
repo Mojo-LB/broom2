@@ -357,3 +357,22 @@ fn windows_gets_no_ibft_gateway_on_the_servers_subnet() {
     );
     assert_eq!(ibft_gateway_line("windows", "", "192.168.88.121"), "");
 }
+
+#[test]
+fn router_kept_only_when_the_boot_left_it_out() {
+    let mac = "AA:BB:CC:00:11:22";
+    note_router(mac, "set net0/gateway 0.0.0.0\n", Some("192.168.88.254"));
+    assert_eq!(
+        router_of("aa:bb:cc:00:11:22").as_deref(),
+        Some("192.168.88.254")
+    );
+    // Its next boot keeps the iBFT gateway (another subnet / Linux): nothing for its script to add.
+    note_router(mac, "", Some("192.168.88.254"));
+    assert_eq!(router_of(mac), None);
+    // Not an address (or none, or 0.0.0.0): forgotten, never passed on.
+    for bad in [Some("192.168.88.254\nX"), Some("0.0.0.0"), Some(""), None] {
+        note_router(mac, "set net0/gateway 0.0.0.0\n", Some("10.0.0.1"));
+        note_router(mac, "set net0/gateway 0.0.0.0\n", bad);
+        assert_eq!(router_of(mac), None, "{bad:?}");
+    }
+}

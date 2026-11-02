@@ -42,7 +42,7 @@ fn menu_default_keys_ascii() {
     assert!(s.contains("choose --default img1 --timeout 5000 sel || goto shell"));
     // A choice goes through the server (boot log + the image's script).
     assert!(s.contains(
-        ":img1\nchain /boot/start?image=win-11&mac=${net0/mac}&ip=${net0/ip} || goto start\n"
+        ":img1\nchain /boot/start?image=win-11&mac=${net0/mac}&ip=${net0/ip}&gw=${net0/gateway} || goto start\n"
     ));
     assert!(s.contains("set menu-footer Host: FPS-43x|IP: ${net0/ip}|MAC: ${net0/mac}\n"));
     assert!(s.contains("set broom-host FPS-43x\n"));
