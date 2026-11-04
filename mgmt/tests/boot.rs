@@ -1,5 +1,6 @@
 // A PC booting a published Linux golden, step by step as its firmware and iPXE do it: DHCP → TFTP iPXE → (iPXE) DHCP
-// → HTTP boot menu → HTTP boot script → kernel/initrd over HTTP → iSCSI login + reads of the golden.
+// → HTTP boot menu → HTTP boot script → kernel/initrd over HTTP → iSCSI login + reads of the golden. A legacy BIOS PC
+// gets its own iPXE at the TFTP step; from autoexec.ipxe on both take the same path.
 mod common;
 
 use common::clients::{ACK, DISCOVER, Dhcp, Http, Iscsi, OFFER, REQUEST, tftp_get};
@@ -71,6 +72,22 @@ fn linux_client_boots() {
             tftp_get("../etc/passwd").is_err(),
             "TFTP serves only the iPXE files"
         );
+        // A legacy BIOS PC (arch 0) on the same LAN: the BIOS iPXE, which chains the same autoexec.ipxe.
+        let bios: [(u8, &[u8]); 2] = [(60, b"PXEClient:Arch:00000:UNDI:002001"), (93, &[0, 0])];
+        let offer = dhcp.exchange(DISCOVER, [0x52, 0x54, 0, 0, 0, 0xb1], 0x2001, &bios);
+        assert_eq!(
+            (offer.msg_type(), offer.file.as_str()),
+            (OFFER, "undionly.kpxe")
+        );
+        let kpxe = tftp_get("undionly.kpxe").unwrap();
+        let built =
+            std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/ipxe/undionly.kpxe")).unwrap();
+        assert!(
+            kpxe == built,
+            "undionly.kpxe over TFTP: {} bytes, built {}",
+            kpxe.len(),
+            built.len()
+        );
 
         // 3. iPXE asks DHCP again (option 175) → the boot menu URL as boot file, same IP.
         let ipxe = dhcp.exchange(DISCOVER, MAC, 0x1003, &[(175, &[1])]);
@@ -96,6 +113,31 @@ fn linux_client_boots() {
         assert!(
             script.contains(&format!("root=UUID={}", g.uuid)),
             "{script}"
+        );
+        // Legacy BIOS hand-off (the Windows stage's last step): taken only for a machine whose menu choice came from
+        // this address, for a BIOS hard disk number; then its next menu request boots that disk, once.
+        let local = |mac: &str, drive: &str| {
+            anon.post(
+                &format!("/api/boot/local?mac={mac}&drive={drive}"),
+                &serde_json::json!({}),
+            )
+            .status
+        };
+        assert_eq!(
+            local("52:54:00:00:00:b1", "0x80"),
+            403,
+            "no menu choice from here"
+        );
+        assert_eq!(local(MAC_S, "0x7f"), 403, "not a BIOS hard disk");
+        assert_eq!(local(MAC_S, "0x81"), 204);
+        let menu_now = || anon.get(&format!("/boot.ipxe?mac={MAC_S}&ip={ip}")).text();
+        assert_eq!(
+            menu_now(),
+            "#!ipxe\nsanboot --no-describe --drive 0x81 || exit\n"
+        );
+        assert!(
+            menu_now().contains("choose --default"),
+            "once: the menu again"
         );
         assert!(
             home.log().contains("client pc01 started"),

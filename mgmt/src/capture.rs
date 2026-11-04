@@ -212,9 +212,15 @@ fn deploy(api: &Api) -> Result<(), String> {
                 .collect()
         })
         .unwrap_or_default();
-    if map["firmware"] == "bios" && std::path::Path::new("/sys/firmware/efi").exists() {
+    let uefi = std::path::Path::new("/sys/firmware/efi").exists();
+    let other = match (map["firmware"].as_str(), uefi) {
+        (Some("bios"), true) => Some(("BIOS (MBR)", "UEFI")),
+        (Some("efi"), false) => Some(("UEFI", "legacy BIOS")),
+        _ => None,
+    };
+    if let Some((its, this)) = other {
         println!(
-            "\nWARNING: {name} boots with BIOS (MBR), this PC started in UEFI mode: it won't boot it as it is."
+            "\nWARNING: {name} boots with {its}, this PC started in {this} mode: it won't boot it as it is."
         );
         if !yes("Deploy anyway?")? {
             return Err("stopped by the user".into());
@@ -288,7 +294,8 @@ fn deploy(api: &Api) -> Result<(), String> {
         size_str(list.iter().map(|p| p.1).sum()),
         mins(t0.elapsed().as_secs_f64())
     );
-    // The firmware needs a boot entry on this disk's EFI partition: the stage makes it (efibootmgr).
+    // The firmware needs a boot entry on this disk's EFI partition: the stage makes it (efibootmgr; not under legacy
+    // BIOS, where the disk's own MBR boot code, written with the image, boots it).
     let esp = crate::disk::read(&disk.dev)?.and_then(|t| {
         t.parts
             .iter()
@@ -307,9 +314,15 @@ fn deploy(api: &Api) -> Result<(), String> {
     Ok(())
 }
 
-/// The disk holds broom's partitions (BROOMEFI / BROOMWIN, by their GPT names in sysfs).
+/// The disk holds broom's partitions (BROOMEFI / BROOMWIN, by their GPT names in sysfs), or is the legacy BIOS Broom
+/// SSD (MBR disk id "BROM", or "BROL" for a Linux-only one: stage.sh).
 fn broom_ssd(dev: &str) -> bool {
     let n = dev.rsplit('/').next().unwrap_or(dev);
+    let mut id = [0u8; 4];
+    let mbr = File::open(format!("/dev/{n}")).and_then(|f| f.read_exact_at(&mut id, 440));
+    if mbr.is_ok() && matches!(&id, b"BROM" | b"BROL") {
+        return true;
+    }
     std::fs::read_dir(format!("/sys/block/{n}"))
         .into_iter()
         .flatten()

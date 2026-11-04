@@ -3,7 +3,7 @@ title: Free diskless boot for internet cafés with Broom — Windows 11 without 
 description: "Free, open-source diskless boot for internet cafés and gaming centers: a one-file Linux server, Windows 11 clients booting over the network, clean after every restart."
 date: 2026-10-18T10:00:00+07:00
 redirect_from: [/bootrom-quan-net.html]
-last_modified_at: 2026-10-19
+last_modified_at: 2026-10-29
 faq:
   - q: Is Broom free?
     a: Yes. It is licensed Apache-2.0, can be used in a commercial café, and has no per-PC fee.
@@ -24,7 +24,7 @@ faq:
 [← Broom](index.md)
 
 **Broom** is free, open-source **diskless boot** software for **internet cafés, gaming centers and school labs**, up
-to about 100 PCs per server. You install Windows 11 Pro **once** in a virtual machine and upload it to the server;
+to about 100 PCs per server. You install Windows 11 Pro or Enterprise **once** in a virtual machine and upload it to the server;
 every client network-boots from that image, and every restart brings the client back **clean** — whatever a customer
 installed or deleted is gone.
 
@@ -44,7 +44,9 @@ installed or deleted is gone.
   is wrong; the server's log searchable by PC name.
 - **No agent, no internet** (optional, Network → DNS): the server is the room's DNS and only answers PCs whose agent
   runs, PCs that just booted and exempt ones (cashier, staff). Block outbound DNS (53, 853) on the router.
-- **Snapshots, machine groups, driver packages, Wake-on-LAN.**
+- **Versions of every image**: save one before a change, roll back in a click; on XFS / btrfs each version only
+  costs what changed.
+- **Machine groups, driver packages, Wake-on-LAN.**
 - **Free and open source** (Apache-2.0): no per-PC fee, fine for a commercial café.
 
 ![Broom's Remote page: controlling a Windows 11 client in the browser](images/remote-control.webp){: width="1883" height="867"}
@@ -52,9 +54,10 @@ installed or deleted is gone.
 ## What you need
 
 - **Server:** an x86_64 machine running Linux, disk space for the images, Gigabit LAN to the clients.
-- **Clients:** UEFI PCs with network boot (PXE) first, and **an SSD in each** (the Windows image is cached and runs
-  there).
-- **Image:** Windows 11 Pro installed in a virtual machine (e.g. VMware), or on one of the room's PCs and captured.
+- **Clients:** UEFI or legacy BIOS PCs with network boot (PXE) first, and **an SSD in each** (the Windows image is
+  cached and runs there).
+- **Image:** Windows 11 Pro or Enterprise installed in a virtual machine (e.g. VMware), or on one of the room's PCs
+  and captured.
 
 ## Steps
 
@@ -78,12 +81,12 @@ Pick one:
 
 - **Broom's DHCP:** turn DHCP off on the router, then turn on the DHCP server on Broom's **Network** page; or
 - **Keep the router's DHCP:** set next-server / option 66 = the Broom server's IP and boot file / option 67 =
-  `snponly.efi`.
+  `snponly.efi` (legacy BIOS PCs: `undionly.kpxe`).
 
 ### 3. Build the Windows image
 
-1. Create a VM, install Windows 11 Pro, and at the first setup screen (OOBE) press **Ctrl+Shift+F3** to enter
-   **Audit Mode**.
+1. Create a VM, install Windows 11 Pro or Enterprise, and at the first setup screen (OOBE) press **Ctrl+Shift+F3**
+   to enter **Audit Mode**.
 2. Install your software and game launchers, and set things up as the whole room should have them.
 3. In Broom's web admin, set the customers' account and password (**Windows → Guest user**).
 4. In the VM, open PowerShell as Administrator and run:
@@ -123,7 +126,8 @@ hold Windows (nothing to type at the client). Better **hide the other disks from
 
 **A new disk in the server:** **Server → Disks**, press **Format** on the new disk (type its name to confirm). Then pick
 it when creating an image / iSCSI disk, or move an image / iSCSI disk there with the **Server disk** column on the
-Images / iSCSI Disks pages.
+Images / iSCSI Disks pages. Broom formats it XFS: there the image versions share their common data, so keep the images
+on it ([more](user-guide.md#server-disks)).
 
 ## Installing games
 
@@ -154,4 +158,5 @@ errors.
 **{{ item.q }}** {{ item.a | markdownify | remove: '<p>' | remove: '</p>' | strip }}
 {% endfor %}
 
-Full manual: [github.com/morningstar-sudo/broom](https://github.com/morningstar-sudo/broom#readme)
+Step by step: the [user guide](user-guide.md). Full manual:
+[github.com/morningstar-sudo/broom](https://github.com/morningstar-sudo/broom#readme)

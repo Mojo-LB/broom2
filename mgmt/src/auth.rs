@@ -275,6 +275,7 @@ pub(crate) fn is_public(method: &axum::http::Method, path: &str) -> bool {
         "/boot/capture",
         "/boot/diskless",
         "/boot/maint",
+        "/api/boot/local",
         "/broom-capture",
         "/api/cache-list",
         "/api/drivers/for",

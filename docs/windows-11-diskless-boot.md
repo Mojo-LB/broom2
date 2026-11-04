@@ -1,19 +1,19 @@
 ---
 title: Diskless boot Windows 11 over PXE and iSCSI with Broom
-description: "Network-boot Windows 11 Pro on a room of PCs from one golden image with Broom: how it works, what clients need, and setup from an empty Linux server."
+description: "Network-boot Windows 11 Pro or Enterprise on a room of PCs from one golden image with Broom: how it works, what clients need, and setup from an empty Linux server."
 date: 2026-10-11T23:07:00+07:00
-last_modified_at: 2026-10-19
+last_modified_at: 2026-10-29
 ---
 
 [← Broom](index.md)
 
-Broom lets a room of PCs run **Windows 11 Pro from one shared golden image**. You install and set up Windows once,
+Broom lets a room of PCs run **Windows 11 Pro or Enterprise from one shared golden image**. You install and set up Windows once,
 in a virtual machine; every PC then boots that image over the network, and whatever a user changes is gone at the
 next boot.
 
 ## How it works
 
-1. The PC network-boots (UEFI PXE) and gets iPXE from the Broom server, then a boot menu.
+1. The PC network-boots (UEFI or legacy BIOS PXE) and gets iPXE from the Broom server, then a boot menu.
 2. A small Linux stage starts on the PC. It makes sure the PC's SSD holds the current golden as `golden.vhdx` —
    downloading it once per new golden, not every boot — and creates a fresh **child VHDX** on top of it.
 3. Windows boots natively from that child VHDX. Every write the user makes goes into the child, on the local SSD.
@@ -31,9 +31,9 @@ base: a new or updated one is installed once (one extra restart) and needs no ne
 
 - **Server:** any x86_64 Linux (tested on Debian/Ubuntu and Rocky Linux 10), with disk space for the goldens and a
   Gigabit LAN to the clients. Broom is one binary; nothing else to install.
-- **Clients:** x86_64 UEFI PCs, network boot (PXE) first in the boot order, and a local SSD — Windows images are
-  cached and run there.
-- **Golden:** Windows 11 Pro, installed in a VM (e.g. VMware) or on a real PC and captured.
+- **Clients:** x86_64 PCs (UEFI or legacy BIOS), network boot (PXE) first in the boot order, and a local SSD —
+  Windows images are cached and run there.
+- **Golden:** Windows 11 Pro or Enterprise, installed in a VM (e.g. VMware) or on a real PC and captured.
 
 ## Steps
 
@@ -55,12 +55,12 @@ Open `http://<server-ip>/`, enter the setup token and set the admin password.
 
 Either turn on Broom's **DHCP server** (Network page) after switching your router's DHCP off, or keep the router's
 DHCP and point its PXE options at Broom: next-server / option 66 = the Broom server's IP, boot file / option 67 =
-`snponly.efi`.
+`snponly.efi` (legacy BIOS PCs: `undionly.kpxe`).
 
 ### 3. Build the golden
 
-1. Create a VM, install Windows 11 Pro, and stop at the first setup screen (OOBE). Press **Ctrl+Shift+F3** to enter
-   **Audit Mode**.
+1. Create a VM, install Windows 11 Pro or Enterprise, and stop at the first setup screen (OOBE). Press
+   **Ctrl+Shift+F3** to enter **Audit Mode**.
 2. Install your software, games launchers, drivers you want everywhere, and settings.
 3. In Broom's web admin, set the guest user and password (**Windows → Guest user**).
 4. In the VM, run PowerShell as Administrator:
@@ -102,7 +102,8 @@ PC restarts once by itself, and from then on every boot is clean.
   (Windows Update, an anti-cheat's first run); turned off, its next boot saves that as the base.
 - **Strict reset** — Windows can only start through PXE, so a PC that misses the network boot cannot start Windows
   without the reset.
-- **Versions** — snapshot the golden before a change, roll back in a click.
+- **Versions** — snapshot the golden before a change, roll back in a click. With the images on XFS or btrfs,
+  versions share their common data: each costs only what changed ([user guide](user-guide.md#versions)).
 - **Remote** — a live wall of every PC's screen in the web admin; click one to control it with the mouse and keyboard,
   full-screen games included.
 - **Health** — each PC's CPU, RAM, temperatures, disk health (SMART, bad sectors), uptime and the traffic it draws
@@ -117,4 +118,5 @@ PC restarts once by itself, and from then on every boot is clean.
   for PCs whose Remote agent runs, PCs that just booted and exempt ones (cashier, staff): an agent killed or a laptop
   plugged in gets no internet. Block outside DNS (ports 53, 853) on the router to make it stick.
 
-The [full manual](https://github.com/morningstar-sudo/broom#readme) covers every option, backup and security.
+The [user guide](user-guide.md) goes through daily use step by step; the
+[full manual](https://github.com/morningstar-sudo/broom#readme) covers every option, backup and security.
