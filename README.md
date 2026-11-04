@@ -143,7 +143,9 @@ Windows publish fetches `broom-stage.tar.gz` (client stage). The binary takes th
 **Offline server:** copy both files of the same release next to the binary. To upgrade: stop the service, replace the
 binary (checked the same way), start it.
 
-Open `http://<server-ip>/`, enter the setup token and set the owner password. Then the network boot:
+Open `http://<server-ip>/`: it moves to `https://` with the server's self-signed certificate, so the browser warns
+once (the fingerprint is on **Settings → HTTPS**; see [Web admin](#web-admin)). Enter the setup token and set the owner
+password. Then the network boot:
 
 - **Keep the router's DHCP** and set its PXE options: next-server / option 66 = the Broom server, boot file /
   option 67 = `snponly.efi` (Secure Boot clients: `sb/snponly-shim.efi`; legacy BIOS clients: `undionly.kpxe`; a
