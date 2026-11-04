@@ -10,7 +10,7 @@ faq:
   - q: Do the client PCs need a disk?
     a: A Windows image needs an SSD in each PC (the image is cached and runs there). A Linux image also runs on PCs without a disk.
   - q: How many PCs?
-    a: "Up to about 100 PCs per server; Broom itself sets no limit. The server's network and disks decide: up to 30 PCs on 1 Gbps; 30–60 PCs on 10 Gbps with an NVMe disk; 60–100 PCs on two bonded 10 Gbps ports (LACP) or 25 Gbps, PCIe 4 NVMe and 64 GB of RAM or more. Client switches at 1 Gbps with a 10 Gbps uplink, PortFast on. The cafés running it today are all small rooms — add PCs gradually and watch the Server page. Details: [Sizing](https://github.com/morningstar-sudo/broom#sizing)."
+    a: "Up to about 100 PCs per server; Broom itself sets no limit. The server's network and disks decide: up to 30 PCs on 1 Gbps; 30–60 PCs on 10 Gbps with an NVMe disk; 60–100 PCs on two bonded 10 Gbps ports (LACP) or 25 Gbps, PCIe 4 NVMe and 64 GB of RAM or more. Client switches at 1 Gbps with a 10 Gbps uplink, PortFast on. The cafés running it today are all small rooms — add PCs gradually and watch the Server page. Details: [Sizing](https://github.com/Mojo-LB/broom2#sizing)."
   - q: Do games with anti-cheat run?
     a: FACEIT Anti-Cheat runs with Secure Boot (no MOK needed), TPM 2.0 and HVCI — see the [FACEIT guide](faceit-diskless.html).
   - q: Can the owner see the PCs' screens?
@@ -65,8 +65,8 @@ installed or deleted is gone.
 
 ```bash
 sudo mkdir -p /opt/bootrom && cd /opt/bootrom
-sudo curl -fLO https://github.com/morningstar-sudo/broom/releases/latest/download/bootrom-mgmt
-sudo curl -fLO https://github.com/morningstar-sudo/broom/releases/latest/download/SHA256SUMS
+sudo curl -fLO https://github.com/Mojo-LB/broom2/releases/latest/download/bootrom-mgmt
+sudo curl -fLO https://github.com/Mojo-LB/broom2/releases/latest/download/SHA256SUMS
 sha256sum --ignore-missing -c SHA256SUMS   # must say: bootrom-mgmt: OK
 sudo chmod +x bootrom-mgmt
 sudo ./bootrom-mgmt install-service
@@ -159,4 +159,4 @@ errors.
 {% endfor %}
 
 Step by step: the [user guide](user-guide.md). Full manual:
-[github.com/morningstar-sudo/broom](https://github.com/morningstar-sudo/broom#readme)
+[github.com/Mojo-LB/broom2](https://github.com/Mojo-LB/broom2#readme)

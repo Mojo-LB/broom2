@@ -39,4 +39,4 @@ clients pass them:
 Untick **Secure Boot clients** to go back to Broom's own iPXE build on PCs that boot without Secure Boot — both modes
 are supported.
 
-[Diskless boot Windows 11 with Broom](windows-11-diskless-boot.md) · [Full manual](https://github.com/morningstar-sudo/broom#readme)
+[Diskless boot Windows 11 with Broom](windows-11-diskless-boot.md) · [Full manual](https://github.com/Mojo-LB/broom2#readme)

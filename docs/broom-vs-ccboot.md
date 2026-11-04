@@ -56,7 +56,7 @@ change between versions; check their own documentation for current details.
 - **Tested on Windows 11 Pro and Enterprise** so far on the Windows side, on **UEFI or legacy BIOS** PCs.
 - **Each PC needs an SSD** for Windows images (Linux images can run without one).
 - **Big rooms not proven yet** — up to ~100 PCs per server by design, given a 10–25 GbE server link, NVMe and enough
-  RAM ([sizing](https://github.com/morningstar-sudo/broom#sizing)); the sites running it so far are small rooms.
+  RAM ([sizing](https://github.com/Mojo-LB/broom2#sizing)); the sites running it so far are small rooms.
 - **Web admin in English** only.
 
 If those fit your site, Broom gives you a diskless café without licence fees. Start with

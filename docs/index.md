@@ -9,10 +9,10 @@ last_modified_at: 2026-10-29
 **Broom** network-boots a room of PCs from **one golden image**: every reboot comes up clean. One static binary on
 any Linux server, with DHCP, TFTP, iSCSI and the web admin built in. Free and open source (Apache-2.0), for internet
 cafés, gaming centers and school labs, up to ~100 PCs per server
-([sizing](https://github.com/morningstar-sudo/broom#sizing)).
+([sizing](https://github.com/Mojo-LB/broom2#sizing)).
 
-[Download the latest release](https://github.com/morningstar-sudo/broom/releases/latest) ·
-[Source code & full manual](https://github.com/morningstar-sudo/broom)
+[Download the latest release](https://github.com/Mojo-LB/broom2/releases/latest) ·
+[Source code & full manual](https://github.com/Mojo-LB/broom2)
 
 ![Windows 11 client network-booted by Broom, with an iSCSI disk mounted as G:](images/client-games-disk.webp){: width="1280" height="720"}
 
@@ -57,8 +57,8 @@ On a Linux server (Debian/Ubuntu or Rocky Linux), as root:
 
 ```bash
 sudo mkdir -p /opt/bootrom && cd /opt/bootrom
-sudo curl -fLO https://github.com/morningstar-sudo/broom/releases/latest/download/bootrom-mgmt
-sudo curl -fLO https://github.com/morningstar-sudo/broom/releases/latest/download/SHA256SUMS
+sudo curl -fLO https://github.com/Mojo-LB/broom2/releases/latest/download/bootrom-mgmt
+sudo curl -fLO https://github.com/Mojo-LB/broom2/releases/latest/download/SHA256SUMS
 sha256sum --ignore-missing -c SHA256SUMS   # must say: bootrom-mgmt: OK
 sudo chmod +x bootrom-mgmt
 sudo ./bootrom-mgmt install-service
@@ -66,4 +66,4 @@ journalctl -u bootrom-mgmt -f      # shows the one-time setup token
 ```
 
 Open `http://<server-ip>/`, enter the setup token, then follow the [user guide](user-guide.md) (or the
-[full manual](https://github.com/morningstar-sudo/broom#quick-start)).
+[full manual](https://github.com/Mojo-LB/broom2#quick-start)).

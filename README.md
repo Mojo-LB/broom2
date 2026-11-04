@@ -2,8 +2,8 @@
 
 # Broom — open-source diskless boot server for Windows 11 & Linux
 
-[![Release](https://img.shields.io/github/v/release/morningstar-sudo/broom)](https://github.com/morningstar-sudo/broom/releases/latest)
-[![License](https://img.shields.io/github/license/morningstar-sudo/broom)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/Mojo-LB/broom2)](https://github.com/Mojo-LB/broom2/releases/latest)
+[![License](https://img.shields.io/github/license/Mojo-LB/broom2)](LICENSE)
 
 Network-boot a room of PCs from **one golden image**: every reboot comes up clean. One static Rust binary on any
 Linux server, with DHCP, TFTP, iSCSI and the web admin built in. Made for internet cafés, gaming centers and school
@@ -25,10 +25,13 @@ labs, up to ~100 PCs per server (see [Sizing](#sizing)).
   costs only what changed. Whatever is served stays in one piece on the disk.
 - **Machine groups, driver packages.** Free, Apache-2.0.
 
-**User guide:** [step by step, from an empty server to a room in daily use](https://broom.hainth.edu.vn/user-guide.html) ·
-**Guides:** [broom.hainth.edu.vn](https://broom.hainth.edu.vn/)
+**User guide:** [step by step, from an empty server to a room in daily use](docs/user-guide.md) ·
+**Guides:** [docs/](docs/) (upstream Broom publishes them at [broom.hainth.edu.vn](https://broom.hainth.edu.vn/))
 
 ## This fork: fully diskless machines (work in progress)
+
+This is a fork of [Broom](https://github.com/morningstar-sudo/broom), kept in step with it. Releases, downloads and
+build attestations in this README are this fork's ([Mojo-LB/broom2](https://github.com/Mojo-LB/broom2)).
 
 > **Status: work in progress.** Everything below works in the lab — Windows 11 24H2 and Ubuntu 26.04 goldens on
 > virtual-machine clients (three different network cards, Secure Boot on and off, Broom's own DHCP and a router's
@@ -123,8 +126,8 @@ Use a **fixed directory**: the images and the database live next to the binary.
 
 ```bash
 sudo mkdir -p /opt/bootrom && cd /opt/bootrom
-sudo curl -fLO https://github.com/morningstar-sudo/broom/releases/latest/download/bootrom-mgmt
-sudo curl -fLO https://github.com/morningstar-sudo/broom/releases/latest/download/SHA256SUMS
+sudo curl -fLO https://github.com/Mojo-LB/broom2/releases/latest/download/bootrom-mgmt
+sudo curl -fLO https://github.com/Mojo-LB/broom2/releases/latest/download/SHA256SUMS
 sha256sum --ignore-missing -c SHA256SUMS   # must say: bootrom-mgmt: OK
 sudo chmod +x bootrom-mgmt
 sudo ./bootrom-mgmt install-service      # systemd unit; flags after it (e.g. --port 8080) go into the unit
@@ -132,7 +135,7 @@ journalctl -u bootrom-mgmt -f            # shows the one-time setup token
 ```
 
 **Who built it:** the checksum only proves the download is whole. Every release file also carries a signed build
-provenance (GitHub artifact attestation, Sigstore): `gh attestation verify bootrom-mgmt --repo morningstar-sudo/broom`
+provenance (GitHub artifact attestation, Sigstore): `gh attestation verify bootrom-mgmt --repo Mojo-LB/broom2`
 (GitHub CLI, on any machine) checks that it was built by this repository's CI from a commit of `main`.
 
 The first start detects the network and downloads the release's `broom-assets.zip` (web UI, iPXE, scripts); the first
