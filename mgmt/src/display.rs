@@ -2,6 +2,9 @@
 // (broom-vnc.cs, op "display": Windows' ChangeDisplaySettingsEx on the main output, only a mode the monitor offers) every
 // time it connects — a diskless machine starts from its golden at every boot — and at once when it is changed here.
 // A machine's own setting wins over its group's; none = Windows' own choice.
+// Why: a diskless (or reset-every-boot) machine starts from the golden, so a resolution set in Windows on one PC is gone
+// at its next boot, and one golden serves PCs with different monitors. The server keeps the wish and the agent applies
+// it at every start, and only when that PC's monitor offers the mode (another monitor just keeps its own).
 use axum::{Json, Router, extract::State, routing::post};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

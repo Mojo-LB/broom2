@@ -2,6 +2,9 @@
 // Turn on = Wake-on-LAN (wol.rs; the PC's firmware must have it on). Restart / shut down / cancel = a signed command
 // to the machine's Remote agent (vnc.rs → broom-vnc.cs runs Windows' shutdown.exe with a countdown and a message on
 // screen), so only machines whose agent is connected; the others are reported, not guessed at.
+// Why through the agent: a lounge PC opens no port (no WMI / RDP / remote shutdown service to secure); the agent
+// already holds an authenticated connection to the server, so a command reaches only the machine it was meant for,
+// and Windows' own countdown warns a customer before the PC goes down.
 use axum::{Json, Router, extract::State, routing::post};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};

@@ -10,6 +10,9 @@
 # what is missing, nothing once every drive is there. Errors -> %SystemRoot%\Temp\broom-games.log. ASCII only.
 # -LinesFile: the lines come from that file instead (the maintenance VM on the server, broom-diskless.ps1): there the
 # disks are local disks of the VM, named "serial:<disk serial>", always in update mode.
+# Why mode 2 (diskless): such a machine has no SSD to hold a differencing VHDX, so its writes (game settings, saves,
+# shader caches) go to its own layer on the server instead, and that layer is dropped at its next PXE boot - the same
+# clean-every-boot rule as the SSD machines, one sparse copy per machine rather than a full copy of the disk.
 param([string]$Srv, [string]$LinesFile)
 $ErrorActionPreference = 'Stop'
 # The run at startup comes before the network is up (DHCP): wait for the server up to ~90 s instead of giving up

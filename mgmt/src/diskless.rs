@@ -7,6 +7,20 @@
 // golden's groups (fixed IP required: its disk answers only that IP and MAC) gets its own layers on the writeback
 // volume: base = its first-boot setup, kept while the version stays; session = everything else, wiped every boot.
 //
+// Why this design (work in progress — tested in the lab on VMs, not yet in production):
+// - Broom's own mode boots Windows from each PC's SSD (a VHDX chain the stage lays out). A PC without an SSD needs its
+//   whole disk from the server, the way commercial diskless systems work; this adds that mode next to the SSD one, on
+//   Broom's own iSCSI engine (iscsid), so nothing else has to run on the server.
+// - One golden for a room: an update is installed once and every machine gets it at its next boot. Layers are sparse
+//   files of 64 KB blocks, so a machine costs only what it writes; no per-PC copy of the image.
+// - Session layer wiped at every boot: each customer starts on a clean PC, as with the SSD mode.
+// - Base layer per machine: what a machine must do once (its own computer name, its Remote agent key) is kept while the
+//   golden version stays, instead of being redone at every boot; a new version builds it again (first boot + restart).
+// - Fixed IP + MAC: a machine's disk is served only to its IP with its MAC behind it (ARP), so another PC on the LAN
+//   cannot open (or reset) it by asking for its target name, and the PC needs no secret of its own.
+// - Versions are kept and a group can be held on one (pins.rs): a new golden is checked on a test PC before the lounge
+//   gets it, and going back is one click.
+//
 // Where things live — each on a volume chosen on the Diskless page ("" = broom's own folder):
 //   golden_volume     <vol>/goldens/<name>/golden.img (+ its versions' layers)
 //   writeback_volume  <vol>/diskless/<name>/<mac>/   (the machines' layers)

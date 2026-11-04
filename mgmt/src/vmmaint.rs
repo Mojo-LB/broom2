@@ -12,6 +12,11 @@
 //   next start takes it over. Its screen: QEMU's VNC on a Unix socket only root can open, reached through Broom's
 //   signed-in WebSocket /api/vm/console. Shut down = the ACPI power button; Turn off = pulling the plug.
 // One VM at a time.
+// Why: in a lounge every PC is in use during opening hours, and updating the golden or a games disk from a real PC
+// means taking one out of the room. A VM on the server does the same work (games launchers, Windows / app updates)
+// with nothing but a browser, and staff can be allowed to update games without being able to change Windows (the
+// golden's changes are kept only when an owner ticks it). Some commercial diskless systems also let an image be edited
+// in a VM on the server; this one reuses Broom's own pieces (iSCSI engine, the golden's startup script, noVNC).
 use axum::{
     Json, Router,
     extract::{
@@ -160,18 +165,23 @@ pub(crate) fn qemu_args(
         &format!("{},process={}", unit(golden), unit(golden)),
         "-machine",
         "q35,accel=kvm",
+        // The server's own CPU model + the Hyper-V enlightenments Windows uses as a guest (cheaper timers and
+        // interrupts than an emulated CPU), so updates and launchers run at a usable speed.
         "-cpu",
         "host,hv_relaxed,hv_vapic,hv_spinlocks=0x1fff,hv_time",
         "-smp",
         &CPUS.to_string(),
         "-m",
         &MEM_MB.to_string(),
+        // Windows keeps the hardware clock in local time; a UTC clock would make it start hours off until it syncs.
         "-rtc",
         "base=localtime",
         "-drive",
         &format!("if=pflash,format=raw,readonly=on,file={code}"),
         "-drive",
         &format!("if=pflash,format=raw,file={vars}"),
+        // AHCI, not virtio: the golden has Windows' inbox storahci as a boot driver, no virtio driver (the same disk
+        // boots real PCs over iSCSI); it stays the golden the PCs boot, with nothing VM-specific installed into it.
         "-device",
         "ahci,id=sata",
         "-drive",
@@ -192,12 +202,15 @@ pub(crate) fn qemu_args(
     }
     a.extend(
         [
+            // QEMU's own NAT: internet for updates without a bridge on the server's LANs, and nothing on the lounge
+            // network can reach the VM. e1000e: a card Windows has an inbox driver for.
             "-netdev",
             "user,id=n0",
             "-device",
             &format!("e1000e,netdev=n0,mac={}", mac_of(golden)),
             "-device",
             "qemu-xhci,id=usb",
+            // A tablet reports absolute positions, so the mouse in the VM follows the browser's pointer exactly.
             "-device",
             "usb-tablet,bus=usb.0",
             "-vga",
@@ -206,6 +219,7 @@ pub(crate) fn qemu_args(
             "none",
             "-display",
             "none",
+            // VNC on a Unix socket only (no TCP port): the only way in is Broom's signed-in WebSocket.
             "-vnc",
             &format!("unix:{vnc}"),
             "-qmp",
@@ -254,6 +268,9 @@ fn launch(golden: &str, args: &[String], log: &Path) -> Result<Option<u32>, Stri
             .args([
                 &format!("--unit={u}"),
                 "--collect",
+                // mixed: stopping the unit sends SIGTERM to QEMU only (it exits and closes its disks — for Windows
+                // that is pulling the plug, which is why Shut down uses the ACPI button over QMP instead), SIGKILL to
+                // whatever is left after the timeout.
                 "-p",
                 "KillMode=mixed",
                 "-p",

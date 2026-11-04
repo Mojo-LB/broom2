@@ -7,6 +7,11 @@
 //   boot that version (diskless.rs boot_diskless / prepare_games, games.rs for_client) and it is never dropped
 //   (Config.keep_from). The usual flow: a test group on the newest, the lounge held on the last good version; once the
 //   new one is checked on a test PC, move the lounge to it (Approve). Machines get a change at their next boot.
+// Why: a golden or games update that breaks something must never reach the whole room at once. Keeping versions
+// (instead of merging each one away as before) gives a way back, and holding a group lets one PC test the newest
+// version while the others stay on the last good one — an approve-before-rollout flow like the one some commercial
+// diskless systems offer, here as a version picker per group. Space decides how long versions stay, not a count: a 4 TB goldens drive
+// holds many versions, and the oldest go only when the drive actually fills up.
 use axum::{
     Json, Router,
     extract::State,

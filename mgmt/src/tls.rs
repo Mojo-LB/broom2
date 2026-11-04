@@ -5,6 +5,11 @@
 // boot files, Windows PE, the agents and the scripts on the clients (`auth::is_public`): they cannot check a
 // self-signed certificate, and they need no secret from this channel.
 // The session cookie gets `Secure` on HTTPS, so a browser never sends it over plain HTTP.
+// Why: the sign-in never sends the password (password-proof handshake), but the session cookie and everything an
+// admin does (machines, keys, remote screens) went over the LAN in clear text. Self-signed by default so it works out of
+// the box with no domain or internet; an owner who has a real certificate uploads it. Machine traffic stays on HTTP on
+// purpose: iPXE, Windows PE and the agents cannot check a self-signed certificate, and what they fetch is public (boot
+// files, scripts) or allowed by other checks (the agent's key, a machine's IP + MAC).
 use axum::{
     Json, Router,
     body::Body,

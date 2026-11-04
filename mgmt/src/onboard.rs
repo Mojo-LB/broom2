@@ -3,7 +3,14 @@
 //
 // Why: Windows booting from iSCSI brings up only a network card whose *device* it already knows (its exact Plug and
 // Play instance ID, e.g. PCI\VEN_8086&DEV_10D3&…\5&2490727a&0&9008F0). A driver in the driver store, even marked as a
-// boot driver, is not enough (tested 30 Oct 2026); ggRock's "Add new hardware" solves it the way done here.
+// boot driver, is not enough (tested 30 Oct 2026: a never-seen card hung at the Windows spinner). So the device itself
+// has to exist in the golden: created and installed the way Plug and Play does it when it meets the card, with that
+// instance ID. Doing it in a VM on the server means the golden is changed once, by Broom, and saved as a normal new
+// version (Discard if anything fails) — no PC has to install Windows or leave the room. Commercial diskless systems
+// offer a similar "add new hardware" step; this is Broom's own implementation of the idea.
+//
+// Instance IDs follow the slot, not the box (two VMs with the same card in the same PCI slot get the same ID), so one
+// run per board model / slot layout should cover a room of identical PCs (to be confirmed on real hardware).
 //
 // How (one job at a time):
 //  1. An owner starts a job (Diskless page): golden + the machine that has the new card.

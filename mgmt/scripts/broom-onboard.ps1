@@ -8,7 +8,9 @@
 # broom-onboard-result.json and powers the VM off. Broom then puts the original broom-diskless.ps1 back and saves the
 # golden's next version (or throws the work away if a card failed).
 # Why: Windows booting from iSCSI only brings up a network card whose device it already knows - a driver alone is not
-# enough (tested), and ggRock's "Add new hardware" does the same thing in its own VM.
+# enough (tested in the lab: a never-seen card hung at the Windows spinner with its driver installed and flagged).
+# Creating the device the way Plug and Play would, inside the golden, is what makes the card bootable. Commercial
+# diskless systems offer a similar "add new hardware" step; this is Broom's own implementation of the idea.
 # ASCII only.
 $ErrorActionPreference = 'Continue'
 $dir = "$env:SystemRoot\Setup\Scripts"

@@ -23,6 +23,37 @@ labs, up to ~100 PCs per server (see [Sizing](#sizing)).
 
 **Guides:** [broom.hainth.edu.vn](https://broom.hainth.edu.vn/)
 
+## This fork: fully diskless machines (work in progress)
+
+> **Status: work in progress.** Everything below works in the lab — Windows 11 24H2 and Ubuntu 26.04 goldens on
+> virtual-machine clients (three different network cards, Secure Boot on and off, Broom's own DHCP and a router's
+> DHCP) — but it has **not yet been tested in production** or on the target PCs, and anti-cheat behind this boot
+> chain is untested. Expect changes.
+
+Broom boots Windows from each PC's SSD. This fork adds a second mode for PCs **without a disk**: the whole disk
+comes from the server over iSCSI, the way commercial diskless systems work, built on Broom's own iSCSI engine. The
+features were inspired by what commercial diskless products offer; the code is Broom's own.
+
+- **Diskless goldens** (Diskless page): a golden is installed from an ISO in the library by a maintenance machine
+  (or set up in a VM on the server), saved as versions, and booted by every machine of its groups. Each machine gets
+  its own **base** layer (its first-boot setup: name, Remote agent key) and a **session** layer wiped at every boot.
+- **Add hardware**: Windows only boots from a network card it already knows. A new PC boots Windows PE once,
+  reports its cards, and Broom installs them into the golden in a small VM on the server (drivers from the library
+  too) — one run per board model.
+- **Maintain in the browser**: a golden runs in a VM on the server with its screen in the browser (noVNC) and games
+  disks attached writable, for Windows / app / game updates without taking a PC out of the room.
+- **Versions kept, per-group version**: every saved version of a golden or games disk is kept until its drive runs
+  short of space (oldest first); each group boots the newest or a version it is held on, so a test PC checks an update
+  before the room gets it.
+- **Games disks on diskless PCs**: each machine gets its own sparse copy on the server, reset at its next boot.
+- **Machines**: Remote agent on diskless PCs, power (turn on / restart / shut down with a countdown), resolution /
+  refresh per machine or group, hardware list, new PCs joining a group by themselves.
+- **HTTPS** for the web admin (self-signed by default, or your own certificate).
+- **Works behind a router's DHCP**, Secure Boot included (the router hands out `sb/snponly-shim.efi`); Windows'
+  habit of routing its iSCSI disk through the gateway is handled (see [Diskless machines](#diskless-machines-no-ssd)).
+
+Details: [Diskless machines (no SSD)](#diskless-machines-no-ssd).
+
 ## Screenshots
 
 | | |
@@ -213,8 +244,8 @@ PC down.
   script into it as its next version, without booting it.
 - **Games disks on diskless machines:** a diskless Windows machine has no SSD for its writes, so each one gets its own
   copy of every games disk of its group on the server (target `<disk iqn>.m<mac>`: the disk's newest version + the
-  machine's own layer in `<writeback>/.games-<disk>/<mac>/`, dropped at its next PXE boot — like SENET's per-boot
-  shadow copy or ggRock's per-PC writeback). `broom-games.ps1` (run by `broom-watch.ps1 -Dir` at start and every 5
+  machine's own layer in `<writeback>/.games-<disk>/<mac>/`, dropped at its next PXE boot — like the per-PC writeback
+  of commercial diskless systems). `broom-games.ps1` (run by `broom-watch.ps1 -Dir` at start and every 5
   minutes) logs in to it and attaches its `games.vhdx` writable as the disk's letter. The disk's update machine (a
   diskless one too) gets the disk itself, writable, as on SSD machines; Save makes the next version, which every
   machine's copy reads from its next boot.
@@ -252,13 +283,30 @@ PC down.
   starts, so a card Windows PE still cannot use is named on the Diskless page (and on the PC's screen) with what to do.
   A card without a driver in Windows PE but a second card that has one is reported too (from the problem devices). The Windows PE files come out of the ISO's ISO 9660 part; Microsoft's own ISOs keep them in UDF
   only: copy `boot.wim`, `boot.sdi`, `bootmgr.efi` and the UEFI `BCD` into `<ISO place>/.winpe/<iso>/` then.
+- **Versions** (the *kept* versions under each golden on the Diskless page and each disk on the iSCSI Disks page; a
+  version per group on the Groups page): every saved version of a golden or games disk is kept until the drive holding
+  it has less than the % free set under *Where things are kept* (default 10); then the oldest one that no machine uses and no
+  group is held on goes, one at a time. A group boots the **newest** version or one it is **held** on: put a test PC's
+  group on the newest, keep the room on the last good one, then move the room once the test PC is fine. Machines pick
+  a change up at their next boot. The owner can also drop the oldest version by hand.
+- **Behind a router's DHCP** (Broom's DHCP server off): the router's boot file `sb/snponly-shim.efi` (the
+  Microsoft-signed iPXE shim) works for every PC, Secure Boot on or off; each diskless PC needs a **fixed lease** on the
+  router equal to its fixed IP in Broom (its disk answers only that IP). Windows booted from iSCSI turns the gateway it
+  is booted with into a route to its disk *through* that gateway, even on the same subnet, so every disk read would
+  go through the router (and a router that tracks connections drops Windows' new connections to Broom). When Broom is
+  on the PC's subnet, the Windows boot leaves the gateway out and the startup script adds the router as the default
+  route once the disk is up. After moving Broom to another address, **Update script** (Diskless page) writes the new
+  address into the golden.
 
-Status: tested end to end on a VM client with Windows 11 24H2 and Ubuntu 26.04 goldens: installed from the library
+Status (work in progress, lab only — not yet tested in production): tested end to end on a VM client with Windows 11 24H2 and Ubuntu 26.04 goldens: installed from the library
 (the golden attached, the installer from the server), maintained, saved, then booted diskless: each machine's own name
 kept as its base, everything else gone at the next boot. Add hardware tested on VM clients: an e1000e in a PCI slot
 the golden had never seen and an RTL8139 (another driver) under Secure Boot hung at the Windows spinner before, booted
-after (Windows PE report → VM → new version in about 2 minutes). Not tested yet: real PCs (their network card in Windows
-Setup and in the iSCSI boot) and anti-cheat behind this chain.
+after (Windows PE report → VM → new version in about 2 minutes), and a vmxnet3 card Windows PE has no driver for
+booted after its driver came from the driver library. On a LAN behind a router's DHCP: three VM clients (e1000e, vmxnet3, RTL8139 with Secure Boot) booted
+Windows with the Secure Boot shim, Remote agent, games disk and internet; a golden updated in the browser VM booted on
+them; a group held on an older version booted it while a newer one existed. Not tested yet: real PCs (their network
+card in Windows PE and in the iSCSI boot), production load, and anti-cheat behind this chain.
 
 ## Groups, images, versions
 
