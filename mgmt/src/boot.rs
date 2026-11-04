@@ -195,6 +195,13 @@ pub async fn render(
 /// Top line of the boot menu of a machine waiting in the new-machines group.
 pub(crate) const WAITING_NOTE: &str = "New PC: waiting for an admin to move it to its group";
 
+/// First line before a kernel boot (Windows stage, Capture, Linux images): free every image iPXE still holds. iPXE
+/// hands the kernel ALL its registered images as the initrd, and the autoexec.ipxe script the EFI build loads by itself
+/// (tftp.rs) stays registered: its text then comes first in the initrd → "Initramfs unpacking failed: invalid magic at
+/// start of compressed archive" → kernel panic (seen 4 Nov 2026 on a UEFI client booting the stage). Scripts running
+/// right now are not in the list while they run, so this only drops leftovers.
+pub(crate) const FREE_IMAGES: &str = "imgfree\n";
+
 /// "Secure Boot clients" switch (Network page): clients run the official signed iPXE.
 fn secure_boot(st: &SharedState) -> bool {
     st.db.get_config("ipxe_signed", "0") == "1"
@@ -327,7 +334,7 @@ pub async fn start(
                         .map(|m| m.len())
                 });
             format!(
-                "#!ipxe\nset broom-srv {}\nset broom-base {}\nset broom-strict {}\nset broom-lxgb {}\nset broom-wbgb {WB_GB}\nset broom-ssd {}\nset broom-hide {}\n{}{bs}\n",
+                "#!ipxe\nset broom-srv {}\nset broom-base {}\nset broom-strict {}\nset broom-lxgb {}\nset broom-wbgb {WB_GB}\nset broom-ssd {}\nset broom-hide {}\n{FREE_IMAGES}{}{bs}\n",
                 // The server's address at boot time — boot scripts use ${broom-srv}, so changing the Server IP needs
                 // no republish.
                 st.db.get_config("dhcp_server_ip", ""),
@@ -370,7 +377,7 @@ pub async fn capture(State(st): State<SharedState>, Query(q): Q) -> impl IntoRes
     info!("client {mac} - ip {ip}: Capture (disk -> server) started");
     let srv = st.db.get_config("dhcp_server_ip", "");
     script(format!(
-        "#!ipxe\n{}kernel http://{srv}/tftp/broom-stage/vmlinuz initrd=stage.img ip=${{ip}}::${{gateway}}:${{netmask}}:::off BOOTIF=01-${{mac:hexhyp}} broom.capture=1 broom.srv={srv}\n\
+        "#!ipxe\n{FREE_IMAGES}{}kernel http://{srv}/tftp/broom-stage/vmlinuz initrd=stage.img ip=${{ip}}::${{gateway}}:${{netmask}}:::off BOOTIF=01-${{mac:hexhyp}} broom.capture=1 broom.srv={srv}\n\
          initrd http://{srv}/tftp/broom-stage/stage.img\n\
          boot\n\
          echo Capture could not start\n{back}",
