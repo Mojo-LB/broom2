@@ -57,7 +57,12 @@ if ($Vol) {
           # -CompilerOptions, and the agent needs /unsafe.
           $csc = "$env:SystemRoot\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
           if (-not [IO.File]::Exists($csc)) { $csc = "$env:SystemRoot\Microsoft.NET\Framework\v4.0.30319\csc.exe" }
-          & $csc /nologo /unsafe /target:winexe /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Management.dll "/out:$agentExe" $cs | Out-Null
+          # From a Temp copy: csc cannot open BROOMWIN's \\?\Volume{...} path (CS0010 "The filename, directory name,
+          # or volume label syntax is incorrect") - no agent on SSD machines of a local build. PowerShell can copy it.
+          $src = "$env:SystemRoot\Temp\broom-vnc-src.cs"
+          [IO.File]::Copy($cs, $src, $true)
+          & $csc /nologo /unsafe /target:winexe /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Management.dll "/out:$agentExe" $src | Out-Null
+          Remove-Item -LiteralPath $src -Force -ErrorAction SilentlyContinue
         }
       }
     } catch { $agentExe = $null }
