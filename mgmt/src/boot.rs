@@ -281,7 +281,7 @@ pub async fn start(
                         .map(|m| m.len())
                 });
             format!(
-                "#!ipxe\nset broom-srv {}\nset broom-base {}\nset broom-strict {}\nset broom-lxgb {}\nset broom-wbgb {WB_GB}\nset broom-ssd {}\nset broom-hide {}\n{}{bs}\n",
+                "#!ipxe\nset broom-srv {}\nset broom-base {}\nset broom-strict {}\nset broom-lxgb {}\nset broom-wbgb {WB_GB}\nset broom-ssd {}\nset broom-hide {}\n{FREE_IMAGES}{}{bs}\n",
                 // The server's address at boot time — boot scripts use ${broom-srv}, so changing the Server IP needs
                 // no republish.
                 st.db.get_config("dhcp_server_ip", ""),
@@ -324,7 +324,7 @@ pub async fn capture(State(st): State<SharedState>, Query(q): Q) -> impl IntoRes
     info!("client {mac} - ip {ip}: Capture (disk -> server) started");
     let srv = st.db.get_config("dhcp_server_ip", "");
     script(format!(
-        "#!ipxe\n{}kernel http://{srv}/tftp/broom-stage/vmlinuz initrd=stage.img ip=${{ip}}::${{gateway}}:${{netmask}}:::off BOOTIF=01-${{mac:hexhyp}} broom.capture=1 broom.srv={srv}\n\
+        "#!ipxe\n{FREE_IMAGES}{}kernel http://{srv}/tftp/broom-stage/vmlinuz initrd=stage.img ip=${{ip}}::${{gateway}}:${{netmask}}:::off BOOTIF=01-${{mac:hexhyp}} broom.capture=1 broom.srv={srv}\n\
          initrd http://{srv}/tftp/broom-stage/stage.img\n\
          boot\n\
          echo Capture could not start\n{back}",
@@ -335,6 +335,13 @@ pub async fn capture(State(st): State<SharedState>, Query(q): Q) -> impl IntoRes
 /// GB of the Linux writeback partition (broomwb) on the Broom SSD — the only place this number lives: the stage and
 /// the Linux hook get it on their cmdline (broom.wbgb).
 const WB_GB: u64 = 30;
+
+/// First line before a kernel boot (Windows stage, Capture, Linux images): free every image iPXE still holds. iPXE
+/// hands the kernel ALL its registered images as the initrd, and the autoexec.ipxe script the EFI build loads by itself
+/// (tftp.rs) stays registered: its text then comes first in the initrd → "Initramfs unpacking failed: invalid magic at
+/// start of compressed archive" → kernel panic (a UEFI client booting the stage). Scripts running right now are not
+/// in the list while they run, so this only drops leftovers.
+pub(crate) const FREE_IMAGES: &str = "imgfree\n";
 
 /// GB of the Broom SSD kept for the Linux side, from the Linux goldens that use the SSD (each machine caches all of
 /// them): the writeback + their total + 5 GB slack. None → 0 (Windows gets the whole disk). Only used when a disk is
