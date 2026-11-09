@@ -55,7 +55,7 @@ New-Item -ItemType Directory "$B\efi" | Out-Null
 if ($hook) { [IO.File]::WriteAllBytes($hookf, $hook); Write-Host '>>> keeping C:\broom\base-hook.ps1' -ForegroundColor Green }
 # The vdisks by their long path: diskpart's "select vdisk" + detach matches the path the vdisk was attached with, and
 # $env:TEMP is an 8.3 short path for Audit Mode's built-in Administrator (C:\Users\ADMINI~1\...). With it the detach
-# silently does nothing: the ESP vdisk keeps its letter and the BIOS vdisk stays locked → no legacy BIOS files.
+# silently does nothing: the ESP vdisk keeps its letter and the BIOS vdisk stays locked -> no legacy BIOS files.
 $T = (Get-Item -LiteralPath $env:TEMP).FullName
 $vd = "$T\broom-esp.vhdx"
 Remove-Item $vd -ErrorAction SilentlyContinue

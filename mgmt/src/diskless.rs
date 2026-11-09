@@ -7,7 +7,7 @@
 // golden's groups (fixed IP required: its disk answers only that IP and MAC) gets its own layers on the writeback
 // volume: base = its first-boot setup, kept while the version stays; session = everything else, wiped every boot.
 //
-// Why this design (work in progress — tested in the lab on VMs, not yet in production):
+// Why this design:
 // - Broom's own mode boots Windows from each PC's SSD (a VHDX chain the stage lays out). A PC without an SSD needs its
 //   whole disk from the server, the way commercial diskless systems work; this adds that mode next to the SSD one, on
 //   Broom's own iSCSI engine (iscsid), so nothing else has to run on the server.
@@ -588,8 +588,8 @@ fn iscsi_uri(st: &SharedState, iqn: &str) -> String {
 /// client's subnet. Windows booted from iSCSI turns the iBFT's gateway into a host route to its disk's server through
 /// that gateway (Microsoft's design: a gateway on the boot NIC is taken as needed to reach the target), also when the
 /// server is on the same subnet. Every disk read then goes through the router, and a router with connection tracking
-/// drops Windows' new connections to the server, since the server's replies come straight back (seen 2 Nov 2026 with
-/// a MikroTik: the startup script never reached the server, no agent, no games disk). Without a gateway Windows talks
+/// drops Windows' new connections to the server, since the server's replies come straight back (seen with a router
+/// doing that: the startup script never reached the server, no agent, no games disk). Without a gateway Windows talks
 /// to the server directly and gets the router from its own DHCP later, once its disk is connected.
 /// See lists.ipxe.org/pipermail/ipxe-devel/2011-February/000286.html.
 pub(crate) fn ibft_gateway_line(os: &str, server: &str, client: &str) -> &'static str {

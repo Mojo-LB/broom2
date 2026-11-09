@@ -23,44 +23,22 @@ labs, up to ~100 PCs per server (see [Sizing](#sizing)).
   live follow.
 - **Versions of every golden**: snapshot and roll back; on XFS / btrfs versions share their common data, so each one
   costs only what changed. Whatever is served stays in one piece on the disk.
+- **Diskless machines (no SSD)** as a second mode: the whole disk comes from the server over iSCSI, each machine with
+  its own layers, reset at every boot; a new PC's network card is added to the golden from the browser, and goldens
+  are maintained in a VM on the server ([details](#diskless-machines-no-ssd)).
+- **Power, display, hardware list** per machine or group; **HTTPS** for the web admin.
 - **Machine groups, driver packages.** Free, Apache-2.0.
 
 **User guide:** [step by step, from an empty server to a room in daily use](docs/user-guide.md) ·
 **Guides:** [docs/](docs/) (upstream Broom publishes them at [broom.hainth.edu.vn](https://broom.hainth.edu.vn/))
 
-## This fork: fully diskless machines (work in progress)
+## This fork
 
-This is a fork of [Broom](https://github.com/morningstar-sudo/broom), kept in step with it. Releases, downloads and
-build attestations in this README are this fork's ([Mojo-LB/broom2](https://github.com/Mojo-LB/broom2)).
-
-> **Status: work in progress.** Everything below works in the lab — Windows 11 24H2 and Ubuntu 26.04 goldens on
-> virtual-machine clients (three different network cards, Secure Boot on and off, Broom's own DHCP and a router's
-> DHCP) — but it has **not yet been tested in production** or on the target PCs, and anti-cheat behind this boot
-> chain is untested. Expect changes.
-
-Broom boots Windows from each PC's SSD. This fork adds a second mode for PCs **without a disk**: the whole disk
-comes from the server over iSCSI, the way commercial diskless systems work, built on Broom's own iSCSI engine. The
-features were inspired by what commercial diskless products offer; the code is Broom's own.
-
-- **Diskless goldens** (Diskless page): a golden is installed from an ISO in the library by a maintenance machine
-  (or set up in a VM on the server), saved as versions, and booted by every machine of its groups. Each machine gets
-  its own **base** layer (its first-boot setup: name, Remote agent key) and a **session** layer wiped at every boot.
-- **Add hardware**: Windows only boots from a network card it already knows. A new PC boots Windows PE once,
-  reports its cards, and Broom installs them into the golden in a small VM on the server (drivers from the library
-  too) — one run per board model.
-- **Maintain in the browser**: a golden runs in a VM on the server with its screen in the browser (noVNC) and games
-  disks attached writable, for Windows / app / game updates without taking a PC out of the room.
-- **Versions kept, per-group version**: every saved version of a golden or games disk is kept until its drive runs
-  short of space (oldest first); each group boots the newest or a version it is held on, so a test PC checks an update
-  before the room gets it.
-- **Games disks on diskless PCs**: each machine gets its own sparse copy on the server, reset at its next boot.
-- **Machines**: Remote agent on diskless PCs, power (turn on / restart / shut down with a countdown), resolution /
-  refresh per machine or group, hardware list, new PCs joining a group by themselves.
-- **HTTPS** for the web admin (self-signed by default, or your own certificate).
-- **Works behind a router's DHCP**, Secure Boot included (the router hands out `sb/snponly-shim.efi`); Windows'
-  habit of routing its iSCSI disk through the gateway is handled (see [Diskless machines](#diskless-machines-no-ssd)).
-
-Details: [Diskless machines (no SSD)](#diskless-machines-no-ssd).
+A fork of [Broom](https://github.com/morningstar-sudo/broom), kept in step with it, that adds
+[diskless machines](#diskless-machines-no-ssd) and the machine features above (offered upstream as one pull request).
+Releases, downloads and build attestations in this README are this fork's
+([Mojo-LB/broom2](https://github.com/Mojo-LB/broom2)). Diskless is tested on virtual-machine clients so far, not yet
+on real PCs or in production (see [Tested so far](#diskless-machines-no-ssd)).
 
 ## Screenshots
 
@@ -312,15 +290,15 @@ PC down.
   route once the disk is up. After moving Broom to another address, **Update script** (Diskless page) writes the new
   address into the golden.
 
-Status (work in progress, lab only — not yet tested in production): tested end to end on a VM client with Windows 11 24H2 and Ubuntu 26.04 goldens: installed from the library
-(the golden attached, the installer from the server), maintained, saved, then booted diskless: each machine's own name
-kept as its base, everything else gone at the next boot. Add hardware tested on VM clients: an e1000e in a PCI slot
-the golden had never seen and an RTL8139 (another driver) under Secure Boot hung at the Windows spinner before, booted
-after (Windows PE report → VM → new version in about 2 minutes), and a vmxnet3 card Windows PE has no driver for
-booted after its driver came from the driver library. On a LAN behind a router's DHCP: three VM clients (e1000e, vmxnet3, RTL8139 with Secure Boot) booted
-Windows with the Secure Boot shim, Remote agent, games disk and internet; a golden updated in the browser VM booted on
-them; a group held on an older version booted it while a newer one existed. Not tested yet: real PCs (their network
-card in Windows PE and in the iSCSI boot), production load, and anti-cheat behind this chain.
+**Tested so far**, on virtual-machine clients: Windows 11 24H2 and Ubuntu 26.04 goldens end to end — installed from the
+library (the golden attached, the installer from the server), maintained, saved, then booted diskless: each machine's
+own name kept as its base, everything else gone at the next boot. Add hardware: an e1000e in a PCI slot the golden had
+never seen and an RTL8139 (another driver) under Secure Boot hung at the Windows spinner before, booted after (Windows
+PE report → VM → new version in about 2 minutes), and a vmxnet3 card Windows PE has no driver for booted after its
+driver came from the driver library. On a LAN behind a router's DHCP: three clients (e1000e, vmxnet3, RTL8139 with
+Secure Boot) booted Windows with the Secure Boot shim, Remote agent, games disk and internet; a golden updated in the
+browser VM booted on them; a group held on an older version booted it while a newer one existed. Not tested yet: real
+PCs (their network card in Windows PE and in the iSCSI boot), production load, and anti-cheat behind this chain.
 
 ## Groups, images, versions
 

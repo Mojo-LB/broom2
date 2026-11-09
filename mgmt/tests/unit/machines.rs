@@ -35,14 +35,14 @@ fn row(id: i64, mac: &str, ip: Option<&str>, host: Option<&str>, grp: Option<&st
 fn new_machine_joins_the_group() {
     let all = [row(
         1,
-        "bc:24:11:6a:35:eb",
-        Some("10.77.0.21"),
-        Some("DLTEST1"),
+        "52:54:00:6a:35:eb",
+        Some("10.20.0.21"),
+        Some("PC21"),
         Some("Lounge"),
     )];
     let m = new_machine(
         "AA:BB:CC:01:02:0F",
-        "192.168.88.50",
+        "192.168.1.50",
         Some("aa:bb:cc:01:02:0f"),
         "New",
         &all,
@@ -51,7 +51,7 @@ fn new_machine_joins_the_group() {
     )
     .unwrap();
     assert_eq!(m.mac, "aa:bb:cc:01:02:0f");
-    assert_eq!(m.ip.as_deref(), Some("192.168.88.50"));
+    assert_eq!(m.ip.as_deref(), Some("192.168.1.50"));
     assert_eq!(m.hostname.as_deref(), Some("NEW-01020F"));
     assert_eq!(m.grp.as_deref(), Some("New"));
     assert_eq!(m.notes.as_deref(), Some(NEW_NOTE));
@@ -64,7 +64,7 @@ fn new_machine_joins_the_group() {
 fn new_machine_needs_its_own_mac_behind_its_ip() {
     let e = new_machine(
         "aa:bb:cc:01:02:0f",
-        "192.168.88.50",
+        "192.168.1.50",
         Some("aa:bb:cc:01:02:10"),
         "New",
         &[],
@@ -86,25 +86,25 @@ fn new_machine_avoids_taken_names_and_ips_and_has_a_ceiling() {
         row(
             1,
             "11:22:33:44:55:66",
-            Some("192.168.88.50"),
+            Some("192.168.1.50"),
             Some("new-01020f"),
             None,
         ),
         row(2, "11:22:33:44:55:67", None, Some("NEW-CC01020F"), None),
     ];
-    let m = new_machine(mac, "192.168.88.50", Some(mac), "New", &all, &[], 0).unwrap();
+    let m = new_machine(mac, "192.168.1.50", Some(mac), "New", &all, &[], 0).unwrap();
     assert_eq!(m.hostname.as_deref(), Some("NAABBCC01020F"));
     assert_eq!(m.ip, None, "another machine's fixed IP");
     // A live lease of another MAC on that IP → no fixed IP either; an expired one doesn't count.
     let lease = |exp| crate::db::Lease {
         mac: "11:22:33:44:55:99".into(),
-        ip: Some("192.168.88.60".into()),
+        ip: Some("192.168.1.60".into()),
         hostname: None,
         expires: exp,
     };
     let m = new_machine(
         mac,
-        "192.168.88.60",
+        "192.168.1.60",
         Some(mac),
         "New",
         &[],
@@ -115,7 +115,7 @@ fn new_machine_avoids_taken_names_and_ips_and_has_a_ceiling() {
     assert_eq!(m.ip, None);
     let m = new_machine(
         mac,
-        "192.168.88.60",
+        "192.168.1.60",
         Some(mac),
         "New",
         &[],
@@ -123,7 +123,7 @@ fn new_machine_avoids_taken_names_and_ips_and_has_a_ceiling() {
         100,
     )
     .unwrap();
-    assert_eq!(m.ip.as_deref(), Some("192.168.88.60"));
+    assert_eq!(m.ip.as_deref(), Some("192.168.1.60"));
     // Ceiling: NEW_MAX machines already wait in the group (any case) → not added.
     let full: Vec<Machine> = (0..NEW_MAX)
         .map(|i| {
@@ -136,6 +136,6 @@ fn new_machine_avoids_taken_names_and_ips_and_has_a_ceiling() {
             )
         })
         .collect();
-    assert!(new_machine(mac, "192.168.88.70", Some(mac), "New", &full, &[], 0).is_err());
-    assert!(new_machine(mac, "192.168.88.70", Some(mac), "New", &full[1..], &[], 0).is_ok());
+    assert!(new_machine(mac, "192.168.1.70", Some(mac), "New", &full, &[], 0).is_err());
+    assert!(new_machine(mac, "192.168.1.70", Some(mac), "New", &full[1..], &[], 0).is_ok());
 }

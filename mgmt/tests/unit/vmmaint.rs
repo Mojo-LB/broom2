@@ -92,11 +92,11 @@ fn games_lines_for_the_script() {
 /// Only this server itself counts as the VM (it reaches Broom through QEMU's NAT).
 #[test]
 fn own_addresses() {
-    let own = vec!["10.77.0.1".to_string(), "192.168.88.111".to_string()];
+    let own = vec!["10.20.0.1".to_string(), "192.168.1.111".to_string()];
     assert!(is_own("127.0.0.1".parse().unwrap(), &own));
-    assert!(is_own("10.77.0.1".parse().unwrap(), &own));
-    assert!(!is_own("10.77.0.21".parse().unwrap(), &own));
-    assert!(!is_own("192.168.88.50".parse().unwrap(), &own));
+    assert!(is_own("10.20.0.1".parse().unwrap(), &own));
+    assert!(!is_own("10.20.0.21".parse().unwrap(), &own));
+    assert!(!is_own("192.168.1.50".parse().unwrap(), &own));
 }
 
 #[test]

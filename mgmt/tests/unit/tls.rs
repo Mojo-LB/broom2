@@ -2,7 +2,7 @@ use super::*;
 use axum::http::Method;
 
 fn names() -> Vec<String> {
-    ["localhost", "127.0.0.1", "broom1", "10.77.0.1"]
+    ["localhost", "127.0.0.1", "broom", "10.20.0.1"]
         .map(String::from)
         .to_vec()
 }
@@ -75,26 +75,26 @@ fn plain_http_rules() {
         "/broom-diskless.ps1",
         "/api/tls/cert",
     ] {
-        assert_eq!(plain_http(&get, p, "10.77.0.1", 443), None, "{p}");
+        assert_eq!(plain_http(&get, p, "10.20.0.1", 443), None, "{p}");
     }
     assert_eq!(
-        plain_http(&post, "/api/diskless/client/base-done", "10.77.0.1", 443),
+        plain_http(&post, "/api/diskless/client/base-done", "10.20.0.1", 443),
         None
     );
     // The login page's stylesheet etc.: harmless either way.
-    assert_eq!(plain_http(&get, "/app.css", "10.77.0.1", 443), None);
+    assert_eq!(plain_http(&get, "/app.css", "10.20.0.1", 443), None);
     // Admin pages → https, same host (without the HTTP port) and path + query.
     assert_eq!(
-        plain_http(&get, "/", "10.77.0.1", 443),
-        Some(Ok("https://10.77.0.1/".into()))
+        plain_http(&get, "/", "10.20.0.1", 443),
+        Some(Ok("https://10.20.0.1/".into()))
     );
     assert_eq!(
-        plain_http(&get, "/machines?x=1", "broom1:8080", 443),
-        Some(Ok("https://broom1/machines?x=1".into()))
+        plain_http(&get, "/machines?x=1", "broom:8080", 443),
+        Some(Ok("https://broom/machines?x=1".into()))
     );
     assert_eq!(
-        plain_http(&get, "/login", "10.77.0.1", 8443),
-        Some(Ok("https://10.77.0.1:8443/login".into()))
+        plain_http(&get, "/login", "10.20.0.1", 8443),
+        Some(Ok("https://10.20.0.1:8443/login".into()))
     );
     assert_eq!(
         plain_http(&Method::HEAD, "/app.js", "[fe80::1]:80", 443),
@@ -102,19 +102,19 @@ fn plain_http_rules() {
     );
     // The admin API and the sign-in over plain HTTP: refused.
     assert_eq!(
-        plain_http(&post, "/api/auth/login", "10.77.0.1", 443),
+        plain_http(&post, "/api/auth/login", "10.20.0.1", 443),
         Some(Err(()))
     );
     assert_eq!(
-        plain_http(&get, "/api/auth/status", "10.77.0.1", 443),
-        Some(Ok("https://10.77.0.1/api/auth/status".into()))
+        plain_http(&get, "/api/auth/status", "10.20.0.1", 443),
+        Some(Ok("https://10.20.0.1/api/auth/status".into()))
     );
     assert_eq!(
-        plain_http(&post, "/api/power", "10.77.0.1", 443),
+        plain_http(&post, "/api/power", "10.20.0.1", 443),
         Some(Err(()))
     );
     assert_eq!(
-        plain_http(&Method::PUT, "/api/images/upload-chunk", "10.77.0.1", 443),
+        plain_http(&Method::PUT, "/api/images/upload-chunk", "10.20.0.1", 443),
         Some(Err(()))
     );
     // No Host: nowhere to send it.
@@ -169,15 +169,15 @@ fn pinned_self_signed_handshake() {
         }
         Err(rustls::Error::General("handshake did not finish".into()))
     };
-    handshake(&cert, "10.77.0.1").expect("trusted, by its address");
-    handshake(&cert, "broom1").expect("trusted, by its host name");
+    handshake(&cert, "10.20.0.1").expect("trusted, by its address");
+    handshake(&cert, "broom").expect("trusted, by its host name");
     assert!(
-        handshake(&cert, "10.77.0.9").is_err(),
+        handshake(&cert, "10.20.0.9").is_err(),
         "an address it was not made for"
     );
     let (other, _, _) = self_signed(&names(), crate::now_secs()).unwrap();
     assert!(
-        handshake(&other, "10.77.0.1").is_err(),
+        handshake(&other, "10.20.0.1").is_err(),
         "another certificate"
     );
 }
@@ -186,17 +186,13 @@ fn pinned_self_signed_handshake() {
 fn subnets() {
     let ip = |s: &str| s.parse::<std::net::Ipv4Addr>().unwrap();
     let m24 = ip("255.255.255.0");
-    assert!(same_subnet(ip("192.168.88.111"), m24, ip("192.168.88.121")));
-    assert!(!same_subnet(
-        ip("192.168.88.111"),
-        m24,
-        ip("192.168.89.121")
-    ));
-    assert!(!same_subnet(ip("192.168.88.111"), m24, ip("10.77.0.21")));
+    assert!(same_subnet(ip("192.168.1.111"), m24, ip("192.168.1.121")));
+    assert!(!same_subnet(ip("192.168.1.111"), m24, ip("192.168.2.121")));
+    assert!(!same_subnet(ip("192.168.1.111"), m24, ip("10.20.0.21")));
     assert!(same_subnet(
         ip("10.0.0.1"),
         ip("255.0.0.0"),
-        ip("10.77.0.21")
+        ip("10.20.0.21")
     ));
     assert!(!same_subnet(
         ip("10.0.0.1"),
@@ -211,6 +207,6 @@ fn subnets() {
         !on_subnet_of("203.0.113.77", "203.0.113.78"),
         "not one of this host's addresses"
     );
-    assert!(!on_subnet_of("", "192.168.88.121"));
-    assert!(!on_subnet_of("192.168.88.111", "not an ip"));
+    assert!(!on_subnet_of("", "192.168.1.121"));
+    assert!(!on_subnet_of("192.168.1.111", "not an ip"));
 }

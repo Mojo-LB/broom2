@@ -97,7 +97,7 @@ fn load(name: &str, server: Ipv4Addr) -> Result<Cow<'static, [u8]>, String> {
 
 /// Files the Secure Boot shim (shim 16) looks for next to itself at every start and does without when they are not
 /// there: SBAT / SKU revocation updates, extra certificates, MokManager, fallback. "Not found" is the normal answer, so
-/// it is not logged as a warning at every PC's boot (seen 4 Nov 2026 with the MikroTik handing out the shim).
+/// it is not logged as a warning at every PC's boot (a router's DHCP handing out the shim makes every PC ask).
 fn shim_extra(name: &str) -> bool {
     let name = name.replace('\\', "/").to_ascii_lowercase();
     let Some(f) = name.trim_start_matches('/').strip_prefix("sb/") else {

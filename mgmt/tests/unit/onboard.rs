@@ -129,15 +129,15 @@ fn wimboot_script_boots_plain_winpe() {
 #[test]
 fn startnet_runs_the_reporter() {
     let c = startnet(
-        "10.77.0.1",
+        "10.20.0.1",
         "tok",
-        "10.77.0.22",
+        "10.20.0.22",
         "255.255.255.0",
-        "10.77.0.1",
+        "10.20.0.1",
     );
     assert_eq!(
         c,
-        "@echo off\r\nwpeinit\r\ncls\r\necho.\r\nbroom-report.exe http://10.77.0.1 tok 10.77.0.22 255.255.255.0 10.77.0.1\r\n"
+        "@echo off\r\nwpeinit\r\ncls\r\necho.\r\nbroom-report.exe http://10.20.0.1 tok 10.20.0.22 255.255.255.0 10.20.0.1\r\n"
     );
     assert!(super::super::assets::bytes("scripts/broom-report.exe").starts_with(b"MZ"));
 }
@@ -179,7 +179,7 @@ fn job_states() {
 
 const WMIC: &str = "MACAddress         PNPDeviceID\r\n\
                    ROOT\\NET\\0000\r\n\
-BC:24:11:6A:35:EC  PCI\\VEN_8086&DEV_10D3&SUBSYS_00008086&REV_00\\5&2490727A&0&9808F0\r\n\
+52:54:00:6A:35:EC  PCI\\VEN_8086&DEV_10D3&SUBSYS_00008086&REV_00\\5&2490727A&0&9808F0\r\n\
                    SWD\\MSRRAS\\MS_NDISWANIP\r\n\
 \r\n";
 
@@ -188,14 +188,14 @@ fn report_maps_macs() {
     assert_eq!(
         parse_wmic(WMIC),
         vec![(
-            "bc24116a35ec".to_string(),
+            "5254006a35ec".to_string(),
             "PCI\\VEN_8086&DEV_10D3&SUBSYS_00008086&REV_00\\5&2490727A&0&9808F0".to_string()
         )]
     );
     let r = parse_report(&format!("{PNPUTIL}\r\n=== wmic nic ===\r\n{WMIC}"));
     assert_eq!(r.len(), 2);
     assert_eq!(
-        r[0].mac, "bc24116a35ec",
+        r[0].mac, "5254006a35ec",
         "instance IDs compared without case"
     );
     assert_eq!(r[1].mac, "", "no driver in Windows PE → no MAC");
@@ -344,7 +344,7 @@ Hardware IDs:               PCI\\VEN_1234&DEV_1111&SUBSYS_11001AF4&REV_02\r\n\
 fn judge_finds_the_boot_card_by_ipxe() {
     let mut vmx = nic("PCI\\VEN_15AD&DEV_07B0&SUBSYS_07B015AD&REV_01\\4&1", "");
     vmx.hwids = vec!["PCI\\VEN_15AD&DEV_07B0&SUBSYS_07B015AD&REV_01".into()];
-    let nics = [nic("PCI\\VEN_8086&DEV_10D3\\x", "bc24116a35ec"), vmx];
+    let nics = [nic("PCI\\VEN_8086&DEV_10D3\\x", "5254006a35ec"), vmx];
     let r = |a: bool, b: bool| {
         vec![
             serde_json::json!({"instance": "PCI\\VEN_8086&DEV_10D3\\x", "ok": a}),
@@ -352,7 +352,7 @@ fn judge_finds_the_boot_card_by_ipxe() {
         ]
     };
     // The PC's MAC is the vmxnet3's (no driver in Windows PE → no MAC): iPXE's card decides.
-    let mac = "bc:24:11:d1:74:40";
+    let mac = "52:54:00:d1:74:40";
     assert!(judge(&nics, &r(true, false), mac, "PCI\\VEN_15AD&DEV_07B0").is_err());
     assert!(judge(&nics, &r(false, true), mac, "PCI\\VEN_15AD&DEV_07B0").is_ok());
     assert!(

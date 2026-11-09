@@ -78,27 +78,27 @@ fn boot_requests_only_from_the_machine_itself() {
     let m = Machine {
         id: 7,
         mac: "02:00:00:00:00:07".into(),
-        ip: Some("10.77.0.21".into()),
+        ip: Some("10.20.0.21".into()),
         hostname: Some("PC07".into()),
         ..Default::default()
     };
     let arp = |x: Option<&'static str>| move || x.map(String::from);
     let ip = m.ip.as_deref();
-    assert!(allowed_peer(&m, ip, "10.77.0.21", arp(Some("02-00-00-00-00-07"))).is_ok());
+    assert!(allowed_peer(&m, ip, "10.20.0.21", arp(Some("02-00-00-00-00-07"))).is_ok());
     assert!(
-        allowed_peer(&m, ip, "10.77.0.22", arp(Some("02:00:00:00:00:07"))).is_err(),
+        allowed_peer(&m, ip, "10.20.0.22", arp(Some("02:00:00:00:00:07"))).is_err(),
         "other IP"
     );
     assert!(
-        allowed_peer(&m, ip, "10.77.0.21", arp(Some("02:00:00:00:00:08"))).is_err(),
+        allowed_peer(&m, ip, "10.20.0.21", arp(Some("02:00:00:00:00:08"))).is_err(),
         "other card"
     );
     assert!(
-        allowed_peer(&m, ip, "10.77.0.21", arp(None)).is_err(),
+        allowed_peer(&m, ip, "10.20.0.21", arp(None)).is_err(),
         "no ARP entry"
     );
     assert!(
-        allowed_peer(&m, None, "10.77.0.21", arp(Some("02:00:00:00:00:07"))).is_err(),
+        allowed_peer(&m, None, "10.20.0.21", arp(Some("02:00:00:00:00:07"))).is_err(),
         "no IP"
     );
 }
@@ -233,7 +233,7 @@ fn base_layer_plan() {
 /// falls through to the next, the default loader last.
 #[test]
 fn linux_goldens_boot_their_distribution_loader() {
-    let uri = "iscsi:10.77.0.1::::iqn.x:golden-u.m0011";
+    let uri = "iscsi:10.20.0.1::::iqn.x:golden-u.m0011";
     assert_eq!(
         san_boot("windows", uri),
         format!("sanboot --drive 0x80 {uri} || goto failed")
@@ -264,19 +264,19 @@ fn linux_goldens_boot_their_distribution_loader() {
 /// (casper wants a URL ending in .iso) and its seed over HTTP.
 #[test]
 fn ubuntu_installer_boot() {
-    let s = casper_script("ubu", "iscsi:10.77.0.1::::iqn.x:golden-ubu.g3", "10.77.0.1");
+    let s = casper_script("ubu", "iscsi:10.20.0.1::::iqn.x:golden-ubu.g3", "10.20.0.1");
     let lines: Vec<&str> = s.lines().collect();
     assert_eq!(
         lines[0],
-        "sanhook --drive 0x80 iscsi:10.77.0.1::::iqn.x:golden-ubu.g3 || goto failed"
+        "sanhook --drive 0x80 iscsi:10.20.0.1::::iqn.x:golden-ubu.g3 || goto failed"
     );
     assert!(lines[1].starts_with("kernel /boot/iso/ubu/vmlinuz initrd=initrd ip=dhcp "));
-    assert!(lines[1].contains(" url=http://10.77.0.1/boot/iso/ubu/installer.iso "));
+    assert!(lines[1].contains(" url=http://10.20.0.1/boot/iso/ubu/installer.iso "));
     assert!(
         lines[1].contains(" cloud-config-url=/dev/null "),
         "else cloud-init fetches url= again"
     );
-    assert!(lines[1].contains(" ds=nocloud;s=http://10.77.0.1/boot/nocloud/ubu/ "));
+    assert!(lines[1].contains(" ds=nocloud;s=http://10.20.0.1/boot/nocloud/ubu/ "));
     assert!(lines[1].ends_with(" --- || goto failed"));
     assert_eq!(
         lines[2],
@@ -288,13 +288,13 @@ fn ubuntu_installer_boot() {
 /// The seed: interactive, logs in to the golden before the disks are probed, installs broom-diskless.sh in the target.
 #[test]
 fn ubuntu_installer_seed() {
-    let u = nocloud_user_data("10.77.0.1");
+    let u = nocloud_user_data("10.20.0.1");
     assert!(u.starts_with("#cloud-config\nautoinstall:\n  version: 1\n"));
     assert!(u.contains("  interactive-sections: [\"*\"]\n"));
     let early = u.split("  early-commands:\n").nth(1).unwrap();
     assert!(early.starts_with("    - modprobe iscsi_ibft\n    - iscsistart -b\n"));
     assert!(u.contains(
-        "  late-commands:\n    - \"curtin in-target --target=/target -- sh -c 'curl -fsS http://10.77.0.1/broom-diskless.sh | sh'\"\n"
+        "  late-commands:\n    - \"curtin in-target --target=/target -- sh -c 'curl -fsS http://10.20.0.1/broom-diskless.sh | sh'\"\n"
     ));
     assert!(u.is_ascii() && !u.contains('\t'), "YAML: spaces only");
 }
@@ -355,22 +355,22 @@ fn windows_gets_no_ibft_gateway_on_the_servers_subnet() {
         ibft_gateway_line("windows", "203.0.113.77", "203.0.113.78"),
         ""
     );
-    assert_eq!(ibft_gateway_line("windows", "", "192.168.88.121"), "");
+    assert_eq!(ibft_gateway_line("windows", "", "192.168.1.121"), "");
 }
 
 #[test]
 fn router_kept_only_when_the_boot_left_it_out() {
     let mac = "AA:BB:CC:00:11:22";
-    note_router(mac, "set net0/gateway 0.0.0.0\n", Some("192.168.88.254"));
+    note_router(mac, "set net0/gateway 0.0.0.0\n", Some("192.168.1.254"));
     assert_eq!(
         router_of("aa:bb:cc:00:11:22").as_deref(),
-        Some("192.168.88.254")
+        Some("192.168.1.254")
     );
     // Its next boot keeps the iBFT gateway (another subnet / Linux): nothing for its script to add.
-    note_router(mac, "", Some("192.168.88.254"));
+    note_router(mac, "", Some("192.168.1.254"));
     assert_eq!(router_of(mac), None);
     // Not an address (or none, or 0.0.0.0): forgotten, never passed on.
-    for bad in [Some("192.168.88.254\nX"), Some("0.0.0.0"), Some(""), None] {
+    for bad in [Some("192.168.1.254\nX"), Some("0.0.0.0"), Some(""), None] {
         note_router(mac, "set net0/gateway 0.0.0.0\n", Some("10.0.0.1"));
         note_router(mac, "set net0/gateway 0.0.0.0\n", bad);
         assert_eq!(router_of(mac), None, "{bad:?}");
