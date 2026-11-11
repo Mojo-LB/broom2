@@ -3,7 +3,7 @@
 # UI, iPXE, scripts) with it, and the release binary (static musl, without the assets inside); keep binary + bundles + iPXE as artifacts.
 # Every push to main also tags the commit with its push time (UTC, e.g. 2026-09-19T17-05-25Z) and publishes a release
 # with those files.
-# Jobs, side by side: audit; fw (Windows: broom-fw.dll + broom-vnc.exe); test (debug binary, unit tests, clippy);
+# Jobs, side by side: audit; fw (Windows: broom-fw.dll + broom-vnc.exe); winpe (broom-report.exe, mingw-w64); test (debug binary, unit tests, clippy);
 # release-bin (the release binary — the longest, so it starts at once: the bundles' pins are appended to it at the
 # end, not compiled in); stage (after test: the Windows stage bundle, cached while its inputs stay the same). package
 # runs last: packs the assets, pins both bundles in the release binary, checks every file, publishes.
@@ -38,6 +38,24 @@ jobs:
       - name: cargo audit
         working-directory: mgmt
         run: cargo audit
+
+  # winpe/broom-report.c ("Add hardware": what Windows PE runs to report a PC's network cards) → broom-report.exe, with
+  # mingw-w64. Goes into broom-assets.zip (package job); no binary of it is in the repository.
+  winpe:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile broom-report.exe
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gcc-mingw-w64-x86-64
+          bash mgmt/winpe/build.sh "$PWD/broom-report.exe"
+          file broom-report.exe | grep -q 'PE32+ executable' || { echo "not a 64-bit Windows program" >&2; exit 1; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: broom-report
+          path: broom-report.exe
+          if-no-files-found: error
 
   # broom-fw.cs (UEFI BootOrder access of the Windows clients' boot order task) → broom-fw.dll, with the .NET Framework 4
   # compiler PowerShell 5.1's Add-Type uses: the clients load it instead of compiling the C# themselves. Goes into
@@ -237,7 +255,7 @@ jobs:
   # Last: the assets bundle, both bundles pinned in the release binary, every file checked — on pull requests too —
   # then (pushes to main) the release itself. Nothing is published unless all of it holds.
   package:
-    needs: [fw, release-bin, test, stage]
+    needs: [fw, winpe, release-bin, test, stage]
     runs-on: ubuntu-24.04
     permissions:
       contents: write # tag + release on pushes to main
@@ -259,8 +277,8 @@ jobs:
           mkdir -p mgmt/dist mgmt/ipxe mgmt/scripts
           chmod +x in/debug-bin/dist/bootrom-mgmt
           in/debug-bin/dist/bootrom-mgmt pack-assets "$PWD/mgmt/dist/broom-assets.zip"
-          cp in/broom-fw/broom-fw.dll in/broom-fw/broom-vnc.exe mgmt/scripts/
-          (cd mgmt && zip -q -X dist/broom-assets.zip scripts/broom-fw.dll scripts/broom-vnc.exe)
+          cp in/broom-fw/broom-fw.dll in/broom-fw/broom-vnc.exe in/broom-report/broom-report.exe mgmt/scripts/
+          (cd mgmt && zip -q -X dist/broom-assets.zip scripts/broom-fw.dll scripts/broom-vnc.exe scripts/broom-report.exe)
           cp in/stage/broom-stage.tar.gz mgmt/dist/
           cp in/debug-bin/ipxe/snponly.efi in/debug-bin/ipxe/undionly.kpxe mgmt/ipxe/
 
@@ -298,7 +316,7 @@ jobs:
             grep -qx "$n $s" pins.txt || { echo "$f: sha256 $s is not the one the binary reads" >&2; exit 1; }
           done
           # Release assets: everything a release binary loads (assets.rs), the clients' broom-fw.dll included.
-          for n in static/index.html ipxe/snponly.efi ipxe/undionly.kpxe scripts/stage.sh scripts/broom-bootorder.ps1 scripts/broom-fw.cs scripts/broom-fw.dll scripts/broom-vnc.exe; do
+          for n in static/index.html ipxe/snponly.efi ipxe/undionly.kpxe scripts/stage.sh scripts/broom-bootorder.ps1 scripts/broom-fw.cs scripts/broom-fw.dll scripts/broom-vnc.exe scripts/broom-report.exe; do
             unzip -l dist/broom-assets.zip "$n" >/dev/null || { echo "broom-assets.zip has no $n" >&2; exit 1; }
           done
           tar -tzf dist/broom-stage.tar.gz | grep -qx 'stage.img' || { echo "broom-stage.tar.gz has no stage.img" >&2; exit 1; }

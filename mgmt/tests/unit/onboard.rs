@@ -140,7 +140,6 @@ fn startnet_runs_the_reporter() {
         c,
         "@echo off\r\nwpeinit\r\ncls\r\necho.\r\nbroom-report.exe http://10.20.0.1 tok 10.20.0.22 255.255.255.0 10.20.0.1\r\n"
     );
-    assert!(super::super::assets::bytes("scripts/broom-report.exe").starts_with(b"MZ"));
 }
 
 #[test]
@@ -537,4 +536,22 @@ fn live_qemu_is_confined() {
     assert_eq!(field("NoNewPrivs:"), ["1"]);
     assert_eq!(field("Seccomp:"), ["2"], "seccomp filter on");
     assert_eq!(field("CapEff:"), ["0000000000000000"], "no capability left");
+}
+
+/// broom-report.exe is not in the repository nor embedded: a release brings it in its assets (built by CI from
+/// winpe/broom-report.c), a local build needs the one winpe/build.sh makes — and Add hardware says so instead of
+/// starting a job that cannot boot Windows PE.
+#[test]
+fn reporter_is_built_not_committed() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    assert!(root.join("winpe/broom-report.c").is_file());
+    assert!(
+        !root.join("scripts/broom-report.exe").exists(),
+        "no built program of our own in the repository"
+    );
+    // This (test) build has no release assets and no file in Broom's folder.
+    if super::reporter().is_none() {
+        let why = super::reporter_missing().expect("says why");
+        assert!(why.contains("winpe/build.sh") && why.contains("broom-report.exe"), "{why}");
+    }
 }

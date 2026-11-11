@@ -637,6 +637,33 @@ fn valid_id(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || "\\&_-.#{}".contains(c))
 }
 
+/// broom-report.exe, the program Windows PE runs to report the PC's cards: built from winpe/broom-report.c — by CI
+/// into a release's assets, or by `mgmt/winpe/build.sh` for a local build, which puts it at
+/// `<Broom's folder>/winpe/broom-report.exe`. None = this build has none (Add hardware says how to get it).
+pub(crate) fn reporter() -> Option<Vec<u8>> {
+    if let Some(b) = crate::assets::optional("scripts/broom-report.exe") {
+        return Some(b.to_vec());
+    }
+    std::fs::read(reporter_path())
+        .ok()
+        .filter(|b| b.starts_with(b"MZ"))
+}
+
+fn reporter_path() -> PathBuf {
+    crate::home().join("winpe/broom-report.exe")
+}
+
+/// Why Add hardware cannot run on this build (no reporter), if so.
+pub(crate) fn reporter_missing() -> Option<String> {
+    reporter().is_none().then(|| {
+        format!(
+            "this is a local build without broom-report.exe — build it (mgmt/winpe/build.sh, needs gcc-mingw-w64-x86-64) \
+             and copy it to {}, or use a release",
+            reporter_path().display()
+        )
+    })
+}
+
 // ---------- the VM side ----------
 
 /// Tools the job needs on this server; Err lists what is missing.
@@ -1466,7 +1493,7 @@ async fn status(State(st): State<SharedState>) -> Result<Json<serde_json::Value>
         j.token.clear();
         j
     });
-    let pre = preflight().err();
+    let pre = preflight().err().or_else(reporter_missing);
     let hint = j.as_ref().and_then(|j| waiting_hint(j, crate::now_secs()));
     Ok(Json(
         serde_json::json!({ "job": j, "hardware": hardware(&st), "missing": pre, "hint": hint }),
@@ -1506,6 +1533,9 @@ async fn start(
             ));
         }
         preflight().map_err(|e| (StatusCode::CONFLICT, e))?;
+        if let Some(e) = reporter_missing() {
+            return Err((StatusCode::CONFLICT, e));
+        }
         let g = diskless::goldens(&st)
             .into_iter()
             .find(|g| g.name == b.golden)
@@ -1854,7 +1884,10 @@ async fn file(
         )),
         "broom-report.exe" => Ok(text(
             "application/octet-stream",
-            crate::assets::bytes("scripts/broom-report.exe").to_vec(),
+            reporter().ok_or((
+                StatusCode::NOT_FOUND,
+                "no broom-report.exe in this build".to_string(),
+            ))?,
         )),
         "broom-drivers.tar" => {
             let b = tokio::task::spawn_blocking(move || crate::drivers::winpe_bundle(&st))
