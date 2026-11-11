@@ -259,7 +259,9 @@ Update, an anti-cheat's first run). Turned off, its next boot saves that as its 
 ## 13. Accounts {#accounts}
 
 **Settings → Users:** **owner** accounts can do everything; **staff** can look, use Remote and Wake, and save an iSCSI
-disk update, but not delete anything or change settings. **Your password** changes your own. Passwords never cross the
+disk update, but not delete anything or change settings. **Settings → Roles:** make your own roles (a night shift that
+may restart machines, a technician who maintains goldens) and give them to accounts; the server checks every request
+against the role. **Your password** changes your own. Passwords never cross the
 network: signing in is a challenge–response handshake.
 
 ## 14. Backup, restore, upgrade {#backup}

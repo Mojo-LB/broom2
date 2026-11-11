@@ -185,7 +185,8 @@ Upload the powered-off VM folder (only `.vmx` / `.vmdk` are sent, in parallel ch
   its Hardware panel) or for the selected machines / a group (typed, e.g. `1920x1080@165`; a machine's own setting wins
   over its group's). The agent applies it to the main output at every start — only a mode the monitor offers, tested
   first — and at once when changed.
-- **Power** (Machines page; staff too): tick machines (or all a filter shows, e.g. one group), then **Turn on**
+- **Power** (Machines page; turning on: the *wake* permission, staff too; restart / shut down: *power*, see
+  [Web admin](#web-admin)): tick machines (or all a filter shows, e.g. one group), then **Turn on**
   (Wake-on-LAN: on in the PC's firmware), **Restart** or **Shut down** (now, or after 30 s / 1 / 5 min with an optional
   message on screen; through the PC's agent, which runs Windows' `shutdown`) or **Cancel** a countdown. A machine
   without a connected agent is listed as not done. `POST /api/power {action, ids | group, delay, msg}` for scripts.
@@ -237,15 +238,18 @@ PC down.
   threads, 8 GB, internet through QEMU's NAT) and shows its screen in the browser (**Open the screen**: noVNC,
   through Broom's signed-in WebSocket; QEMU's VNC is only a Unix socket). Tick games disks to attach them **writable**
   under their letters, as for an update machine: install or update games, shut the VM down, then **Save** each disk —
-  every machine gets it at its next boot. An owner can tick *Keep Windows changes* (Windows / app updates): Save or
-  Discard the golden afterwards; without it the VM's Windows changes are thrown away when it stops, so staff (who may
-  start it) update games but never change the golden. The VM writes through the server's own iSCSI sessions (the
-  daemon lets 127.0.0.1 write while the VM holds the disks) and runs in its own systemd unit `broom-vm-<golden>`, so
-  restarting Broom does not stop it. One VM at a time; the golden needs no maintenance machine. Needs
+  every machine gets it at its next boot. *Keep Windows changes* (Windows / app updates; the *maintain* permission):
+  Save or Discard the golden afterwards; without it the VM's Windows changes are thrown away when it stops, so a role
+  with only the *vm* permission updates games but never changes the golden. Neither is the built-in staff role's:
+  the owner gives them to a role (Settings → Roles). The VM writes through the server's own iSCSI sessions, each
+  with that session's own random key (the loopback address alone writes nothing), and runs in its own systemd unit
+  `broom-vm-<golden>`, so restarting Broom does not stop it. QEMU is confined: it drops to an unprivileged user once
+  started, runs under its seccomp filter, and its unit sees the file system read-only but for its work folder; its
+  network is left open on purpose (internet, and the LANs the server reaches). One VM at a time; the golden needs no maintenance machine. Needs
   `qemu-system-x86`, `ovmf`, `open-iscsi` and KVM, as Add hardware. In the VM, Steam and other sign-ins are lost with
   the Windows changes unless they are kept.
 - **Remote on diskless machines:** the first boot of each golden version also gets the machine its Remote agent key
-  (handed out only on that boot) and the agent's files (`C:\ProgramData\Broom`, SYSTEM and Administrators only), kept
+  (a new key for each base, handed out once, on that boot, within 15 minutes of its start) and the agent's files (`C:\ProgramData\Broom`, SYSTEM and Administrators only), kept
   in its base; every later boot starts the agent (`broom-watch.ps1 -Dir`, its own task), so remote screen, Wake and
   health work as on SSD machines. A new key (Re-issue on Devices) builds the base again. The maintenance machine gets
   no key: what it writes goes into the golden.
@@ -253,8 +257,10 @@ PC down.
   knows (its exact Plug and Play instance ID: bus + slot); a driver alone is not enough. For a PC with a card the
   golden has never seen (a new board, or a card in another slot), pick the golden and that PC under *Add hardware*
   and press Start. Its next network boot starts Windows PE (wimboot + the Windows PE of the golden's installer ISO;
-  Microsoft-signed, so it also works with *Secure Boot clients*), which reports its cards to Broom. Broom attaches the
-  golden's newest version to itself (iSCSI over 127.0.0.1), boots it in a small VM (QEMU/KVM, no network) where
+  Microsoft-signed, so it also works with *Secure Boot clients*), which reports its cards to Broom (the report
+  counts only with the job's token and from that PC's network card). Broom attaches the golden's newest version to
+  itself (iSCSI over 127.0.0.1, with that job's own write key), boots it in a small VM (QEMU/KVM, no network,
+  confined as the maintenance VM) where
   `broom-onboard.ps1`, run by the golden's own startup task, creates each card's device with that instance ID and lets
   Windows install the best driver from its driver store, marked as a network-boot driver; then Broom saves the golden's
   next version and the PC restarts into it. Identical PCs need it once; a PC whose cards are all known finishes at
@@ -268,11 +274,22 @@ PC down.
   A card without a driver in Windows PE but a second card that has one is reported too (from the problem devices). The Windows PE files come out of the ISO's ISO 9660 part; Microsoft's own ISOs keep them in UDF
   only: copy `boot.wim`, `boot.sdi`, `bootmgr.efi` and the UEFI `BCD` into `<ISO place>/.winpe/<iso>/` then.
 - **Versions** (the *kept* versions under each golden on the Diskless page and each disk on the iSCSI Disks page; a
-  version per group on the Groups page): every saved version of a golden or games disk is kept until the drive holding
-  it has less than the % free set under *Where things are kept* (default 10); then the oldest one that no machine uses and no
-  group is held on goes, one at a time. A group boots the **newest** version or one it is **held** on: put a test PC's
+  version per group on the Groups page): by default, once the machines have restarted onto the newest
+  version the older ones are merged away (as games disks always did). Tick *Keep older versions* under *Where things
+  are kept* and every saved version stays until the drive holding it has less than the % free set there (default
+  10); then the oldest one that no machine uses and no group is held on goes, one at a time. A version a group is
+  held on stays in both cases, with every newer one. A group boots the **newest** version or one it is **held** on: put a test PC's
   group on the newest, keep the room on the last good one, then move the room once the test PC is fine. Machines pick
   a change up at their next boot. The owner can also drop the oldest version by hand.
+- **Room for the machines' writes** (*Where things are kept*): what a diskless PC writes stays on the server until
+  its next boot — its session layer and its copy of each games disk, all on the machines' layers drive. *At most N GB
+  per disk and session* limits one PC (default 0: no limit of its own, so a game installed mid-session just works).
+  *The drive keeps N % free* (default 5): below it only PCs holding less than 8 GB still get new room, so the one
+  big writer stops (its writes fail with "no space" until it restarts) and the room goes on. Changes count from each
+  PC's next boot.
+- **A machine's base is built once:** the first boot of a golden version reports its setup done
+  (`/api/diskless/client/base-done`) and restarts; the server takes that only on a first boot, within 15 minutes of
+  its start, once. No later session — a guest's — can be kept as the base.
 - **Behind a router's DHCP** (Broom's DHCP server off): the router's boot file `sb/snponly-shim.efi` (the
   Microsoft-signed iPXE shim) works for every PC, Secure Boot on or off; each diskless PC needs a **fixed lease** on the
   router equal to its fixed IP in Broom (its disk answers only that IP). Windows booted from iSCSI turns the gateway it
@@ -325,7 +342,13 @@ PCs (their network card in Windows PE and in the iSCSI boot), production load, a
 | Config | **Network** (DHCP, Secure Boot, strict reset, DNS), **Windows** (guest user, SSD room, downloads), **Settings** (users, boot menu) |
 | Tools | **Benchmark**, **Logs** |
 
-Accounts: **owner** (everything) or **staff** (look, Remote, Wake, save a games update; no deleting or settings).
+Accounts and roles (Settings): **owner** — everything; **staff** — look, Remote, Wake, save a games update; no
+deleting or settings. Both are built in. The owner can make **more roles**: a name and what its accounts may do beyond
+looking — `remote`, `wake`, `power` (restart / shut down), `games` (save / discard an update), `vm` (the maintenance
+VM for games disks), `maintain` (goldens: maintenance machine and VM keeping Windows changes, Save / Discard, Add
+hardware), `versions` (the version each group boots). Everything else — machines, groups, images, disks, network,
+settings, accounts, roles — stays the owner's. The server checks every request against the account's role
+(`auth.rs` `needs()`); the pages only hide what a role may not use. A change of role counts from the next request.
 
 **HTTPS.** The web admin is served on `https://` (port 443, `--https-port` to change it, `--https-port 0` = off);
 plain `http://` sends a browser there and refuses the admin API. The machines keep plain HTTP: iPXE, the boot files,
@@ -334,9 +357,11 @@ its host name and addresses (valid 820 days, under Apple's 825-day limit; a new 
 the end). A browser warns the first time: compare the SHA-256 fingerprint it shows with **Settings → HTTPS**, or
 install the certificate on the staff PCs (Download there). **Your own certificate** (PEM certificate with its chain +
 its private key) replaces it on the same card, at once (no restart); so does a new self-signed one (after an address
-change). Files: `<home>/tls/cert.pem`, `key.pem` (root only). The Capture tool (boot menu [C]) trusts exactly the
-server's self-signed certificate; with your own certificate it talks plain HTTP, as the boot does. A switch on the
-card serves the admin on plain `http://` too.
+change). Files: `<home>/tls/cert.pem`, `key.pem` (root only, from the moment it is made). The Capture tool (boot menu [C])
+talks HTTPS only: it shows the SHA-256 fingerprint of the certificate the server presents and goes on when you
+confirm it is the one on **Settings → HTTPS** (self-signed or your own); nothing about that trust travels over plain
+HTTP, and no request header gets around HTTPS. With HTTPS turned off on the server the tool asks before using plain
+HTTP. A switch on the card serves the admin on plain `http://` too.
 
 ## Data, backup
 
@@ -401,6 +426,9 @@ sends it over plain HTTP. What the network must do:
   filesystems on loop devices (`xfsprogs`, `e2fsprogs`).
 - **iPXE** is fetched at `mgmt/ipxe/IPXE_COMMIT`, patched with `mgmt/ipxe/patches/` and embedded; rebuilt only when
   those change (`--ipxe` forces it).
+- **Add hardware** runs `broom-report.exe` in Windows PE. A release gets it from CI (built from
+  `mgmt/winpe/broom-report.c`; no binary of it is in the repository). A local build: install `gcc-mingw-w64-x86-64`,
+  `./build.sh` then also makes `mgmt/dist/broom-report.exe` — copy it to `<Broom's folder>/winpe/` on the server.
 - A local build has no Windows stage bundle. Make one on an Ubuntu machine with a `-generic` kernel and copy it next to
   the binary:
   ```bash
