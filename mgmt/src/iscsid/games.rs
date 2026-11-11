@@ -8,10 +8,13 @@
 // once. Clients connect to the newest gen when they boot; a client already playing keeps its gen until it reboots.
 // Once no client has used an older gen for a while, the layers are merged into games.img in the background — safe
 // while clients of the newest gen read: merging only writes blocks a layer covers, and they read those from the layer.
-// Keeping versions (Config.retain, mgmt sets it): older gens stay — groups can be held on one (pins, Config.keep_from)
-// and every version can be gone back to — until the file system holding the disk has less than min_free_pct % free;
-// then the oldest gen nobody uses or needs goes (its layer merged into games.img alone: safe for every newer gen, for
-// the same reason), one at a time, until there is room again.
+// That is the default, as it always was. Two things keep older gens longer, both set by mgmt:
+// - a group held on a version (pins, Config.keep_from): that gen and every newer one stay; only what lies below it
+//   goes once no client uses it;
+// - keeping versions (Config.retain, off unless the owner turns it on): every gen stays — each can be gone back to —
+//   until the file system holding the disk has less than min_free_pct % free; then the oldest gen nobody uses or
+//   needs goes, one at a time, until there is room again.
+// Dropping the oldest gen merges its next layer into games.img alone: safe for every newer gen, for the same reason.
 //
 // RAM option, per disk: games.img copied into RAM (ramimg.rs) in the background, served from the file meanwhile. The
 // copy stays right while layers sit on top of it (a merge only rewrites blocks the layers cover); once a merge drops
@@ -676,8 +679,9 @@ impl Registry {
         });
     }
 
-    /// Every 30 s, each disk: keeping versions → the oldest unneeded one goes while space is short; else its layers
-    /// are merged into its file once no session has used an older gen for GRACE. Blocking.
+    /// Every 30 s, each disk: keeping versions → the oldest unneeded one goes while space is short; a group held on
+    /// a version → what lies below that version goes once no machine uses it; else (the default) its layers are
+    /// merged into its file once no session has used an older gen for GRACE. Blocking.
     pub fn tick(&'static self) {
         for name in self.with(|d| d.keys().cloned().collect::<Vec<_>>()) {
             let keep = self.with(|d| {
@@ -699,7 +703,19 @@ impl Registry {
                         }
                     }
                 }
-                None => self.merge_if_idle(&name, GRACE),
+                None => {
+                    let held = self.with(|d| d.get(&name).and_then(|s| s.cfg.keep_from));
+                    match held {
+                        None => self.merge_if_idle(&name, GRACE),
+                        // Held: the versions below the held one, one per tick (drop_oldest refuses the held one,
+                        // one in use, and the newest).
+                        Some(_) => {
+                            if let Ok(g) = self.drop_oldest(&name) {
+                                tracing::info!("{} {name}: version g{g} no longer needed — merged", self.what);
+                            }
+                        }
+                    }
+                }
             }
         }
     }

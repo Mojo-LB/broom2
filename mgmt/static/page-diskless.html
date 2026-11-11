@@ -78,9 +78,12 @@
   <div class="card card-body mb-3" data-owner>
     <h2 class="h6 text-uppercase text-body-secondary mb-3">Where things are kept</h2>
     <div id="dl_places" class="d-flex flex-column gap-2"></div>
-    <div class="d-flex flex-wrap gap-2 align-items-center mt-3"><span>Old versions of goldens and iSCSI disks are kept until a drive has less than</span>
-      <input class="form-control form-control-sm" id="ver_pct" type="number" min="1" max="90" style="width:80px"> % free; then the oldest go (never one a group is held on).
+    <div class="d-flex flex-wrap gap-2 align-items-center mt-3">
+      <label class="form-check mb-0"><input class="form-check-input" type="checkbox" id="ver_keep"> <span class="form-check-label">Keep older versions of goldens and iSCSI disks</span></label>
+      <span>until a drive has less than</span>
+      <input class="form-control form-control-sm" id="ver_pct" type="number" min="1" max="90" style="width:80px"> % free; then the oldest go.
       <button class="btn btn-sm btn-outline-primary" data-click="verKeepFree">Save</button> <span id="ver_msg" class="msg"></span></div>
+    <div class="small text-body-secondary mt-1">Off (the default): once the machines have restarted onto the newest version, older ones are merged away. A version a group is held on is always kept, with every newer one.</div>
     <div class="small text-body-secondary mt-2">Server disks are added on the Server page. A place can change only while it is empty.</div>
     <span id="dl_pmsg" class="msg"></span>
   </div>

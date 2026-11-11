@@ -138,7 +138,7 @@ pub(crate) fn with_groups(st: &SharedState) -> Vec<(Config, Vec<String>)> {
                         .map(|m| m.mac.to_lowercase()),
                     ram: d.ram,
                     reserve: crate::publish::ram_reserve(st),
-                    retain: true,
+                    retain: crate::pins::keep(st),
                     min_free_pct: crate::pins::min_free_pct(st),
                     keep_from: crate::pins::keep_from(&d.pins),
                     name: d.name,

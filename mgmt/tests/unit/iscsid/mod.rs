@@ -927,3 +927,148 @@ fn write_key_in_target_name() {
     assert!(!games::key_allowed(&cfg(Some("")), Some(""), "t", "p"), "an empty key opens nothing");
     assert!(!games::key_allowed(&cfg(Some("")), None, "t", "p"));
 }
+
+/// Versions without keeping (the default, Config.retain off): saved versions are merged away once no machine uses
+/// them — what a games disk always did. A group held on a version (keep_from) keeps that version and every newer
+/// one; only what lies below it goes. The hold lifted: everything merges into the newest again.
+#[tokio::test]
+async fn versions_merge_by_default_held_ones_stay() {
+    let _one = crate::iscsid::golden::TEST_LOCK.lock().await;
+    let d = std::env::temp_dir().join("broom_test_nokeep");
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("n")).unwrap();
+    let img = d.join("n/games.img");
+    std::fs::write(&img, vec![0x11u8; 1 << 20]).unwrap();
+    let iqn = "iqn.test:nokeep";
+    let cfg = |keep_from: Option<u64>| games::Config {
+        name: "n".into(),
+        iqn: iqn.into(),
+        path: img.to_string_lossy().into(),
+        update_ip: Some("127.0.0.1".into()),
+        keep_from,
+        ..Default::default() // retain: false
+    };
+    games::set(vec![cfg(Some(1))]).unwrap();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = l.accept().await {
+            tokio::spawn(conn::serve(s, "127.0.0.1".into()));
+        }
+    });
+    let info = || games::info().into_iter().find(|i| i.name == "n").unwrap();
+    let vers = || info().versions.iter().map(|v| v.ver).collect::<Vec<_>>();
+    let idle = || async {
+        for _ in 0..100 {
+            let i = info();
+            if !i.update_connected && i.versions.iter().all(|v| v.sessions == 0) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("sessions still open: {:?}", info());
+    };
+    // g1, g2, g3: each writes its own byte at blocks 8..16.
+    for (ver, b) in [(0u64, 0xa1u8), (1, 0xb2), (2, 0xc3)] {
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        assert_eq!(login(&mut s, &format!("{iqn}.g{ver}")).await.bhs[36], 0);
+        write_blocks(&mut s, 10, 1, 8, &vec![b; 8 * 512]).await;
+        drop(s);
+        idle().await;
+        games::save("n").unwrap();
+    }
+    assert_eq!(vers(), [0, 1, 2, 3]);
+    let read = |ver: u64| async move {
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        if login(&mut s, &format!("{iqn}.g{ver}")).await.bhs[36] != 0 {
+            return None;
+        }
+        Some(read_blocks(&mut s, 20, 1, 8, 8).await[0])
+    };
+    // A group is held on g1: g0 goes (one tick), g1 and the newer ones stay, tick after tick.
+    games::tick();
+    assert_eq!(vers(), [1, 2, 3], "only what lies below the held version went");
+    games::tick();
+    games::tick();
+    assert_eq!(vers(), [1, 2, 3], "the held version and the newer ones stay");
+    assert_eq!(
+        (read(0).await, read(1).await, read(2).await, read(3).await),
+        (None, Some(0xa1), Some(0xb2), Some(0xc3))
+    );
+    idle().await;
+    // The hold lifted: the default again — everything merged into the newest once unused.
+    games::set(vec![cfg(None)]).unwrap();
+    games::merge_if_idle("n", std::time::Duration::ZERO);
+    assert_eq!(vers(), [3], "merged away: only the newest is left");
+    assert_eq!(
+        (read(1).await, read(2).await, read(3).await),
+        (None, None, Some(0xc3))
+    );
+    games::set(Vec::new()).unwrap();
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Discovery (SendTargets) for a client that is no diskless machine — an SSD PC's Windows looking for its games
+/// disks — lists what it always listed: the plain targets and each games disk's newest version. No golden, no other
+/// machine's disk, no keyed name of a job on this server; and a plain target still serves after it.
+#[tokio::test]
+async fn discovery_for_ssd_clients_unchanged() {
+    let _one = crate::iscsid::golden::TEST_LOCK.lock().await;
+    let d = std::env::temp_dir().join("broom_test_discovery");
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("g")).unwrap();
+    let (plain, img) = (d.join("plain.img"), d.join("g/games.img"));
+    std::fs::write(&plain, vec![0x33u8; 1 << 20]).unwrap();
+    std::fs::write(&img, vec![0x11u8; 1 << 20]).unwrap();
+    let plain_iqn = "iqn.test:disc-plain.g1";
+    export(Entry {
+        iqn: plain_iqn.into(),
+        path: plain.to_string_lossy().into(),
+        ram: false,
+        reserve: 0,
+        stamp: String::new(),
+        cd: false,
+    })
+    .unwrap();
+    games::set(vec![games::Config {
+        name: "g".into(),
+        iqn: "iqn.test:disc-games".into(),
+        path: img.to_string_lossy().into(),
+        update_ip: Some("127.0.0.1".into()),
+        update_key: Some("00112233445566778899aabbccddeeff".into()),
+        ..Default::default()
+    }])
+    .unwrap();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = l.accept().await {
+            tokio::spawn(conn::serve(s, "127.0.0.1".into()));
+        }
+    });
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    assert_eq!(login(&mut s, plain_iqn).await.bhs[36], 0);
+    s.write_all(&pdu(0x04, 0x80, 7, 1, b"SendTargets=All\0"))
+        .await
+        .unwrap();
+    let r = conn::read_pdu(&mut s).await.unwrap();
+    assert_eq!(r.bhs[0], 0x24, "Text response");
+    let text = String::from_utf8_lossy(&r.data).into_owned();
+    let mut names: Vec<&str> = text
+        .split('\0')
+        .filter_map(|kv| kv.strip_prefix("TargetName="))
+        .filter(|n| n.contains(":disc-")) // other tests' targets of this process aside
+        .collect();
+    names.sort();
+    assert_eq!(names, ["iqn.test:disc-games.g0", plain_iqn], "{text}");
+    assert!(!text.contains(".u0011"), "a job's keyed name is never listed");
+    // The plain target reads as ever on that same session.
+    assert!(
+        read_blocks(&mut s, 8, 2, 0, 8).await.iter().all(|&b| b == 0x33),
+        "plain target served"
+    );
+    drop(s);
+    TARGETS.lock().remove(plain_iqn);
+    games::set(Vec::new()).unwrap();
+    let _ = std::fs::remove_dir_all(&d);
+}

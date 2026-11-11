@@ -261,7 +261,7 @@ fn configs(st: &SharedState) -> Result<Vec<golden::Config>, String> {
                 update_key,
                 ram: g.ram,
                 reserve: crate::publish::ram_reserve(st),
-                retain: true,
+                retain: crate::pins::keep(st),
                 min_free_pct: crate::pins::min_free_pct(st),
                 keep_from: crate::pins::keep_from(&g.pins),
             },

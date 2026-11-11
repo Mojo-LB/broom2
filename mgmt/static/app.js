@@ -739,7 +739,9 @@ function verPanel(kind,e){if(!e)return '<span class="small text-body-secondary">
     <td class="small">${esc(x.sessions?x.sessions+' on it now':'')}</td><td class="small">${esc(held(x.ver))}</td></tr>`).join('');
   const vers=(e.versions||[]).map(x=>x.ver);
   const fs=e.fs_size?gbs(e.fs_free)+' free of '+gbs(e.fs_size)+' on its drive':'';
-  return `<div class="small mb-1 text-body-secondary">Every saved version is kept until its drive has less than ${esc(verData.min_free_pct)}% free; then the oldest goes — never one a group is held on or a machine is on now.${esc(fs?' '+fs+'.':'')}</div>
+  const how=verData.keep?`Every saved version is kept until its drive has less than ${verData.min_free_pct}% free; then the oldest goes — never one a group is held on or a machine is on now.`
+    :'Older versions are merged away once no machine is on them (keeping them: Diskless page, Where things are kept). A version a group is held on stays, with every newer one.';
+  return `<div class="small mb-1 text-body-secondary">${esc(how)}${esc(fs?' '+fs+'.':'')}</div>
     <div class="table-responsive"><table class="table table-sm w-auto mb-2"><thead><tr><th>Version</th><th>Its own data</th><th>Saved</th><th>In use</th><th>Held for</th></tr></thead><tbody>${rows}</tbody></table></div>
     <div class="d-flex flex-wrap gap-3 align-items-center"><b class="small">Version each group boots</b>${verPicks(kind,e,vers)}
     <button class="btn btn-sm btn-outline-danger" data-owner ${act('verDrop',kind,e.name)}>Drop the oldest version</button></div>`;}
@@ -754,7 +756,7 @@ async function verPin(kind,name,group,el){
 async function verDrop(kind,name){if(!await sure('Drop the oldest kept version of '+name+' now? It can no longer be booted or gone back to. (Not possible while a machine is on it or a group is held on it.)'))return;
   try{const r=await j('/api/versions/drop-oldest',mk({kind,name}));toast(r.status);}catch(e){toast(e.message,true);}
   verReload(kind);}
-const verKeepFree=()=>post('/api/versions/keep-free',{pct:+v('ver_pct')},'ver_msg',()=>'saved',loadDiskless);
+const verKeepFree=()=>post('/api/versions/keep-free',{keep:document.getElementById('ver_keep').checked,pct:+v('ver_pct')},'ver_msg',()=>'saved',loadDiskless);
 
 // ---- diskless goldens (Diskless page) ----
 let dlData=null;
@@ -775,6 +777,7 @@ async function loadDiskless(){
       <td data-owner class="text-nowrap"><button class="btn btn-sm btn-outline-secondary" ${act('editGolden',g.name)}>Edit</button>${g.os==='windows'?` <button class="btn btn-sm btn-outline-secondary" title="Write Broom's current startup script (broom-diskless.ps1) into this golden as its next version, without booting it. Needed once for goldens set up before the script updated itself." ${act('refreshGolden',g.name)}>Update script</button>`:''} <button class="btn btn-sm btn-outline-danger" ${act('delGolden',g.name)}>Delete</button></td></tr>`+verRow('golden',g.name,10);}).join('')
     ||'<tr><td colspan="10" class="mono">no golden yet — create one below</td></tr>';
   const vp=document.getElementById('ver_pct');if(vp&&verData&&document.activeElement!==vp)vp.value=verData.min_free_pct;
+  const vk=document.getElementById('ver_keep');if(vk&&verData&&document.activeElement!==vk)vk.checked=!!verData.keep;
   // Their machines: each with its own layers (from the daemon) and target.
   const mb=document.querySelector('#dl_machines tbody');
   const rows=d.goldens.flatMap(x=>x.machines.map(m=>{const st=x.status?x.status.machines.find(y=>y.mac===mac12(m.mac)):null;
