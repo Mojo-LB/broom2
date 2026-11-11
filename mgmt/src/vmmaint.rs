@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 
 use crate::SharedState;
 use crate::api::{ApiError, bad, ise};
-use crate::auth::{Role, Who};
+use crate::auth::Who;
 
 pub fn routes() -> Router<SharedState> {
     Router::new()
@@ -813,6 +813,17 @@ async fn status(State(st): State<SharedState>) -> Json<serde_json::Value> {
     }))
 }
 
+/// What it takes to start, stop or use the screen of a VM: one that keeps Windows changes → Maintain; games disks
+/// only → Vm (or Maintain).
+pub(crate) fn needed_for(keep: bool) -> &'static [crate::auth::Perm] {
+    use crate::auth::Perm;
+    if keep {
+        &[Perm::Maintain]
+    } else {
+        &[Perm::Vm, Perm::Maintain]
+    }
+}
+
 #[derive(Deserialize)]
 struct StartBody {
     golden: String,
@@ -823,18 +834,15 @@ struct StartBody {
     keep: bool,
 }
 
-/// POST /api/vm/start {golden, games: [names], keep} (staff: games only, keep = false).
+/// POST /api/vm/start {golden, games: [names], keep} — keep = false (games disks only): the Vm permission; keep =
+/// true: Maintain.
 async fn start(
     State(st): State<SharedState>,
     axum::Extension(w): axum::Extension<Who>,
     Json(b): Json<StartBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    if b.keep && w.role != Role::Owner {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "keeping Windows changes is for an owner — staff update the games disks only".into(),
-        ));
-    }
+    // Keeping what is done to Windows changes the golden every machine boots: Maintain. Games disks only: Vm.
+    w.require(needed_for(b.keep))?;
     if !crate::diskless::valid_name(&b.golden) {
         return Err(bad("golden: its name"));
     }
@@ -854,7 +862,8 @@ struct StopBody {
     force: bool,
 }
 
-/// POST /api/vm/stop {force} — the power button (Windows shuts down), or force: turned off at once.
+/// POST /api/vm/stop {force} — the power button (Windows shuts down), or force: turned off at once. A VM that keeps
+/// Windows changes is stopped only by an account that could have started it.
 async fn stop(
     State(st): State<SharedState>,
     axum::Extension(w): axum::Extension<Who>,
@@ -863,6 +872,7 @@ async fn stop(
     let s = current(&st)
         .filter(|s| s.state == "running" || s.state == "stopping")
         .ok_or((StatusCode::CONFLICT, "no VM is running".to_string()))?;
+    w.require(needed_for(s.keep))?;
     let st2 = st.clone();
     let msg = tokio::task::spawn_blocking(move || -> Result<String, String> {
         if b.force {
@@ -895,11 +905,12 @@ async fn stop(
     Ok(Json(serde_json::json!({"ok": true, "msg": msg})))
 }
 
-/// GET /api/vm/console (WebSocket, signed in) — the VM's screen: RFB bytes both ways between noVNC and QEMU's VNC
+/// GET /api/vm/console (WebSocket; the Vm permission, Maintain for a VM that keeps Windows changes) — the VM's screen: RFB bytes both ways between noVNC and QEMU's VNC
 /// socket. The session is checked again every 30 s.
 async fn console(
     ws: WebSocketUpgrade,
     State(st): State<SharedState>,
+    axum::Extension(w): axum::Extension<Who>,
     headers: HeaderMap,
 ) -> Response {
     if !crate::vnc::same_origin(&headers) {
@@ -908,6 +919,10 @@ async fn console(
     let Some(s) = current(&st).filter(|s| s.state == "running" || s.state == "stopping") else {
         return (StatusCode::CONFLICT, "no VM is running").into_response();
     };
+    // Its keyboard and mouse: for a VM that keeps Windows changes, typing there is changing the golden.
+    if let Err(e) = w.require(needed_for(s.keep)) {
+        return e.into_response();
+    }
     let sock = match work_dir(&st, &s.golden) {
         Ok(w) => w.join("vnc.sock"),
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),

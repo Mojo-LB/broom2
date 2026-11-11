@@ -20,6 +20,15 @@ pub fn routes() -> Router<SharedState> {
 
 /// The longest countdown a restart / shutdown may have (shutdown.exe takes up to 10 years; a lounge needs minutes).
 pub(crate) const MAX_DELAY: u32 = 600;
+
+/// The permission a power action needs.
+pub(crate) fn needed_for(action: &str) -> crate::auth::Perm {
+    if action == "on" {
+        crate::auth::Perm::Wake
+    } else {
+        crate::auth::Perm::Power
+    }
+}
 /// The message shown with the countdown, at most this many characters.
 const MAX_MSG: usize = 200;
 /// A pending action is shown this long after it was sent, beyond its countdown (the machine going down and, for a
@@ -100,16 +109,24 @@ pub(crate) fn agent_command(what: &str, delay: u32, msg: &str) -> String {
         .to_string()
 }
 
-/// POST /api/power {action, ids | group, delay?, msg?} → {results: [{id, name, ok, msg}], done: n}. Staff may (a
-/// lounge restarts PCs all day).
+/// POST /api/power {action, ids | group, delay?, msg?} → {results: [{id, name, ok, msg}], done: n}. Turning on needs
+/// the Wake permission (as /api/wake); restart / shut down / cancel need Power.
 async fn power(
     State(st): State<SharedState>,
+    axum::Extension(w): axum::Extension<crate::auth::Who>,
     Json(b): Json<PowerBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let what = b.action.as_str();
     if !matches!(what, "on" | "restart" | "shutdown" | "cancel") {
         return Err(bad("action: on, restart, shutdown or cancel"));
     }
+    let need: &'static [crate::auth::Perm] = if what == "on" {
+        &[crate::auth::Perm::Wake]
+    } else {
+        &[crate::auth::Perm::Power]
+    };
+    debug_assert_eq!(need[0], needed_for(what));
+    w.require(need)?;
     let delay = b.delay.unwrap_or(30);
     if delay > MAX_DELAY {
         return Err(bad(format!("delay: 0 to {MAX_DELAY} seconds")));

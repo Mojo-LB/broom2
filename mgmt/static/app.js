@@ -105,10 +105,10 @@ function renderMachines(){
        <td>${led(m.online)}${m.not_reset?' <span class="badge text-bg-danger" title="Windows started from the SSD without a PXE boot at '+new Date(m.not_reset*1000).toLocaleString()+' — this session was NOT reset (cable out, server down, boot order changed?). Cleared by the next PXE boot.">not reset</span>':''}${m.ssd_low?' <span class="badge text-bg-danger" title="SSD almost full during the session: '+gbs(m.ssd_low[0])+' free at '+new Date(m.ssd_low[1]*1000).toLocaleString()+' (the guest wrote a lot; Windows → SSD room). Cleared by the next PXE boot.">SSD full</span>':''}${pwBadge(m)}${mxBadge(m.metrics)}${upBadge(m)}${baseBadge(m)}</td>
        <td class="mono" title="${esc(m.license_result||'')}">${licCell(m)}</td>
        <td><div class="d-flex gap-1">${m.registered
-          ? `<button class="btn btn-sm btn-outline-secondary" ${act('wake',m.mac)}>Wake</button>
+          ? `<button class="btn btn-sm btn-outline-secondary" data-perm="wake" ${act('wake',m.mac)}>Wake</button>
              <button class="btn btn-sm btn-outline-secondary" ${act('manage',m.id)} data-owner>Manage</button>
              ${basePick(m)}
-             ${m.remote?`<button class="btn btn-sm btn-outline-primary" ${act('remoteTo',m.hostname)} title="See and control this machine">Remote</button>`:''}
+             ${m.remote?`<button class="btn btn-sm btn-outline-primary" data-perm="remote" ${act('remoteTo',m.hostname)} title="See and control this machine">Remote</button>`:''}
              <button class="btn btn-sm btn-outline-secondary" ${act('hwToggle',m.id)} title="What it is made of (sent by its Broom agent)">Hardware</button>`
           : `<button class="btn btn-sm btn-outline-primary" ${act('regMachine',m.mac,m.ip,m.hostname)} data-owner>Register</button>`}</div></td>
      </tr>${hwOpen.has(m.id)?`<tr><td></td><td colspan="7">${hwHtml(hwData[m.id],m.id)}</td></tr>`:''}`).join('') || '<tr><td colspan=8 class="mono">no matching machines</td></tr>';
@@ -329,7 +329,7 @@ async function dvOpen(id){
     </div>
     <div class="d-flex flex-wrap gap-2 align-items-center mt-2">
       <button class="btn btn-sm btn-primary" ${act('dvSave',id)}>Save</button>
-      <button class="btn btn-sm btn-outline-secondary" ${act('wake',m.mac)}>Wake</button>
+      <button class="btn btn-sm btn-outline-secondary" data-perm="wake" ${act('wake',m.mac)}>Wake</button>
       <button class="btn btn-sm btn-outline-secondary" ${act('setKey',id,name)}>License key</button>
       ${m.license_state==='sent'?`<button class="btn btn-sm btn-outline-secondary" ${act('rearmKey',id,name)}>Re-arm key</button>`:''}
       <button class="btn btn-sm btn-outline-danger" ${act('dvDelete',id,name)}>Delete</button>
@@ -707,7 +707,7 @@ async function loadGames(){const [g]=await Promise.all([j('/api/games'),loadVols
       <td class="mono text-nowrap">${s?verCell('games',d.name,s):'<span class="text-danger">not served</span>'}</td>
       <td class="mono">${s?s.sessions+(s.old_sessions?` <span title="still on an older version until they reboot">(${s.old_sessions} older)</span>`:''):''}</td>
       <td><select class="form-select form-select-sm d-inline-block w-auto" data-owner data-change="setGamesUpdate" data-args="${esc(JSON.stringify([d.name]))}">${opts(d.update)}</select>${d.update!=null&&!x.update_ip?' <span class="text-danger" title="no fixed IP or lease known">no IP</span>':''}${s&&s.update_connected?' <span class="text-success">'+ic('dot','')+' writable</span>':''}</td>
-      <td class="mono">${s&&s.update_bytes?gbs(s.update_bytes)+` <button class="btn btn-sm btn-outline-primary" ${act('saveGamesUpdate',d.name)}>Save</button> <button class="btn btn-sm btn-outline-secondary" ${act('discardGamesUpdate',d.name)}>Discard</button>`:'—'}</td>
+      <td class="mono">${s&&s.update_bytes?gbs(s.update_bytes)+` <button class="btn btn-sm btn-outline-primary" data-perm="games" ${act('saveGamesUpdate',d.name)}>Save</button> <button class="btn btn-sm btn-outline-secondary" data-perm="games" ${act('discardGamesUpdate',d.name)}>Discard</button>`:'—'}</td>
       <td>${volCell('games',d.name,x.volume)}</td>
       <td data-owner><button class="btn btn-sm btn-outline-secondary" ${act('toggleGamesRam',d.name,!d.ram)} title="RAM: the disk is served from a copy in the server's RAM (loaded in the background; needs about as much free RAM as the data on it — games barely compress). Disk: read from its file (the page cache keeps what is read most).">${d.ram?(s&&s.ram?'Cache: RAM':(s&&s.ram_loading?'Cache: RAM (loading…)':'Cache: RAM (not loaded)')):'Cache: disk'}</button> <button class="btn btn-sm btn-outline-secondary" ${act('editGames',d.name)}>Edit</button> <button class="btn btn-sm btn-outline-danger" ${act('delGames',d.name)}>Delete</button></td></tr>`+verRow('games',d.name,10);}).join('')
     ||'<tr><td colspan="10" class="mono">no iSCSI disk yet</td></tr>';
@@ -746,7 +746,7 @@ function verPanel(kind,e){if(!e)return '<span class="small text-body-secondary">
     <div class="d-flex flex-wrap gap-3 align-items-center"><b class="small">Version each group boots</b>${verPicks(kind,e,vers)}
     <button class="btn btn-sm btn-outline-danger" data-owner ${act('verDrop',kind,e.name)}>Drop the oldest version</button></div>`;}
 // A version picker per group that gets it: changing one holds that group there at once (machines: next boot).
-function verPicks(kind,e,vers){return (e.groups||[]).map(g=>`<label class="d-flex align-items-center gap-1 small">${esc(g)} <select class="form-select form-select-sm w-auto py-0" data-change="verPin" data-args="${esc(JSON.stringify([kind,e.name,g]))}">${verOpts(vers,pinOf(e.pins,g))}</select></label>`).join('')
+function verPicks(kind,e,vers){return (e.groups||[]).map(g=>`<label class="d-flex align-items-center gap-1 small">${esc(g)} <select class="form-select form-select-sm w-auto py-0" data-perm="versions" data-change="verPin" data-args="${esc(JSON.stringify([kind,e.name,g]))}">${verOpts(vers,pinOf(e.pins,g))}</select></label>`).join('')
     ||'<span class="small text-body-secondary">for every machine — hold a group on a version from the Groups page</span>';}
 const verReload=kind=>kind==='golden'?loadDiskless():loadGames();
 async function verToggle(kind,name){const k=kind+':'+name;if(verOpen.has(k))verOpen.delete(k);else verOpen.add(k);verReload(kind);}
@@ -772,9 +772,9 @@ async function loadDiskless(){
       <td>${g.groups.length?esc(g.groups.join(', ')):'<span class="text-body-secondary">none</span>'}</td>
       <td class="mono text-nowrap">${s?verCell('golden',g.name,s):'<span class="text-danger">not served</span>'}</td>
       <td class="mono">${x.status?x.status.machines.filter(m=>m.connected).length:''}</td>
-      <td><select class="form-select form-select-sm d-inline-block w-auto" data-owner data-change="setMaint" data-args="${esc(JSON.stringify([g.name]))}">${opts(g.maint)}</select>${s&&s.update_connected?' <span class="text-success">'+ic('dot','')+' writable</span>':''}</td>
-      <td class="mono">${s&&s.update_bytes?gbs(s.update_bytes)+` <button class="btn btn-sm btn-outline-primary" data-owner ${act('saveMaint',g.name)}>Save</button> <button class="btn btn-sm btn-outline-secondary" data-owner ${act('discardMaint',g.name)}>Discard</button>`:'—'}</td>
-      <td data-owner class="text-nowrap"><button class="btn btn-sm btn-outline-secondary" ${act('editGolden',g.name)}>Edit</button>${g.os==='windows'?` <button class="btn btn-sm btn-outline-secondary" title="Write Broom's current startup script (broom-diskless.ps1) into this golden as its next version, without booting it. Needed once for goldens set up before the script updated itself." ${act('refreshGolden',g.name)}>Update script</button>`:''} <button class="btn btn-sm btn-outline-danger" ${act('delGolden',g.name)}>Delete</button></td></tr>`+verRow('golden',g.name,10);}).join('')
+      <td><select class="form-select form-select-sm d-inline-block w-auto" data-perm="maintain" data-change="setMaint" data-args="${esc(JSON.stringify([g.name]))}">${opts(g.maint)}</select>${s&&s.update_connected?' <span class="text-success">'+ic('dot','')+' writable</span>':''}</td>
+      <td class="mono">${s&&s.update_bytes?gbs(s.update_bytes)+` <button class="btn btn-sm btn-outline-primary" data-perm="maintain" ${act('saveMaint',g.name)}>Save</button> <button class="btn btn-sm btn-outline-secondary" data-perm="maintain" ${act('discardMaint',g.name)}>Discard</button>`:'—'}</td>
+      <td class="text-nowrap"><button class="btn btn-sm btn-outline-secondary" data-owner ${act('editGolden',g.name)}>Edit</button>${g.os==='windows'?` <button class="btn btn-sm btn-outline-secondary" data-perm="maintain" title="Write Broom's current startup script (broom-diskless.ps1) into this golden as its next version, without booting it. Needed once for goldens set up before the script updated itself." ${act('refreshGolden',g.name)}>Update script</button>`:''} <button class="btn btn-sm btn-outline-danger" data-owner ${act('delGolden',g.name)}>Delete</button></td></tr>`+verRow('golden',g.name,10);}).join('')
     ||'<tr><td colspan="10" class="mono">no golden yet — create one below</td></tr>';
   const vp=document.getElementById('ver_pct');if(vp&&verData&&document.activeElement!==vp)vp.value=verData.min_free_pct;
   const rm=dlData&&dlData.room;
@@ -858,13 +858,13 @@ async function loadVm(){
   let h=`<div><b>${esc(s.golden)}</b> · <span class="${esc(cls)}">${esc(s.state)}</span> · started ${esc(new Date(s.started*1000).toLocaleString())} by ${esc(s.by)}`
     +(s.ended?' · ended '+esc(new Date(s.ended*1000).toLocaleString()):'')+`</div><div class="small">games disks: ${esc(games||'none')} · Windows changes ${s.keep?'kept for Save / Discard':'thrown away at the end'}</div>`;
   if(s.msg&&!run)h+=`<div class="small">${esc(s.msg)}</div>`;
-  if(run)h+=`<div class="d-flex flex-wrap gap-2 mt-2"><a class="btn btn-sm btn-primary" href="/vm-console" target="_blank" rel="noopener">Open the screen</a>
-    <button class="btn btn-sm btn-outline-warning" ${act('vmStop',false)}>Shut down</button>
-    <button class="btn btn-sm btn-outline-danger" ${act('vmStop',true)} title="like pulling the plug — only if Windows hangs">Turn off</button></div>`;
+  if(run)h+=`<div class="d-flex flex-wrap gap-2 mt-2"><a class="btn btn-sm btn-primary" data-perm="${s.keep?'maintain':'vm'}" href="/vm-console" target="_blank" rel="noopener">Open the screen</a>
+    <button class="btn btn-sm btn-outline-warning" data-perm="${s.keep?'maintain':'vm'}" ${act('vmStop',false)}>Shut down</button>
+    <button class="btn btn-sm btn-outline-danger" data-perm="${s.keep?'maintain':'vm'}" ${act('vmStop',true)} title="like pulling the plug — only if Windows hangs">Turn off</button></div>`;
   else{const pend=r.games.filter(d=>(s.games||[]).some(g=>g.name===d.name)&&d.update_bytes>0);
     if(pend.length)h+='<div class="d-flex flex-wrap gap-2 align-items-center mt-2 small">'+pend.map(d=>`<span><b>${esc(d.name)}</b>: ${gbs(d.update_bytes)} written</span>
-      <button class="btn btn-sm btn-outline-primary" ${act('vmGamesSave',d.name)}>Save</button>
-      <button class="btn btn-sm btn-outline-secondary" ${act('vmGamesDiscard',d.name)}>Discard</button>`).join(' ')+'</div>';}
+      <button class="btn btn-sm btn-outline-primary" data-perm="games" ${act('vmGamesSave',d.name)}>Save</button>
+      <button class="btn btn-sm btn-outline-secondary" data-perm="games" ${act('vmGamesDiscard',d.name)}>Discard</button>`).join(' ')+'</div>';}
   box.innerHTML=h;
   clearTimeout(vmTimer);
   if(run&&pageFromPath()==='diskless')vmTimer=setTimeout(()=>loadVm().catch(()=>{}),5000);
@@ -998,14 +998,30 @@ function sealFor(name,pw){if(pw.length<8)throw new Error('password: at least 8 c
 // ---- accounts (users.rs; owners): who is signed in decides what the page shows (body[data-role]) ----
 let me={};
 async function loadMe(){try{me=await j('/api/auth/status');}catch(e){return;}
+  // owner / the role's name: CSS shows the owner's controls to the owner, and each [data-perm] to who has it.
   document.body.dataset.role=me.role||'';
+  document.body.dataset.perms=(me.perms||[]).join(' ');
   const w=document.getElementById('whoami');if(w)w.textContent=me.user?`${me.user} · ${me.role}`:'';}
 async function loadUsers(){if(!me.role)await loadMe();
   const tb=document.querySelector('#users tbody');if(!tb||me.role!=='owner')return;
-  const u=await j('/api/users');
+  const [u,ro]=await Promise.all([j('/api/users'),j('/api/roles')]);
+  const names=ro.roles.map(r=>r.name);
   tb.innerHTML=u.map(x=>`<tr><td class="mono">${esc(x.name)}${x.name===me.user?' <span class="badge text-bg-secondary">you</span>':''}</td>
-    <td><select class="form-select form-select-sm w-auto" data-change="userRole" data-args="${esc(JSON.stringify([x.name]))}">${['owner','staff'].map(r=>`<option${r===x.role?' selected':''}>${esc(r)}</option>`).join('')}</select></td>
-    <td><div class="d-flex gap-1">${x.name===me.user?'':`<button class="btn btn-sm btn-outline-secondary" ${act('userPw',x.name,x.role)}>New password</button> <button class="btn btn-sm btn-outline-danger" ${act('userDel',x.name)}>Delete</button>`}</div></td></tr>`).join('');}
+    <td><select class="form-select form-select-sm w-auto" data-change="userRole" data-args="${esc(JSON.stringify([x.name]))}">${[...new Set([...names,x.role])].map(r=>`<option${r===x.role?' selected':''}>${esc(r)}</option>`).join('')}</select>${names.includes(x.role)?'':' <span class="text-danger small">this role no longer exists: the account can only look</span>'}</td>
+    <td><div class="d-flex gap-1">${x.name===me.user?'':`<button class="btn btn-sm btn-outline-secondary" ${act('userPw',x.name,x.role)}>New password</button> <button class="btn btn-sm btn-outline-danger" ${act('userDel',x.name)}>Delete</button>`}</div></td></tr>`).join('');
+  const sel=document.getElementById('us_role');
+  if(sel){const keep=sel.value||'staff';sel.innerHTML=[...names].reverse().map(r=>`<option${r===keep?' selected':''}>${esc(r)}</option>`).join('');}
+  renderRoles(ro);}
+// Roles (users.rs): owner and staff are fixed; the others are a name + ticked permissions. Saved per role.
+function renderRoles(ro){const tb=document.querySelector('#roles tbody');if(!tb)return;
+  tb.innerHTML=ro.roles.map(r=>`<tr data-role-row="${esc(r.name)}"><td class="mono">${esc(r.name)}${r.builtin?' <span class="badge text-bg-secondary">built in</span>':''}</td>
+    <td>${r.name==='owner'?'<span class="small text-body-secondary">everything</span>':ro.perms.map(p=>`<label class="form-check form-check-inline mb-0 small" title="${esc(p.text)}"><input class="form-check-input" type="checkbox" value="${esc(p.id)}"${r.perms.includes(p.id)?' checked':''}${r.builtin?' disabled':''}> ${esc(p.id)}</label>`).join('')}</td><td class="small">${esc(r.users)}</td>
+    <td>${r.builtin?'':`<div class="d-flex gap-1"><button class="btn btn-sm btn-outline-primary" ${act('roleSave',r.name)}>Save</button> <button class="btn btn-sm btn-outline-danger" ${act('roleDel',r.name)}>Delete</button></div>`}</td></tr>`).join('');
+  const lg=document.getElementById('role_legend');if(lg)lg.innerHTML=ro.perms.map(p=>`<b>${esc(p.id)}</b>: ${esc(p.text)}`).join(' · ');}
+const rolePerms=name=>[...document.querySelectorAll(`#roles tr[data-role-row="${CSS.escape(name)}"] input:checked`)].map(i=>i.value);
+const roleSave=name=>post('/api/roles',{name,perms:rolePerms(name)},'ro_msg',()=>name+' saved - counts from their next click',loadUsers);
+const roleAdd=()=>post('/api/roles',{name:v('ro_name').toLowerCase(),perms:[]},'ro_msg',()=>'added - tick what it may do, then Save',loadUsers);
+async function roleDel(name){if(await sure('Delete role '+name+'?'))post('/api/roles/delete',{name},'ro_msg',()=>name+' deleted',loadUsers);}
 const userCall=(url,body,done)=>post(url,body,'us_msg',done,loadUsers);
 async function userAdd(){const name=v('us_name').toLowerCase(),p=document.getElementById('us_pw');let cred;
   try{cred=sealFor(name,p.value);}catch(e){say(document.getElementById('us_msg'),' ✗ '+e.message);return;}
@@ -1463,7 +1479,7 @@ const ACTIONS={
   loadImages,addImage,setDefault,toggleCache,toggleSsd,togglePreload,editImgGroups,republish,showVersions,exportImage,editBoot,delImage,
   snapshotImage,dedupImage,rollbackImage,versionToImage,deleteVersion,
   loadGames,saveGames,setGamesUpdate,toggleGamesRam,saveGamesUpdate,discardGamesUpdate,editGames,delGames,
-  loadDiskless,dlOsChanged,mPower,mSelOne,mSelAll,hwToggle,hwDisplay,mDisplay,startOnboard,cancelOnboard,retryOnboard,verToggle,verPin,verDrop,verKeepFree,setRoom,vmStart,vmStop,vmGamesSave,vmGamesDiscard,saveGolden,setMaint,saveMaint,discardMaint,refreshGolden,delGolden,editGolden,isoOs,delIso,setPlace,uploadIso,
+  loadDiskless,dlOsChanged,mPower,mSelOne,mSelAll,hwToggle,hwDisplay,mDisplay,startOnboard,cancelOnboard,retryOnboard,verToggle,verPin,verDrop,verKeepFree,setRoom,roleSave,roleAdd,roleDel,vmStart,vmStop,vmGamesSave,vmGamesDiscard,saveGolden,setMaint,saveMaint,discardMaint,refreshGolden,delGolden,editGolden,isoOs,delIso,setPlace,uploadIso,
   loadDrivers,uploadDriver,saveDrvTargets,delDriver,
   loadGroups,editGroup,closeGroup,saveGroup,createGroup,renameGroup,deleteGroup,saveNewMachines,
   loadServer,loadBench,loadBenchHist,logsReload,logsFollow,logsSearch,benchServer,benchRequest:()=>benchAsk(false),benchCancel:()=>benchAsk(true),bSelAll,

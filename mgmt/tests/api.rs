@@ -273,6 +273,196 @@ fn api_contract() {
         assert_eq!(s.get("/api/status").status, 401, "account deleted");
         assert_eq!(h.get("/api/status").status, 200);
 
+        // Roles (users.rs / auth.rs): what a role allows is decided by the server for every request — these calls go
+        // straight to the API, no page in between. Built-in staff: none of the VM / golden / version / restart rights.
+        assert_eq!(
+            set(json!({"name": "st", "role": "staff", "cred": cred("st", "staff-pass-9")})),
+            200
+        );
+        let st = as_user("st", "staff-pass-9");
+        assert_eq!(
+            st.get("/api/auth/status").json()["perms"],
+            json!(["remote", "wake", "games"])
+        );
+        for (path, body) in [
+            (
+                "/api/vm/start",
+                json!({"golden": "w11", "games": [], "keep": false}),
+            ),
+            (
+                "/api/vm/start",
+                json!({"golden": "w11", "games": [], "keep": true}),
+            ),
+            ("/api/vm/stop", json!({"force": true})),
+            (
+                "/api/versions/pin",
+                json!({"kind": "golden", "name": "w11", "group": "g", "ver": 1}),
+            ),
+            ("/api/diskless/save", json!({"name": "w11"})),
+            (
+                "/api/diskless/maint",
+                json!({"name": "w11", "machine": null}),
+            ),
+            ("/api/onboard/start", json!({"golden": "w11", "machine": 1})),
+            ("/api/power", json!({"action": "restart", "ids": []})),
+            ("/api/power", json!({"action": "shutdown", "ids": []})),
+            ("/api/roles", json!({"name": "mine", "perms": ["maintain"]})),
+            ("/api/diskless/room", json!({"pc_gb": 0, "free_pct": 0})),
+            ("/api/versions/keep-free", json!({"keep": true})),
+        ] {
+            let r = st.post(path, &body);
+            assert_eq!(r.status, 403, "staff POST {path} {body}: {}", r.text());
+        }
+        assert_eq!(st.get("/api/vm/console").status, 403, "the VM's screen");
+        assert_eq!(st.get("/api/roles").status, 403);
+        // …and what staff always could: turning machines on passes (nothing selected: a plain answer, not 403).
+        assert_ne!(
+            st.post("/api/power", &json!({"action": "on", "ids": []}))
+                .status,
+            403
+        );
+        assert_eq!(st.get("/api/vm").status, 200, "looking at the VM's state");
+
+        // A role the owner makes: its permissions, and nothing else; built-in names and unknown roles refused.
+        let role = |v: serde_json::Value| h.post("/api/roles", &v);
+        assert_eq!(
+            role(json!({"name": "owner", "perms": []})).status,
+            400,
+            "built in"
+        );
+        assert_eq!(
+            role(json!({"name": "staff", "perms": ["power"]})).status,
+            400,
+            "built in"
+        );
+        assert_eq!(
+            role(json!({"name": "night", "perms": ["bogus"]})).status,
+            422,
+            "no such permission"
+        );
+        assert_eq!(
+            set(json!({"name": "nt", "role": "night", "cred": cred("nt", "night-pass-9")})),
+            400,
+            "a role that does not exist yet"
+        );
+        assert_eq!(
+            role(json!({"name": "night", "perms": ["power", "versions"]})).status,
+            200
+        );
+        assert_eq!(
+            set(json!({"name": "nt", "role": "night", "cred": cred("nt", "night-pass-9")})),
+            200
+        );
+        let nt = as_user("nt", "night-pass-9");
+        assert_eq!(
+            nt.get("/api/auth/status").json(),
+            json!({"configured": true, "authed": true, "user": "nt", "role": "night", "perms": ["power", "versions"]})
+        );
+        // Power: restart yes (not 403), turning on no (it has no Wake); versions yes; the rest no.
+        assert_ne!(
+            nt.post("/api/power", &json!({"action": "restart", "ids": []}))
+                .status,
+            403
+        );
+        assert_eq!(
+            nt.post("/api/power", &json!({"action": "on", "ids": []}))
+                .status,
+            403
+        );
+        assert_eq!(
+            nt.post("/api/wake", &json!({"mac": "52:54:00:aa:bb:cc"}))
+                .status,
+            403
+        );
+        assert_ne!(
+            nt.post(
+                "/api/versions/pin",
+                &json!({"kind": "golden", "name": "nope", "group": "g", "ver": null})
+            )
+            .status,
+            403
+        );
+        assert_eq!(nt.get("/api/vnc/view").status, 403, "no Remote");
+        assert_eq!(
+            nt.post("/api/games/save", &json!({"name": "x"})).status,
+            403
+        );
+        assert_eq!(
+            nt.post(
+                "/api/vm/start",
+                &json!({"golden": "w11", "games": [], "keep": false})
+            )
+            .status,
+            403
+        );
+        assert_eq!(
+            nt.post("/api/users", &json!({"name": "x", "role": "owner"}))
+                .status,
+            403
+        );
+        assert_eq!(nt.get("/api/status").status, 200, "looking");
+        // A change of the role counts at the account's next request, with no new sign-in.
+        assert_eq!(role(json!({"name": "night", "perms": ["vm"]})).status, 200);
+        assert_eq!(
+            nt.post("/api/power", &json!({"action": "restart", "ids": []}))
+                .status,
+            403
+        );
+        // The VM for games disks: allowed now (it fails for another reason here, not 403); keeping Windows
+        // changes stays Maintain's.
+        assert_ne!(
+            nt.post(
+                "/api/vm/start",
+                &json!({"golden": "w11", "games": [], "keep": false})
+            )
+            .status,
+            403
+        );
+        assert_eq!(
+            nt.post(
+                "/api/vm/start",
+                &json!({"golden": "w11", "games": [], "keep": true})
+            )
+            .status,
+            403
+        );
+        // The roles as the owner sees them; one in use cannot be deleted.
+        let ro = h.get("/api/roles").json();
+        let names: Vec<&str> = ro["roles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["owner", "staff", "night"]);
+        assert_eq!(ro["roles"][1]["perms"], json!(["remote", "wake", "games"]));
+        assert_eq!(
+            ro["roles"][2],
+            json!({"name": "night", "builtin": false, "perms": ["vm"], "users": 1})
+        );
+        assert_eq!(ro["perms"].as_array().unwrap().len(), 7);
+        assert_eq!(
+            h.post("/api/roles/delete", &json!({"name": "night"}))
+                .status,
+            400,
+            "in use"
+        );
+        assert_eq!(
+            h.post("/api/roles/delete", &json!({"name": "staff"}))
+                .status,
+            400,
+            "built in"
+        );
+        for u in ["nt", "st"] {
+            assert_eq!(h.post("/api/users/delete", &json!({"name": u})).status, 200);
+        }
+        assert_eq!(
+            h.post("/api/roles/delete", &json!({"name": "night"}))
+                .status,
+            200
+        );
+        assert_eq!(nt.get("/api/status").status, 401);
+
         // Login throttle: 5 free wrong proofs, then this IP is locked out (1 s, doubling) → 429.
         let wrong = || pw::sign_in("admin", "wrong-pass").err();
         for _ in 0..4 {
@@ -349,7 +539,10 @@ fn https_admin() {
         let tool = leaked.request(
             "POST",
             "/api/auth/hello",
-            &[("X-Broom-Tool", "capture"), ("Content-Type", "application/json")],
+            &[
+                ("X-Broom-Tool", "capture"),
+                ("Content-Type", "application/json"),
+            ],
             hello.to_string().as_bytes(),
         );
         assert_eq!(tool.status, 403);
