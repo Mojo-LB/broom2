@@ -777,6 +777,10 @@ async function loadDiskless(){
       <td data-owner class="text-nowrap"><button class="btn btn-sm btn-outline-secondary" ${act('editGolden',g.name)}>Edit</button>${g.os==='windows'?` <button class="btn btn-sm btn-outline-secondary" title="Write Broom's current startup script (broom-diskless.ps1) into this golden as its next version, without booting it. Needed once for goldens set up before the script updated itself." ${act('refreshGolden',g.name)}>Update script</button>`:''} <button class="btn btn-sm btn-outline-danger" ${act('delGolden',g.name)}>Delete</button></td></tr>`+verRow('golden',g.name,10);}).join('')
     ||'<tr><td colspan="10" class="mono">no golden yet — create one below</td></tr>';
   const vp=document.getElementById('ver_pct');if(vp&&verData&&document.activeElement!==vp)vp.value=verData.min_free_pct;
+  const rm=dlData&&dlData.room;
+  if(rm){for(const [id,val] of [['room_gb',rm.pc_gb],['room_pct',rm.free_pct]]){const e=document.getElementById(id);if(e&&document.activeElement!==e)e.value=val;}
+    const rn=document.getElementById('room_note');
+    if(rn)rn.textContent=rm.free_pct?`Below ${rm.free_pct}% free, only machines holding less than ${rm.fair_gb} GB still get new room: the big writer is stopped (its writes fail until it restarts), the others go on.`:'No reserve: one machine can fill the drive for all.';}
   const vk=document.getElementById('ver_keep');if(vk&&verData&&document.activeElement!==vk)vk.checked=!!verData.keep;
   // Their machines: each with its own layers (from the daemon) and target.
   const mb=document.querySelector('#dl_machines tbody');
@@ -889,6 +893,7 @@ const refreshGolden=name=>dlCall('/api/diskless/refresh',{name},'Write Broom\'s 
 const delGolden=name=>dlCall('/api/diskless/golden/delete',{name},'Delete golden '+name+', all its versions and every machine\'s layers of it?');
 const isoOs=(name,el)=>dlCall('/api/diskless/iso/os',{name,os:el.value});
 const delIso=name=>dlCall('/api/diskless/iso/delete',{name},'Delete '+name+' from the ISO library?');
+const setRoom=()=>post('/api/diskless/room',{pc_gb:+v('room_gb'),free_pct:+v('room_pct')},'room_msg',()=>'saved - machines get it at their next start',loadDiskless);
 const setPlace=k=>dlCall('/api/diskless/volume',{kind:k,id:document.getElementById('dl_place_'+k).value},null,'dl_pmsg');
 function editGolden(name){const g=dlData.goldens.find(x=>x.golden.name===name).golden;
   for(const [k,val] of [['dl_name',g.name],['dl_os',g.os],['dl_size',g.size_gb],['dl_groups',g.groups.join(', ')]])document.getElementById(k).value=val;
@@ -1458,7 +1463,7 @@ const ACTIONS={
   loadImages,addImage,setDefault,toggleCache,toggleSsd,togglePreload,editImgGroups,republish,showVersions,exportImage,editBoot,delImage,
   snapshotImage,dedupImage,rollbackImage,versionToImage,deleteVersion,
   loadGames,saveGames,setGamesUpdate,toggleGamesRam,saveGamesUpdate,discardGamesUpdate,editGames,delGames,
-  loadDiskless,dlOsChanged,mPower,mSelOne,mSelAll,hwToggle,hwDisplay,mDisplay,startOnboard,cancelOnboard,retryOnboard,verToggle,verPin,verDrop,verKeepFree,vmStart,vmStop,vmGamesSave,vmGamesDiscard,saveGolden,setMaint,saveMaint,discardMaint,refreshGolden,delGolden,editGolden,isoOs,delIso,setPlace,uploadIso,
+  loadDiskless,dlOsChanged,mPower,mSelOne,mSelAll,hwToggle,hwDisplay,mDisplay,startOnboard,cancelOnboard,retryOnboard,verToggle,verPin,verDrop,verKeepFree,setRoom,vmStart,vmStop,vmGamesSave,vmGamesDiscard,saveGolden,setMaint,saveMaint,discardMaint,refreshGolden,delGolden,editGolden,isoOs,delIso,setPlace,uploadIso,
   loadDrivers,uploadDriver,saveDrvTargets,delDriver,
   loadGroups,editGroup,closeGroup,saveGroup,createGroup,renameGroup,deleteGroup,saveNewMachines,
   loadServer,loadBench,loadBenchHist,logsReload,logsFollow,logsSearch,benchServer,benchRequest:()=>benchAsk(false),benchCancel:()=>benchAsk(true),bSelAll,

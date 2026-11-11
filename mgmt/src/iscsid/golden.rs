@@ -52,6 +52,12 @@ pub struct Config {
     /// A games disk (the GAMES registry, served by games.rs) for these diskless machines: session layer only.
     #[serde(default)]
     pub games: bool,
+    /// Most bytes one machine's session layer may hold (0 = no limit of its own): overlay::Limit.max.
+    #[serde(default)]
+    pub session_max: u64,
+    /// The drive of the machines' layers keeps this % free (0 = no reserve): overlay::Limit.free_pct.
+    #[serde(default)]
+    pub free_pct: u8,
 }
 
 /// The family `c`'s disk lives in.
@@ -303,7 +309,18 @@ pub fn attach(iqn: &str, peer: &str) -> Result<View, String> {
             layers.push(b.clone());
         }
         if st.session.is_none() {
-            st.session = Some(Arc::new(Overlay::open(&s_ovl, &s_list, size)?));
+            // What this machine writes stays on the server until its next boot: within its room (overlay::Limit).
+            let limit = super::overlay::Limit {
+                max: c.session_max,
+                free_pct: c.free_pct,
+                dir: dir.clone(),
+            };
+            st.session = Some(Arc::new(Overlay::open_limited(
+                &s_ovl,
+                &s_list,
+                size,
+                Some(limit),
+            )?));
         }
         st.users += 1;
         Ok(View {

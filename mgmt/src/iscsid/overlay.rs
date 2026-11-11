@@ -11,9 +11,65 @@ use std::path::{Path, PathBuf};
 
 pub const BLOCK: u64 = 64 << 10;
 
+/// How much a diskless machine may add to an overlay the server keeps for it (its session layer, its copy of a games
+/// disk). These files are sparse and as large as the disk they sit on, and every machine's lie on the same drive: with
+/// no limit one machine (a game install, a runaway download, a guest on purpose) fills it and every machine's writes
+/// fail. Checked when a write needs a new 64 KB block; blocks already written are always rewritten.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Limit {
+    /// Most bytes this overlay may hold (0 = no limit of its own).
+    pub max: u64,
+    /// The drive keeps this % free for everyone (0 = no reserve): below it, only machines holding less than `FAIR`
+    /// still get new blocks — the big writers stop first, the others go on.
+    pub free_pct: u8,
+    /// A folder on that drive.
+    pub dir: PathBuf,
+}
+
+/// Below the reserve, an overlay holding less than this still grows: an ordinary session (page file, temp files,
+/// updates of what is installed) stays well under it.
+pub const FAIR: u64 = 8 << 30;
+/// With less than this free on the drive nobody gets a new block: the server's own files there need room.
+pub const FLOOR: u64 = 1 << 30;
+/// How a write refused for room starts its error (conn.rs answers it as "space allocation failed", not as a broken
+/// disk).
+pub const NO_ROOM: &str = "no room: ";
+
+/// Whether an overlay holding `held` bytes may take one more block under `l`, the drive having `space` = (free,
+/// size) bytes (None = unknown: not held against the machine).
+pub fn room(l: &Limit, held: u64, space: Option<(u64, u64)>) -> Result<(), String> {
+    if l.max > 0 && held + BLOCK > l.max {
+        return Err(format!(
+            "this machine's limit of {} GB for one session is reached",
+            l.max >> 30
+        ));
+    }
+    let Some((free, size)) = space else {
+        return Ok(());
+    };
+    if free < FLOOR {
+        return Err("the server's drive for the machines' writes is full".into());
+    }
+    if l.free_pct > 0
+        && (free as u128) * 100 < (size as u128) * l.free_pct as u128
+        && held >= FAIR
+    {
+        return Err(format!(
+            "the server's drive for the machines' writes has less than {}% free, and this machine already holds {} GB",
+            l.free_pct,
+            held >> 30
+        ));
+    }
+    Ok(())
+}
+
 pub struct Overlay {
     file: File,
     size: u64,
+    /// A diskless machine's own overlay: what it may grow to.
+    limit: Option<Limit>,
+    /// A write was refused for room (logged once per overlay, not per write).
+    refused: std::sync::atomic::AtomicBool,
     /// Blocks written (whole content in `file`). Lock order: `write` then `blocks`.
     blocks: Mutex<HashSet<u32>>,
     /// Serializes writes (two first writes into one block must not both copy the disk over each other's data); holds
@@ -27,6 +83,16 @@ type Base<'a> = &'a dyn Fn(u64, &mut [u8]) -> Result<(), String>;
 impl Overlay {
     /// The overlay at `path` with its block list `list`: reopened as it was, or new.
     pub fn open(path: &Path, list: &Path, size: u64) -> Result<Overlay, String> {
+        Overlay::open_limited(path, list, size, None)
+    }
+
+    /// `open`, growing only as far as `limit` allows.
+    pub fn open_limited(
+        path: &Path,
+        list: &Path,
+        size: u64,
+        limit: Option<Limit>,
+    ) -> Result<Overlay, String> {
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -51,6 +117,8 @@ impl Overlay {
         Ok(Overlay {
             file,
             size,
+            limit,
+            refused: std::sync::atomic::AtomicBool::new(false),
             blocks: Mutex::new(blocks),
             write: Mutex::new(n),
             list: list.into(),
@@ -64,6 +132,13 @@ impl Overlay {
 
     fn has(&self, b: u32) -> bool {
         self.blocks.lock().contains(&b)
+    }
+
+    /// True the first time it is asked after a write was refused for room: the caller logs that one.
+    pub fn first_refusal(&self) -> bool {
+        !self
+            .refused
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Neighbouring blocks on the same side (overlay / below) are read in one go: a 1 MB read is one call, not 16.
@@ -109,6 +184,10 @@ impl Overlay {
             let b = (off / BLOCK) as u32;
             let n = ((BLOCK - off % BLOCK) as usize).min(data.len());
             if !self.has(b) {
+                if let Some(l) = &self.limit {
+                    room(l, self.used(), super::games::fs_space(&l.dir))
+                        .map_err(|why| format!("{NO_ROOM}{why}"))?;
+                }
                 // First write here: the whole block from the disk first, so the overlay holds all of it.
                 let start = b as u64 * BLOCK;
                 let mut whole = vec![0u8; (BLOCK.min(self.size - start)) as usize];

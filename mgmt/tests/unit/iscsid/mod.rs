@@ -507,6 +507,7 @@ async fn diskless_machine_session() {
             },
         ],
         games: false,
+        ..Default::default()
     };
     golden::set(vec![cfg]).unwrap();
     let mine = golden::machine_iqn("iqn.test:golden-w11tcp", mac).unwrap();
@@ -1070,5 +1071,77 @@ async fn discovery_for_ssd_clients_unchanged() {
     drop(s);
     TARGETS.lock().remove(plain_iqn);
     games::set(Vec::new()).unwrap();
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A diskless machine over its room for one session (golden::Config.session_max), over the wire: the write that
+/// needs a new block is answered CHECK CONDITION "space allocation failed" (data protect 27h/07h) — not a medium
+/// error — while what it already wrote stays writable and readable. Another machine's room is its own.
+#[tokio::test]
+async fn diskless_machine_out_of_room() {
+    let _one = golden::TEST_LOCK.lock().await;
+    let d = std::env::temp_dir().join("broom_test_diskless_room");
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("img")).unwrap();
+    let img = d.join("img/golden.img");
+    std::fs::write(&img, vec![0x22u8; 1 << 20]).unwrap();
+    let mac = "02:00:00:00:00:41";
+    TEST_ARP.lock().insert("127.0.0.1".into(), mac.into());
+    golden::set(vec![golden::Config {
+        disk: games::Config {
+            name: "w11room".into(),
+            iqn: "iqn.test:golden-w11room".into(),
+            path: img.to_string_lossy().into(),
+            ..Default::default()
+        },
+        dir: d.join("wb").to_string_lossy().into(),
+        machines: vec![golden::Machine {
+            mac: mac.into(),
+            ip: "127.0.0.1".into(),
+        }],
+        session_max: 2 * overlay::BLOCK, // two 64 KB blocks
+        ..Default::default()
+    }])
+    .unwrap();
+    let mine = golden::machine_iqn("iqn.test:golden-w11room", mac).unwrap();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = l.accept().await {
+            tokio::spawn(conn::serve(s, "127.0.0.1".into()));
+        }
+    });
+    golden::prepare("w11room", mac, false, false, false, None).unwrap();
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    assert_eq!(login(&mut s, &mine).await.bhs[36], 0);
+    // One 4 KB write → (opcode, status, sense key, ASC, ASCQ) of its answer.
+    async fn write4k(s: &mut tokio::net::TcpStream, itt: u32, cmdsn: u32, lba: u32) -> (u8, u8, u8, u8, u8) {
+        s.write_all(&scsi_cmd(itt, cmdsn, 0xa0, 0x2a, lba, 8)).await.unwrap();
+        let r = conn::read_pdu(s).await.unwrap();
+        assert_eq!(r.bhs[0], 0x31, "R2T");
+        let mut p = pdu(0x05, 0x80, itt, 0, &[0x77u8; 4096]);
+        p[8..16].fill(0);
+        p[20..24].copy_from_slice(&r.bhs[20..24]);
+        s.write_all(&p).await.unwrap();
+        let r = conn::read_pdu(s).await.unwrap();
+        let sense = |i: usize| r.data.get(2 + i).copied().unwrap_or(0);
+        (r.bhs[0], r.bhs[3], sense(2), sense(12), sense(13))
+    }
+    const GOOD: (u8, u8, u8, u8, u8) = (0x21, 0, 0, 0, 0);
+    // Blocks 0 and 1 (LBA 0.. and 128..): its two blocks.
+    assert_eq!(write4k(&mut s, 50, 1, 0).await, GOOD);
+    assert_eq!(write4k(&mut s, 51, 2, 128).await, GOOD);
+    // A third block: no room — space allocation failed, write protect.
+    assert_eq!(
+        write4k(&mut s, 52, 3, 256).await,
+        (0x21, 0x02, 0x07, 0x27, 0x07)
+    );
+    // What it holds is rewritten and read; the refused place reads the golden.
+    assert_eq!(write4k(&mut s, 53, 4, 8).await, GOOD);
+    assert!(read_blocks(&mut s, 54, 5, 8, 8).await.iter().all(|&b| b == 0x77));
+    assert!(read_blocks(&mut s, 55, 6, 256, 8).await.iter().all(|&b| b == 0x22));
+    drop(s);
+    golden::set(Vec::new()).unwrap();
+    TEST_ARP.lock().remove("127.0.0.1");
     let _ = std::fs::remove_dir_all(&d);
 }

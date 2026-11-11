@@ -716,12 +716,30 @@ pub async fn command(bhs: &[u8; 48], disk: Disk, mrdsl: usize, data: Vec<u8>) ->
         {
             let d = disk.clone();
             let off = lba * lun.block();
-            match tokio::task::spawn_blocking(move || {
-                ov.write_at(&|o, b| d.read_at(o, b), off, &data)
+            let r = tokio::task::spawn_blocking(move || {
+                let r = ov.write_at(&|o, b| d.read_at(o, b), off, &data);
+                let first = r
+                    .as_ref()
+                    .is_err_and(|e| e.starts_with(super::overlay::NO_ROOM))
+                    && ov.first_refusal();
+                (r, first)
             })
-            .await
-            {
+            .await;
+            let refused_first = r.as_ref().is_ok_and(|(_, f)| *f);
+            match r.map(|(r, _)| r) {
                 Ok(Ok(())) => scsi::Cmd::Ok,
+                // A diskless machine over its room (overlay::Limit): "space allocation failed" as a thin-provisioned
+                // disk answers it — the write fails at once, the disk is not taken for broken. Logged once per layer.
+                Ok(Err(e)) if e.starts_with(super::overlay::NO_ROOM) => {
+                    if refused_first {
+                        tracing::warn!(
+                            "iscsid: {} — its writes that need new room are refused: {}",
+                            lun.iqn,
+                            e.trim_start_matches(super::overlay::NO_ROOM)
+                        );
+                    }
+                    scsi::Cmd::Check(0x07, 0x27, 0x07) // data protect, space allocation failed write protect
+                }
                 Ok(Err(e)) => {
                     tracing::warn!("iscsid: write {} @{off}+{moved}: {e}", lun.iqn);
                     scsi::Cmd::Check(0x03, 0x0c, 0x00) // medium error, write error

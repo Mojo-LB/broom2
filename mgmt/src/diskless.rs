@@ -52,6 +52,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/diskless/save", post(save))
         .route("/api/diskless/discard", post(discard))
         .route("/api/diskless/volume", post(set_volume))
+        .route("/api/diskless/room", post(set_room))
         .route("/api/diskless/iso/upload-start", post(iso_start))
         .route(
             "/api/diskless/iso/upload-chunk",
@@ -230,6 +231,8 @@ pub(crate) fn ip_of(st: &SharedState, m: &Machine) -> Option<String> {
 fn configs(st: &SharedState) -> Result<Vec<golden::Config>, String> {
     let wb = dir_of(st, "writeback")?;
     let all = st.db.machines().map_err(|e| e.to_string())?;
+    // (most bytes one machine may hold per disk and session, % of the drive kept free): see "room" below.
+    let room = (pc_gb(st) << 30, free_pct(st));
     let mut out = Vec::new();
     for g in goldens(st) {
         let path = golden_img(st, &g.name)?;
@@ -274,6 +277,8 @@ fn configs(st: &SharedState) -> Result<Vec<golden::Config>, String> {
                 })
                 .collect(),
             games: false,
+            session_max: room.0,
+            free_pct: room.1,
         });
     }
     // Games disks for the diskless Windows machines: each its own copy (golden.rs Config.games), its writes kept on
@@ -299,6 +304,8 @@ fn configs(st: &SharedState) -> Result<Vec<golden::Config>, String> {
             disk: c,
             machines,
             games: true,
+            session_max: room.0,
+            free_pct: room.1,
         });
     }
     Ok(out)
@@ -1396,6 +1403,7 @@ async fn status(State(st): State<SharedState>) -> Result<Json<serde_json::Value>
         "goldens": list,
         "isos": isos(&st),
         "places": places,
+        "room": {"pc_gb": pc_gb(&st), "free_pct": free_pct(&st), "fair_gb": crate::iscsid::overlay::FAIR >> 30},
         "machines": machines,
         // The address the machines reach the server at (boot LAN), for the commands shown on the page.
         "server": st.db.get_config("dhcp_server_ip", ""),
@@ -1724,6 +1732,81 @@ async fn discard(
     .map_err(ise)?
     .map_err(|e| (StatusCode::CONFLICT, e))?;
     tracing::info!("golden {}: maintenance work discarded", b.name);
+    Ok(ok())
+}
+
+// ---------- room for the machines' writes ----------
+// A diskless machine's writes stay on the server until its next boot (its session layer, its copy of each games disk),
+// all on the writeback drive. Two settings bound them (iscsid/overlay.rs Limit), both generous by default — installing
+// a game mid-session must simply work while there is room:
+// - `diskless_pc_gb`: the most one machine may write to one disk in one session; 0 (the default) = no limit of its own.
+// - `diskless_free_pct`: the drive keeps this % free (default 5); below it only machines holding less than 8 GB still
+//   get new room, so the one big writer stops and the room goes on. 0 = no reserve.
+
+const PC_GB_KEY: &str = "diskless_pc_gb";
+const FREE_PCT_KEY: &str = "diskless_free_pct";
+const FREE_PCT_DEFAULT: u8 = 5;
+/// Largest per-machine limit that can be set (GB).
+pub(crate) const PC_GB_MAX: u64 = 100_000;
+
+/// The most one machine may write to one disk in one session, GB (0 = no limit of its own).
+pub(crate) fn pc_gb(st: &SharedState) -> u64 {
+    st.db
+        .get_config(PC_GB_KEY, "0")
+        .parse::<u64>()
+        .ok()
+        .filter(|g| *g <= PC_GB_MAX)
+        .unwrap_or(0)
+}
+
+/// The % of the writeback drive kept free for everyone (0 = no reserve).
+pub(crate) fn free_pct(st: &SharedState) -> u8 {
+    st.db
+        .get_config(FREE_PCT_KEY, "")
+        .parse::<u8>()
+        .ok()
+        .filter(|p| *p <= 50)
+        .unwrap_or(FREE_PCT_DEFAULT)
+}
+
+#[derive(Deserialize)]
+struct RoomBody {
+    pc_gb: u64,
+    free_pct: u8,
+}
+
+/// POST /api/diskless/room {pc_gb, free_pct} (owner) — the room for the machines' writes (see above). Machines get a
+/// change at their next boot.
+async fn set_room(
+    State(st): State<SharedState>,
+    Json(b): Json<RoomBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if b.pc_gb > PC_GB_MAX {
+        return Err(bad(format!("limit per machine: 0 (none) to {PC_GB_MAX} GB")));
+    }
+    if b.free_pct > 50 {
+        return Err(bad("kept free: 0 (no reserve) to 50 %"));
+    }
+    st.db
+        .set_config(PC_GB_KEY, &b.pc_gb.to_string())
+        .map_err(ise)?;
+    st.db
+        .set_config(FREE_PCT_KEY, &b.free_pct.to_string())
+        .map_err(ise)?;
+    let st2 = st.clone();
+    tokio::task::spawn_blocking(move || sync(&st2))
+        .await
+        .map_err(ise)?
+        .map_err(ise)?;
+    tracing::info!(
+        "diskless: a machine may write {} per session; the drive keeps {}% free",
+        if b.pc_gb == 0 {
+            "without a limit of its own".to_string()
+        } else {
+            format!("up to {} GB", b.pc_gb)
+        },
+        b.free_pct
+    );
     Ok(ok())
 }
 

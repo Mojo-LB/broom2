@@ -84,6 +84,12 @@
       <input class="form-control form-control-sm" id="ver_pct" type="number" min="1" max="90" style="width:80px"> % free; then the oldest go.
       <button class="btn btn-sm btn-outline-primary" data-click="verKeepFree">Save</button> <span id="ver_msg" class="msg"></span></div>
     <div class="small text-body-secondary mt-1">Off (the default): once the machines have restarted onto the newest version, older ones are merged away. A version a group is held on is always kept, with every newer one.</div>
+    <div class="d-flex flex-wrap gap-2 align-items-center mt-3">
+      <span>A machine's writes of one session (kept on the machines' layers drive until its next start): at most</span>
+      <input class="form-control form-control-sm" id="room_gb" type="number" min="0" style="width:90px"> GB per disk (0 = no limit of its own); the drive keeps
+      <input class="form-control form-control-sm" id="room_pct" type="number" min="0" max="50" style="width:70px"> % free.
+      <button class="btn btn-sm btn-outline-primary" data-click="setRoom">Save</button> <span id="room_msg" class="msg"></span></div>
+    <div class="small text-body-secondary mt-1" id="room_note"></div>
     <div class="small text-body-secondary mt-2">Server disks are added on the Server page. A place can change only while it is empty.</div>
     <span id="dl_pmsg" class="msg"></span>
   </div>

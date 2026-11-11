@@ -95,6 +95,7 @@ fn machine_layers_lifecycle() {
             ip: pc.into(),
         }],
         games: false,
+        ..Default::default()
     };
     set(vec![cfg.clone()]).unwrap();
     let t = machine_iqn("iqn.test:golden-w11", mac).unwrap();
@@ -272,6 +273,7 @@ fn games_disk_copy_per_machine() {
             ip: pc.into(),
         }],
         games: true,
+        ..Default::default()
     }])
     .unwrap();
     let t = machine_iqn("iqn.test:games-g1", mac).unwrap();
