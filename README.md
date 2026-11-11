@@ -290,8 +290,10 @@ PC down.
   its next boot — its session layer and its copy of each games disk, all on the machines' layers drive. *At most N GB
   per disk and session* limits one PC (default 0: no limit of its own, so a game installed mid-session just works).
   *The drive keeps N % free* (default 5): below it only PCs holding less than 8 GB still get new room, so the one
-  big writer stops (its writes fail with "no space" until it restarts) and the room goes on. Changes count from each
-  PC's next boot.
+  big writer stops and the room goes on. A PC that reaches a limit is refused new room on its disk; Windows on its
+  own system disk does not show "disk full" then — it stops and restarts within a minute, onto a fresh session (seen
+  on Windows 11 24H2 clients). The server's log names the machine (`… (machine <mac>) — its writes that need new
+  room are refused`). Keep a per-PC limit well above what a session writes. Changes count from each PC's next boot.
 - **A machine's base is built once:** the first boot of a golden version reports its setup done
   (`/api/diskless/client/base-done`) and restarts; the server takes that only on a first boot, within 15 minutes of
   its start, once. No later session — a guest's — can be kept as the base.
@@ -431,6 +433,12 @@ sends it over plain HTTP. What the network must do:
   filesystems on loop devices (`xfsprogs`, `e2fsprogs`).
 - **iPXE** is fetched at `mgmt/ipxe/IPXE_COMMIT`, patched with `mgmt/ipxe/patches/` and embedded; rebuilt only when
   those change (`--ipxe` forces it).
+- **Add hardware, Update script and Maintain in the browser** attach the golden to the server itself over iSCSI
+  (open-iscsi, loopback). A server running the multipath service (`multipathd`, on by default on Ubuntu Server)
+  takes a disk it has seen twice at the same time — two logins of one golden by hand, for instance — at every later
+  login; Broom then refuses the job and says so. Keep multipath off Broom's own disks:
+  `/etc/multipath/conf.d/broom.conf` with `blacklist { device { vendor "BROOM" product ".*" } }`, then
+  `multipath -w <ID>` for an ID already in `/etc/multipath/wwids` and `multipathd reconfigure`.
 - **Add hardware** runs `broom-report.exe` in Windows PE. A release gets it from CI (built from
   `mgmt/winpe/broom-report.c`; no binary of it is in the repository). A local build: install `gcc-mingw-w64-x86-64`,
   `./build.sh` then also makes `mgmt/dist/broom-report.exe` — copy it to `<Broom's folder>/winpe/` on the server.

@@ -722,18 +722,20 @@ pub async fn command(bhs: &[u8; 48], disk: Disk, mrdsl: usize, data: Vec<u8>) ->
                     .as_ref()
                     .is_err_and(|e| e.starts_with(super::overlay::NO_ROOM))
                     && ov.first_refusal();
-                (r, first)
+                (r, first.then(|| ov.folder()))
             })
             .await;
-            let refused_first = r.as_ref().is_ok_and(|(_, f)| *f);
+            let refused_first = r.as_ref().ok().and_then(|(_, f)| f.clone());
             match r.map(|(r, _)| r) {
                 Ok(Ok(())) => scsi::Cmd::Ok,
                 // A diskless machine over its room (overlay::Limit): "space allocation failed" as a thin-provisioned
                 // disk answers it — the write fails at once, the disk is not taken for broken. Logged once per layer.
                 Ok(Err(e)) if e.starts_with(super::overlay::NO_ROOM) => {
-                    if refused_first {
+                    if let Some(whose) = refused_first {
+                        // Windows on a system disk that takes no more writes stops and restarts within a minute:
+                        // the machine comes back on a fresh session. Named here so the restart can be explained.
                         tracing::warn!(
-                            "iscsid: {} — its writes that need new room are refused: {}",
+                            "iscsid: {} (machine {whose}) — its writes that need new room are refused: {}",
                             lun.iqn,
                             e.trim_start_matches(super::overlay::NO_ROOM)
                         );

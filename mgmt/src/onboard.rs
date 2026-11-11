@@ -876,11 +876,38 @@ pub(crate) fn login(target: &str) -> Result<PathBuf, String> {
     for _ in 0..100 {
         if dev.exists() {
             let _ = sh("udevadm", &["settle", "-t", "10"], Duration::from_secs(15));
+            if let Some(why) = taken(FsPath::new("/sys/class/block"), &dev) {
+                logout(target);
+                return Err(format!("{target}: {why}"));
+            }
             return Ok(dev);
         }
         std::thread::sleep(Duration::from_millis(200));
     }
     Err(format!("{target}: no disk appeared after the iSCSI login"))
+}
+
+/// Why the freshly attached disk `dev` cannot be used as it is: another layer of this server sits on it. That is
+/// the multipath service, once it has seen the disk twice at the same time (two logins of one golden) and noted its
+/// ID: from then on it takes the disk at every login, its partitions appear on the multipath device only, and what
+/// is written past it is not safe. `sys` = /sys/class/block.
+pub(crate) fn taken(sys: &FsPath, dev: &FsPath) -> Option<String> {
+    let real = std::fs::canonicalize(dev).ok()?;
+    let name = real.file_name()?.to_str()?;
+    let holders: Vec<String> = std::fs::read_dir(sys.join(name).join("holders"))
+        .ok()?
+        .flatten()
+        .filter_map(|e| e.file_name().to_str().map(String::from))
+        .collect();
+    (!holders.is_empty()).then(|| {
+        format!(
+            "this server's multipath service has taken the disk ({name} is under {}): Broom needs it as a plain \
+             disk. Keep multipath off Broom's own disks — /etc/multipath/conf.d/broom.conf with \
+             `blacklist {{ device {{ vendor \"BROOM\" product \".*\" }} }}`, then `multipath -w <its ID>` for an ID \
+             already in /etc/multipath/wwids and `multipathd reconfigure` — and try again",
+            holders.join(", ")
+        )
+    })
 }
 
 pub(crate) fn logout(target: &str) {

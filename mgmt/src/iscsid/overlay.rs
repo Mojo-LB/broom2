@@ -132,6 +132,16 @@ impl Overlay {
         self.blocks.lock().contains(&b)
     }
 
+    /// Whose layer this is, for the log: the folder it lies in (a diskless machine's layers lie in a folder named
+    /// by its MAC).
+    pub fn folder(&self) -> String {
+        self.list
+            .parent()
+            .and_then(|d| d.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
     /// True the first time it is asked after a write was refused for room: the caller logs that one.
     pub fn first_refusal(&self) -> bool {
         !self

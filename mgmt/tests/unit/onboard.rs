@@ -618,3 +618,30 @@ fn reporter_is_built_not_committed() {
         );
     }
 }
+
+/// A golden's disk the server's multipath service sits on is refused with the way out (its partitions are not on the
+/// disk itself then, and writing past multipath is not safe); a plain disk is used as it is.
+#[test]
+fn disk_under_multipath_is_refused() {
+    let d = std::env::temp_dir().join(format!("broom-taken-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    let sys = d.join("sys");
+    std::fs::create_dir_all(sys.join("sdb/holders/dm-0")).unwrap();
+    std::fs::create_dir_all(sys.join("sdc/holders")).unwrap();
+    std::fs::create_dir_all(d.join("dev")).unwrap();
+    for n in ["sdb", "sdc"] {
+        std::fs::write(d.join("dev").join(n), b"").unwrap();
+    }
+    let why = super::taken(&sys, &d.join("dev/sdb")).expect("sdb is under dm-0");
+    assert!(
+        why.contains("sdb is under dm-0")
+            && why.contains("vendor \"BROOM\"")
+            && why.contains("multipath -w"),
+        "{why}"
+    );
+    assert_eq!(super::taken(&sys, &d.join("dev/sdc")), None);
+    // Not known to /sys at all (no such block device): nothing held against it.
+    std::fs::write(d.join("dev/sdz"), b"").unwrap();
+    assert_eq!(super::taken(&sys, &d.join("dev/sdz")), None);
+    let _ = std::fs::remove_dir_all(&d);
+}
