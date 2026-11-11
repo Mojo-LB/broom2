@@ -262,17 +262,43 @@ fn new_self_signed(st: &SharedState) -> Result<Meta, String> {
     Ok(meta)
 }
 
-/// Write cert + key (key readable by root only), then use them.
+/// `d` exists and only its owner gets in (0700): the private key lives there.
+pub(crate) fn private_dir(d: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    match std::fs::DirBuilder::new().mode(0o700).create(d) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// `data` → `p`, never readable by anyone but its owner: made 0600 (whatever the umask), written, synced, then
+/// renamed into place — there is no moment at which the file exists with wider rights.
+pub(crate) fn write_private(p: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut tmp = p.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let _ = std::fs::remove_file(&tmp); // a stale one (made by anyone) is not reused
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    f.write_all(data)?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, p)
+}
+
+/// Write cert + key (key readable by root only, from the moment it exists), then use them.
 fn install(st: &SharedState, cert: &str, key: &str, meta: Meta) -> Result<(), String> {
     let (ck, _) = certified(cert, key)?;
-    std::fs::create_dir_all(dir()).map_err(|e| e.to_string())?;
+    private_dir(&dir()).map_err(|e| format!("{}: {e}", dir().display()))?;
     let (c, k) = files();
-    crate::versions::write_durable(&k, key.as_bytes())
-        .map_err(|e| format!("{}: {e}", k.display()))?;
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&k, std::fs::Permissions::from_mode(0o600));
-    }
+    write_private(&k, key.as_bytes()).map_err(|e| format!("{}: {e}", k.display()))?;
     crate::versions::write_durable(&c, cert.as_bytes())
         .map_err(|e| format!("{}: {e}", c.display()))?;
     st.db

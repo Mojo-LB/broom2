@@ -210,3 +210,45 @@ fn subnets() {
     assert!(!on_subnet_of("", "192.168.1.121"));
     assert!(!on_subnet_of("192.168.1.111", "not an ip"));
 }
+
+/// The private key file is never readable by others, not even while it is written, whatever the umask.
+#[test]
+fn private_key_file_rights() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = std::env::temp_dir().join(format!("broom-tls-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    private_dir(&d).unwrap();
+    assert_eq!(
+        std::fs::metadata(&d).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    // A folder left wide open by an older build is closed.
+    std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
+    private_dir(&d).unwrap();
+    assert_eq!(
+        std::fs::metadata(&d).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    let k = d.join("key.pem");
+    // A stale, world-readable temp file in the way is not reused.
+    std::fs::write(d.join("key.pem.tmp"), b"old").unwrap();
+    std::fs::set_permissions(
+        d.join("key.pem.tmp"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    write_private(&k, b"secret").unwrap();
+    assert_eq!(
+        std::fs::metadata(&k).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(std::fs::read(&k).unwrap(), b"secret");
+    assert!(!d.join("key.pem.tmp").exists());
+    // Replaced in place: still 0600.
+    write_private(&k, b"next").unwrap();
+    assert_eq!(
+        std::fs::metadata(&k).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
