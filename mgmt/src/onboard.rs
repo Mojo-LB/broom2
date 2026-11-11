@@ -663,6 +663,54 @@ pub(crate) fn preflight() -> Result<(), String> {
     }
 }
 
+// ---------- confining QEMU ----------
+// Both VMs of this server (this one, and the maintenance VM in the browser, vmmaint.rs) run a golden — Windows with
+// whatever was installed into it, the maintenance one with internet and a person typing — inside QEMU started by
+// Broom, which is root. A flaw in QEMU's device emulation must not hand the guest a root process on the server:
+// - QEMU drops to an unprivileged user as soon as it has opened what it needs (KVM, the disks, its sockets): from
+//   then on it cannot open the server's files, other disks, or signal other processes;
+// - QEMU's seccomp filter (-sandbox): no obsolete system calls, no new processes, no scheduling / resource changes.
+// The maintenance VM's own unit adds systemd's file-system and capability limits (vmmaint::launch).
+// Its network is NOT narrowed: it reaches the internet and the LANs the server reaches, through QEMU's NAT.
+
+/// The user QEMU runs as once started: nobody (uid:gid, the same number on Debian, Ubuntu, Fedora…).
+pub(crate) const QEMU_USER: &str = "65534:65534";
+
+/// QEMU's version from the first line of `qemu-system-x86_64 --version` ("QEMU emulator version 8.2.2 (…)").
+pub(crate) fn parse_qemu_version(text: &str) -> Option<(u32, u32)> {
+    let v = text.split("version ").nth(1)?;
+    let mut n = v
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|p| !p.is_empty())
+        .map(|p| p.parse::<u32>().ok());
+    Some((n.next()??, n.next()??))
+}
+
+/// The installed QEMU's version (None = not found / not understood).
+pub(crate) fn qemu_version() -> Option<(u32, u32)> {
+    let o = Command::new(which("qemu-system-x86_64")?)
+        .arg("--version")
+        .output()
+        .ok()?;
+    parse_qemu_version(&String::from_utf8_lossy(&o.stdout))
+}
+
+/// The arguments that confine QEMU (see above), for QEMU `version`: the option that drops the user is `-runas`
+/// up to 9.0 and `-run-with user=` from 9.1 on (which deprecated `-runas`). The filter must allow the one change
+/// of user at start (elevateprivileges=allow); as nobody there is nothing left to elevate to.
+pub(crate) fn confine_args(version: Option<(u32, u32)>) -> Vec<String> {
+    let mut a: Vec<String> = if version.is_some_and(|v| v >= (9, 1)) {
+        vec!["-run-with".into(), format!("user={QEMU_USER}")]
+    } else {
+        vec!["-runas".into(), QEMU_USER.into()]
+    };
+    a.extend([
+        "-sandbox".to_string(),
+        "on,obsolete=deny,elevateprivileges=allow,spawn=deny,resourcecontrol=deny".to_string(),
+    ]);
+    a
+}
+
 pub(crate) fn which(t: &str) -> Option<PathBuf> {
     [
         "/usr/bin",
@@ -985,12 +1033,13 @@ fn run_vm(st: &SharedState, token: &str, disk: &FsPath, work: &FsPath) -> Result
     std::fs::copy(&vars_t, &vars).map_err(|e| format!("OVMF vars: {e}"))?;
     let qmp = work.join("qmp.sock");
     let _ = std::fs::remove_file(&qmp);
-    let args = qemu_args(
+    let mut args = qemu_args(
         &disk.to_string_lossy(),
         &code.to_string_lossy(),
         &vars.to_string_lossy(),
         &qmp.to_string_lossy(),
     );
+    args.extend(confine_args(qemu_version()));
     let log = std::fs::File::create(work.join("qemu.log")).map_err(|e| e.to_string())?;
     let mut c = Command::new(which("qemu-system-x86_64").ok_or("no qemu-system-x86_64")?)
         .args(&args)

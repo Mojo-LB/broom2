@@ -468,3 +468,73 @@ fn local_target_carries_the_key() {
         ("iqn.x:golden-w11.g7", Some(k.as_str()))
     );
 }
+
+/// QEMU is confined on every start: it drops to an unprivileged user (the option depends on its version) and runs
+/// under its seccomp filter, which must allow that one change of user.
+#[test]
+fn qemu_confinement_args() {
+    use super::{QEMU_USER, confine_args, parse_qemu_version};
+    assert_eq!(
+        parse_qemu_version("QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)\nCopyright"),
+        Some((8, 2))
+    );
+    assert_eq!(parse_qemu_version("QEMU emulator version 10.2.1"), Some((10, 2)));
+    assert_eq!(parse_qemu_version("QEMU emulator version 9.1.0-rc2"), Some((9, 1)));
+    assert_eq!(parse_qemu_version("something else"), None);
+    let sandbox = "on,obsolete=deny,elevateprivileges=allow,spawn=deny,resourcecontrol=deny";
+    for v in [Some((8, 2)), Some((9, 0)), None] {
+        assert_eq!(confine_args(v), ["-runas", QEMU_USER, "-sandbox", sandbox], "{v:?}");
+    }
+    for v in [Some((9, 1)), Some((10, 2)), Some((11, 0))] {
+        assert_eq!(
+            confine_args(v),
+            ["-run-with", &format!("user={QEMU_USER}"), "-sandbox", sandbox],
+            "{v:?}"
+        );
+    }
+    assert_eq!(QEMU_USER, "65534:65534");
+}
+
+/// Live (needs qemu-system-x86_64 and root; no KVM needed): QEMU started with this server's confinement arguments
+/// runs as the unprivileged user, with no_new_privs and a seccomp filter, a disk and user-mode networking attached.
+#[test]
+#[ignore]
+fn live_qemu_is_confined() {
+    use super::{confine_args, qemu_version, which};
+    let Some(qemu) = which("qemu-system-x86_64") else {
+        return;
+    };
+    let d = std::env::temp_dir().join(format!("broom-qemu-confine-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let img = d.join("disk.img");
+    std::fs::File::create(&img).unwrap().set_len(16 << 20).unwrap();
+    let mut c = std::process::Command::new(qemu)
+        .args(["-machine", "q35,accel=tcg", "-m", "64", "-display", "none", "-vga", "none", "-nodefaults", "-S"])
+        .args(["-drive", &format!("file={},format=raw,if=none,id=d0", img.display())])
+        .args(["-device", "ahci,id=sata", "-device", "ide-hd,drive=d0,bus=sata.0"])
+        .args(["-netdev", "user,id=n0", "-device", "e1000e,netdev=n0"])
+        .args(["-qmp", &format!("unix:{},server=on,wait=off", d.join("qmp.sock").display())])
+        .args(confine_args(qemu_version()))
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let status = std::fs::read_to_string(format!("/proc/{}/status", c.id())).unwrap_or_default();
+    let field = |k: &str| {
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix(k))
+            .map(|v| v.split_whitespace().map(String::from).collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    let _ = c.kill();
+    let _ = c.wait();
+    let _ = std::fs::remove_dir_all(&d);
+    assert!(!status.is_empty(), "QEMU did not stay up with the confinement arguments");
+    assert_eq!(field("Uid:"), ["65534"; 4], "runs as nobody");
+    assert_eq!(field("Gid:"), ["65534"; 4]);
+    assert_eq!(field("Groups:"), ["65534"], "no other group kept");
+    assert_eq!(field("NoNewPrivs:"), ["1"]);
+    assert_eq!(field("Seccomp:"), ["2"], "seccomp filter on");
+    assert_eq!(field("CapEff:"), ["0000000000000000"], "no capability left");
+}

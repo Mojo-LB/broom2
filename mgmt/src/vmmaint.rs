@@ -293,6 +293,33 @@ fn alive(s: &Session) -> bool {
     })
 }
 
+/// systemd's limits on the VM's unit, on top of QEMU's own (onboard::confine_args): the whole file system read-only
+/// but the VM's work folder, no home folders, its own /tmp, no kernel settings / modules / control groups, no
+/// set-uid programs, and of root's capabilities only the two QEMU needs once, to change to its unprivileged user.
+/// Not narrowed: devices (KVM, the disks attached over iSCSI) and the network (the VM reaches the internet and the
+/// server's LANs).
+pub(crate) fn unit_limits(work: &Path) -> Vec<String> {
+    let mut v = Vec::new();
+    for p in [
+        "NoNewPrivileges=yes".to_string(),
+        "CapabilityBoundingSet=CAP_SETUID CAP_SETGID".to_string(),
+        "ProtectSystem=strict".to_string(),
+        format!("ReadWritePaths={}", work.display()),
+        "ProtectHome=yes".to_string(),
+        "PrivateTmp=yes".to_string(),
+        "ProtectKernelTunables=yes".to_string(),
+        "ProtectKernelModules=yes".to_string(),
+        "ProtectControlGroups=yes".to_string(),
+        "RestrictSUIDSGID=yes".to_string(),
+        "RestrictNamespaces=yes".to_string(),
+        "LockPersonality=yes".to_string(),
+    ] {
+        v.push("-p".to_string());
+        v.push(p);
+    }
+    v
+}
+
 /// Start QEMU outside bootrom-mgmt.service (whose restart kills its cgroup): its own unit, or its own session.
 /// → Some(pid) without systemd.
 fn launch(golden: &str, args: &[String], log: &Path) -> Result<Option<u32>, String> {
@@ -318,6 +345,7 @@ fn launch(golden: &str, args: &[String], log: &Path) -> Result<Option<u32>, Stri
                 "-p",
                 &format!("StandardError=append:{}", log.display()),
             ])
+            .args(unit_limits(log.parent().unwrap_or(Path::new("/"))))
             .arg(&qemu)
             .args(args)
             .output()
@@ -549,13 +577,14 @@ pub(crate) fn begin(
         let (qmp_s, vnc_s) = (work.join("qmp.sock"), work.join("vnc.sock"));
         let _ = std::fs::remove_file(&qmp_s);
         let _ = std::fs::remove_file(&vnc_s);
-        let args = qemu_args(
+        let mut args = qemu_args(
             &s.golden,
             &disk.to_string_lossy(),
             &gdev,
             (&code.to_string_lossy(), &vars.to_string_lossy()),
             (&qmp_s.to_string_lossy(), &vnc_s.to_string_lossy()),
         );
+        args.extend(crate::onboard::confine_args(crate::onboard::qemu_version()));
         let pid = launch(&s.golden, &args, &work.join("qemu.log"))?;
         let t0 = Instant::now();
         while !vnc_s.exists() {

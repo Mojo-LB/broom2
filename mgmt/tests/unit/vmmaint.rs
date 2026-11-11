@@ -115,3 +115,30 @@ fn active_states() {
         assert_eq!(s.active(), on, "{st}");
     }
 }
+
+/// The maintenance VM's unit: systemd's limits around QEMU — read-only file system but its work folder, no new
+/// privileges, only the two capabilities QEMU needs to change to its unprivileged user — and nothing that narrows
+/// its network or devices (it must reach the internet and the server's LANs, KVM and its disks).
+#[test]
+fn vm_unit_limits() {
+    let v = super::unit_limits(std::path::Path::new("/data/wb/diskless/.vm/w11"));
+    assert_eq!(v.len() % 2, 0);
+    assert!(v.chunks(2).all(|c| c[0] == "-p"), "{v:?}");
+    let props: Vec<&str> = v.chunks(2).map(|c| c[1].as_str()).collect();
+    for want in [
+        "NoNewPrivileges=yes",
+        "CapabilityBoundingSet=CAP_SETUID CAP_SETGID",
+        "ProtectSystem=strict",
+        "ReadWritePaths=/data/wb/diskless/.vm/w11",
+        "ProtectHome=yes",
+        "PrivateTmp=yes",
+        "RestrictSUIDSGID=yes",
+    ] {
+        assert!(props.contains(&want), "{want} missing: {props:?}");
+    }
+    for p in &props {
+        for narrow in ["PrivateNetwork", "RestrictAddressFamilies", "IPAddress", "PrivateDevices", "DevicePolicy"] {
+            assert!(!p.starts_with(narrow), "{p}: the VM's network and devices are not narrowed");
+        }
+    }
+}
