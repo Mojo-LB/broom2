@@ -202,7 +202,8 @@ pub fn set(cfgs: Vec<Config>) -> Result<(), String> {
             })
     });
     if let Some(p) = cfg_file() {
-        let _ = std::fs::write(p, serde_json::to_vec(&cfgs).unwrap());
+        // Root only: a config can hold a job's write key (games::Config.update_key).
+        let _ = crate::tls::write_private(&p, &serde_json::to_vec(&cfgs).unwrap());
     }
     GOLDENS.set(
         cfgs.into_iter()

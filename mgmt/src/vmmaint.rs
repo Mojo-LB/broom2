@@ -88,9 +88,29 @@ pub(crate) struct Session {
     /// QEMU's process when there is no systemd (else its unit).
     #[serde(default)]
     pub pid: Option<u32>,
+    /// This session's write key (onboard::new_write_key): the server logs in to the disks' update targets with it,
+    /// the loopback address alone does not get to write. Never shown (`public`).
+    #[serde(default)]
+    pub wkey: String,
 }
 
 impl Session {
+    /// As the web admin sees it: without the write key.
+    pub(crate) fn public(mut self) -> Session {
+        self.wkey.clear();
+        self
+    }
+
+    /// The target this server logs in to for `target` ("<iqn>.g<k>") of this session: with its key (a session
+    /// started by an older build has none: the plain name, as it was logged in).
+    pub(crate) fn local(&self, target: &str) -> String {
+        if self.wkey.is_empty() {
+            target.to_string()
+        } else {
+            crate::onboard::local_target(target, &self.wkey)
+        }
+    }
+
     /// QEMU may be running (or the disks still attached).
     pub(crate) fn active(&self) -> bool {
         matches!(self.state.as_str(), "starting" | "running" | "stopping")
@@ -102,6 +122,8 @@ impl Session {
 struct Owns {
     golden: String,
     games: Vec<String>,
+    /// The session's write key.
+    key: String,
 }
 static OWNS: parking_lot::Mutex<Option<Owns>> = parking_lot::Mutex::new(None);
 /// Start / finish one at a time.
@@ -109,6 +131,22 @@ static LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 pub(crate) fn owns_golden(name: &str) -> bool {
     OWNS.lock().as_ref().is_some_and(|o| o.golden == name)
+}
+
+/// The write key of the session holding golden `name` (None = the VM does not hold it).
+pub(crate) fn golden_key(name: &str) -> Option<String> {
+    OWNS.lock()
+        .as_ref()
+        .filter(|o| o.golden == name)
+        .map(|o| o.key.clone())
+}
+
+/// The write key of the session holding games disk `name` (None = the VM does not hold it).
+pub(crate) fn games_key(name: &str) -> Option<String> {
+    OWNS.lock()
+        .as_ref()
+        .filter(|o| o.games.iter().any(|g| g == name))
+        .map(|o| o.key.clone())
 }
 
 pub(crate) fn owns_games(name: &str) -> bool {
@@ -444,6 +482,7 @@ fn plan(
         msg: "attaching the disks".into(),
         ended: 0,
         pid: None,
+        wkey: crate::onboard::new_write_key(),
     })
 }
 
@@ -468,17 +507,18 @@ pub(crate) fn begin(
     *OWNS.lock() = Some(Owns {
         golden: s.golden.clone(),
         games: s.games.iter().map(|g| g.name.clone()).collect(),
+        key: s.wkey.clone(),
     });
     let r = (|| -> Result<Option<u32>, String> {
         crate::diskless::sync(st)?;
         if !s.games.is_empty() {
             crate::games::sync(st)?;
         }
-        let disk = crate::onboard::login(&s.golden_target)?;
+        let disk = crate::onboard::login(&s.local(&s.golden_target))?;
         let mut gdev = Vec::new();
         for g in &s.games {
             gdev.push((
-                crate::onboard::login(&g.target)?
+                crate::onboard::login(&s.local(&g.target))?
                     .to_string_lossy()
                     .to_string(),
                 g.serial.clone(),
@@ -591,9 +631,9 @@ fn finish(st: &SharedState, why: Option<String>) {
         return;
     };
     for g in &s.games {
-        crate::onboard::logout(&g.target);
+        crate::onboard::logout(&s.local(&g.target));
     }
-    crate::onboard::logout(&s.golden_target);
+    crate::onboard::logout(&s.local(&s.golden_target));
     *OWNS.lock() = None;
     let _ = crate::diskless::sync(st);
     if !s.games.is_empty() {
@@ -663,6 +703,7 @@ pub fn restore(st: &SharedState) {
     *OWNS.lock() = Some(Owns {
         golden: s.golden.clone(),
         games: s.games.iter().map(|g| g.name.clone()).collect(),
+        key: s.wkey.clone(),
     });
     if alive(&s) {
         tracing::info!("vm: {} still running — taken over", s.golden);
@@ -734,7 +775,7 @@ async fn status(State(st): State<SharedState>) -> Json<serde_json::Value> {
         })
         .collect();
     Json(serde_json::json!({
-        "session": current(&st),
+        "session": current(&st).map(Session::public),
         "goldens": goldens,
         "games": games,
         "cpus": CPUS,
@@ -774,7 +815,7 @@ async fn start(
         .await
         .map_err(ise)?
         .map_err(|e| (StatusCode::CONFLICT, e))?;
-    Ok(Json(serde_json::json!({"ok": true, "session": s})))
+    Ok(Json(serde_json::json!({"ok": true, "session": s.public()})))
 }
 
 #[derive(Deserialize)]

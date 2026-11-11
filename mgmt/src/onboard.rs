@@ -258,11 +258,32 @@ pub(crate) fn busy(st: &SharedState, name: &str) -> bool {
     job(st).is_some_and(|j| active(&j) && j.golden == name)
 }
 
-/// Golden whose update session belongs to the onboarding VM right now: the daemon lets 127.0.0.1 write it.
-static VM_GOLDEN: parking_lot::Mutex<Option<String>> = parking_lot::Mutex::new(None);
+/// Golden whose update session belongs to this server right now (the onboarding VM, the script refresh), and that
+/// job's write key: the daemon lets 127.0.0.1 write it only through the target name carrying the key (`local_target`).
+static VM_GOLDEN: parking_lot::Mutex<Option<(String, String)>> = parking_lot::Mutex::new(None);
 
 pub(crate) fn vm_owns(name: &str) -> bool {
-    VM_GOLDEN.lock().as_deref() == Some(name)
+    VM_GOLDEN.lock().as_ref().is_some_and(|(g, _)| g == name)
+}
+
+/// The write key of the job holding golden `name` (None = no job of this server holds it).
+pub(crate) fn vm_key(name: &str) -> Option<String> {
+    VM_GOLDEN
+        .lock()
+        .as_ref()
+        .filter(|(g, _)| g == name)
+        .map(|(_, k)| k.clone())
+}
+
+/// A new write key for one job of this server on a golden or games disk (never sent anywhere: it only appears in
+/// the target name this server logs in to over its own loopback).
+pub(crate) fn new_write_key() -> String {
+    crate::auth::random_token()
+}
+
+/// The target this server logs in to for writing: version target `target` ("<iqn>.g<k>") with the job's key.
+pub(crate) fn local_target(target: &str, key: &str) -> String {
+    format!("{target}.u{key}")
 }
 
 /// The VM's QEMU process (cancel kills it).
@@ -1014,13 +1035,16 @@ fn run_vm(st: &SharedState, token: &str, disk: &FsPath, work: &FsPath) -> Result
 
 /// The whole VM step for the current job → (status line, results). The golden's update session holds all its writes:
 /// on Err the caller discards them, so the golden stays as it was. Blocking.
-fn install(st: &SharedState, j: &Job) -> Result<(String, Vec<serde_json::Value>), String> {
+fn install(st: &SharedState, j: &Job, key: &str) -> Result<(String, Vec<serde_json::Value>), String> {
     let t = &j.token;
     let info = diskless::served(&j.golden).ok_or("the golden is not served")?;
     if info.disk.update_bytes > 0 || info.disk.update_connected {
         return Err("the golden has unsaved maintenance work - Save or Discard it first".into());
     }
-    let target = format!("{}.g{}", diskless::iqn(st, &j.golden), info.disk.ver);
+    let target = local_target(
+        &format!("{}.g{}", diskless::iqn(st, &j.golden), info.disk.ver),
+        key,
+    );
     let work = work_dir(st)?;
     let mnt = work.join("mnt");
     say(
@@ -1159,8 +1183,9 @@ fn worker(st: SharedState, token: String) {
         return;
     };
     let name = j.golden.clone();
-    *VM_GOLDEN.lock() = Some(name.clone());
-    let r = diskless::sync(&st).and_then(|()| install(&st, &j));
+    let key = new_write_key();
+    *VM_GOLDEN.lock() = Some((name.clone(), key.clone()));
+    let r = diskless::sync(&st).and_then(|()| install(&st, &j, &key));
     *VM_GOLDEN.lock() = None;
     let _ = diskless::sync(&st);
     let save = |f: &dyn Fn() -> Result<String, String>| -> Result<String, String> {
@@ -1256,8 +1281,8 @@ fn retry_connected<T>(f: &dyn Fn() -> Result<T, String>) -> Result<T, String> {
 
 /// Broom's current broom-diskless.ps1 into golden `name`'s C:\Windows\Setup\Scripts (what its startup task runs), and
 /// no machine's agent folder (C:\ProgramData\Broom) left in it. Ok(true) = something changed. Blocking.
-fn write_script(st: &SharedState, name: &str, ver: u64) -> Result<bool, String> {
-    let target = format!("{}.g{ver}", diskless::iqn(st, name));
+fn write_script(st: &SharedState, name: &str, ver: u64, key: &str) -> Result<bool, String> {
+    let target = local_target(&format!("{}.g{ver}", diskless::iqn(st, name)), key);
     let mnt = work_dir(st)?.join("mnt-refresh");
     let dev = login(&target)?;
     let r = (|| {
@@ -1318,12 +1343,13 @@ fn refresh_script(st: &SharedState, name: &str) -> Result<String, String> {
     }
     {
         let mut v = VM_GOLDEN.lock();
-        if let Some(o) = v.as_ref() {
+        if let Some((o, _)) = v.as_ref() {
             return Err(format!("{o} is being updated on the server right now"));
         }
-        *v = Some(name.to_string());
+        *v = Some((name.to_string(), new_write_key()));
     }
-    let r = diskless::sync(st).and_then(|()| write_script(st, name, info.disk.ver));
+    let key = vm_key(name).unwrap_or_default();
+    let r = diskless::sync(st).and_then(|()| write_script(st, name, info.disk.ver, &key));
     *VM_GOLDEN.lock() = None;
     let _ = diskless::sync(st);
     let discard = || retry_connected(&|| crate::iscsi::golden_discard(name));
@@ -1418,7 +1444,7 @@ async fn start(
                 format!("a job is already {} for {} — cancel it first", j.state, j.golden),
             ));
         }
-        if let Some(g) = VM_GOLDEN.lock().as_ref() {
+        if let Some((g, _)) = VM_GOLDEN.lock().as_ref() {
             return Err((
                 StatusCode::CONFLICT,
                 format!("{g} is being updated on the server right now — try again in a minute"),
@@ -1531,18 +1557,45 @@ async fn retry(State(st): State<SharedState>) -> Result<Json<serde_json::Value>,
     ))
 }
 
-fn by_token(st: &SharedState, q: &HashMap<String, String>) -> Option<Job> {
+/// The job a Windows PE request is for: the job's token (compared in constant time) AND sent by the job's machine —
+/// the token travels in plain-HTTP URLs on the LAN, so alone it proves nothing: the kernel must see that machine's
+/// network card behind the sender (ARP), as for every other step of its boot.
+fn by_token(st: &SharedState, q: &HashMap<String, String>, peer: &str) -> Option<Job> {
     let t = q.get("t")?;
-    job(st).filter(|j| !j.token.is_empty() && j.token == *t)
+    let j = job(st).filter(|j| token_matches(&j.token, t))?;
+    if !from_job_machine(&j.mac, crate::license::arp_mac(peer).as_deref()) {
+        tracing::warn!(
+            "add hardware: {peer} used the job's token but is not the job's machine ({}) - refused",
+            j.mac
+        );
+        return None;
+    }
+    Some(j)
+}
+
+/// `given` is the job's token (never an empty one).
+pub(crate) fn token_matches(token: &str, given: &str) -> bool {
+    !token.is_empty() && crate::auth::same(token, given)
+}
+
+/// The sender's MAC as the kernel sees it (`seen`) is the job machine's.
+pub(crate) fn from_job_machine(job_mac: &str, seen: Option<&str>) -> bool {
+    let want = crate::iscsid::golden::mac12(job_mac);
+    want.is_some() && seen.and_then(crate::iscsid::golden::mac12) == want
 }
 
 /// POST /api/onboard/report?t= (public: Windows PE) — pnputil's text; starts the VM step.
 async fn report(
     State(st): State<SharedState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Query(q): Query<HashMap<String, String>>,
     body: String,
 ) -> Result<String, ApiError> {
-    let j = by_token(&st, &q).ok_or((StatusCode::NOT_FOUND, "no such job".to_string()))?;
+    let peer = peer.ip().to_canonical().to_string();
+    let j = by_token(&st, &q, &peer).ok_or((
+        StatusCode::NOT_FOUND,
+        "no such job for this PC (the report must come through the network card it booted from)".to_string(),
+    ))?;
     if j.state != "waiting" {
         return Err((StatusCode::CONFLICT, format!("the job is {}", j.state)));
     }
@@ -1607,9 +1660,10 @@ async fn report(
 /// GET /api/onboard/state?t= (public: Windows PE) — {state, msg}; an unknown token answers state "".
 async fn state_q(
     State(st): State<SharedState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Json<serde_json::Value> {
-    match by_token(&st, &q) {
+    match by_token(&st, &q, &peer.ip().to_canonical().to_string()) {
         Some(j) => Json(serde_json::json!({"state": j.state, "msg": j.msg})),
         None => Json(serde_json::json!({"state": "", "msg": "no such job"})),
     }
@@ -1708,7 +1762,7 @@ async fn file(
     let (j, path) =
         tokio::task::spawn_blocking(move || -> Result<(Job, Option<PathBuf>), ApiError> {
             let (j, _) = job_machine(&st2, &peer).map_err(|e| (StatusCode::FORBIDDEN, e))?;
-            if q2.get("t") != Some(&j.token) {
+            if !q2.get("t").is_some_and(|t| token_matches(&j.token, t)) {
                 return Err((StatusCode::FORBIDDEN, "wrong job".into()));
             }
             let iso = diskless::goldens(&st2)

@@ -832,3 +832,98 @@ async fn games_disk_keeps_versions() {
     games::set(Vec::new()).unwrap();
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// This server's own update session (a VM of its own) is not trusted for coming from the loopback address: with a
+/// job key on the disk, only a login to "<iqn>.g<k>.u<key>" writes; the plain target or another key reads only, from
+/// the very same address. A LAN update machine (no key on the disk) is unaffected: see games_disk_versions.
+#[tokio::test]
+async fn local_update_needs_job_key() {
+    let _one = crate::iscsid::golden::TEST_LOCK.lock().await;
+    let d = std::env::temp_dir().join("broom_test_games_key");
+    let _ = std::fs::remove_dir_all(&d);
+    let img = d.join("k/games.img");
+    std::fs::create_dir_all(img.parent().unwrap()).unwrap();
+    std::fs::write(&img, vec![0x11u8; 1 << 20]).unwrap();
+    let key = "0123456789abcdef0123456789abcdef";
+    games::set(vec![games::Config {
+        name: "k".into(),
+        iqn: "iqn.test:keyed".into(),
+        path: img.to_string_lossy().into(),
+        update_ip: Some("127.0.0.1".into()),
+        update_key: Some(key.into()),
+        ..Default::default()
+    }])
+    .unwrap();
+    assert_eq!(
+        games::iqns(),
+        ["iqn.test:keyed.g0"],
+        "the keyed name is never listed"
+    );
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = l.accept().await {
+            tokio::spawn(conn::serve(s, "127.0.0.1".into()));
+        }
+    });
+    let write_status = |target: String| async move {
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        assert_eq!(login(&mut s, &target).await.bhs[36], 0, "{target}: logged in");
+        s.write_all(&scsi_cmd(31, 1, 0xa0, 0x2a, 8, 1)).await.unwrap();
+        let r = conn::read_pdu(&mut s).await.unwrap();
+        (r.bhs[0], r.bhs[3])
+    };
+    // From 127.0.0.1, the update machine's address — but without the job's key: read-only.
+    assert_eq!(
+        write_status("iqn.test:keyed.g0".into()).await,
+        (0x21, 0x02),
+        "plain target: write refused"
+    );
+    assert_eq!(
+        write_status(format!("iqn.test:keyed.g0.u{}", "f".repeat(32))).await,
+        (0x21, 0x02),
+        "another key: write refused"
+    );
+    let info = games::info().into_iter().find(|i| i.name == "k").unwrap();
+    assert!(!info.update_connected && info.update_bytes == 0);
+    // With the key: an R2T asks for the data — the session writes.
+    assert_eq!(
+        write_status(format!("iqn.test:keyed.g0.u{key}")).await.0,
+        0x31,
+        "keyed target: write accepted"
+    );
+    games::set(Vec::new()).unwrap();
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Target names with a write key: only "<iqn>.g<digits>.u<16+ hex>" is split; anything else is a plain name.
+#[test]
+fn write_key_in_target_name() {
+    use games::split_key;
+    assert_eq!(split_key("iqn.x:d.g3"), ("iqn.x:d.g3", None));
+    assert_eq!(
+        split_key("iqn.x:d.g3.u0123456789abcdef"),
+        ("iqn.x:d.g3", Some("0123456789abcdef"))
+    );
+    assert_eq!(split_key("iqn.x:d.g3.uabc"), ("iqn.x:d.g3.uabc", None), "too short");
+    assert_eq!(
+        split_key("iqn.x:d.g3.u0123456789abcdeg"),
+        ("iqn.x:d.g3.u0123456789abcdeg", None),
+        "not hex"
+    );
+    assert_eq!(
+        split_key("iqn.x:d.u0123456789abcdef"),
+        ("iqn.x:d.u0123456789abcdef", None),
+        "no version before it"
+    );
+    let cfg = |k: Option<&str>| games::Config {
+        update_key: k.map(Into::into),
+        ..Default::default()
+    };
+    assert!(games::key_allowed(&cfg(None), None, "t", "p"), "no key asked");
+    assert!(games::key_allowed(&cfg(Some("abcd")), Some("abcd"), "t", "p"));
+    assert!(!games::key_allowed(&cfg(Some("abcd")), Some("abce"), "t", "p"));
+    assert!(!games::key_allowed(&cfg(Some("abcd")), None, "t", "p"));
+    assert!(!games::key_allowed(&cfg(Some("")), Some(""), "t", "p"), "an empty key opens nothing");
+    assert!(!games::key_allowed(&cfg(Some("")), None, "t", "p"));
+}

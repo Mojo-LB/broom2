@@ -240,15 +240,17 @@ fn configs(st: &SharedState) -> Result<Vec<golden::Config>, String> {
         // "Add hardware" (onboard.rs) running: its VM on this server writes the golden, through 127.0.0.1 (no LAN
         // host can send from the loopback address).
         // Same for the maintenance VM (vmmaint.rs, Maintain in the browser).
-        let (update_ip, update_mac) =
-            if crate::onboard::vm_owns(&g.name) || crate::vmmaint::owns_golden(&g.name) {
-                (Some("127.0.0.1".to_string()), None)
-            } else {
-                (
-                    maint.and_then(|m| ip_of(st, m)),
-                    maint.map(|m| m.mac.to_lowercase()),
-                )
-            };
+        // Loopback alone is not trusted (any program on the server, a VM's guest through QEMU's NAT): that job's
+        // write key must come with the login (games::Config.update_key).
+        let local = crate::onboard::vm_key(&g.name).or_else(|| crate::vmmaint::golden_key(&g.name));
+        let (update_ip, update_mac, update_key) = match local {
+            Some(k) => (Some("127.0.0.1".to_string()), None, Some(k)),
+            None => (
+                maint.and_then(|m| ip_of(st, m)),
+                maint.map(|m| m.mac.to_lowercase()),
+                None,
+            ),
+        };
         out.push(golden::Config {
             disk: crate::iscsid::games::Config {
                 name: g.name.clone(),
@@ -256,6 +258,7 @@ fn configs(st: &SharedState) -> Result<Vec<golden::Config>, String> {
                 path: path.to_string_lossy().into(),
                 update_ip,
                 update_mac,
+                update_key,
                 ram: g.ram,
                 reserve: crate::publish::ram_reserve(st),
                 retain: true,

@@ -440,3 +440,31 @@ fn live_ntfs_mount_refuses_links() {
         assert!(line.contains(o), "{o} missing: {line}");
     }
 }
+
+/// A Windows PE report counts only with the job's token AND from the job's machine (its MAC behind the sender): the
+/// token crosses the LAN in plain-HTTP URLs.
+#[test]
+fn report_needs_token_and_machine() {
+    use super::{from_job_machine, token_matches};
+    assert!(token_matches("abc123", "abc123"));
+    assert!(!token_matches("abc123", "abc124"));
+    assert!(!token_matches("", ""), "no job token: nothing matches");
+    assert!(from_job_machine("52:54:00:aa:bb:01", Some("52-54-00-AA-BB-01")));
+    assert!(!from_job_machine("52:54:00:aa:bb:01", Some("52:54:00:aa:bb:02")), "another PC");
+    assert!(!from_job_machine("52:54:00:aa:bb:01", None), "no ARP entry (not on this LAN)");
+    assert!(!from_job_machine("", None), "a job without a MAC");
+    assert!(!from_job_machine("", Some("")));
+}
+
+/// The server's own update logins carry the job's key in the target name.
+#[test]
+fn local_target_carries_the_key() {
+    let k = super::new_write_key();
+    assert!(k.len() >= 32 && k.bytes().all(|b| b.is_ascii_hexdigit()));
+    assert_ne!(k, super::new_write_key());
+    let t = super::local_target("iqn.x:golden-w11.g7", &k);
+    assert_eq!(
+        crate::iscsid::games::split_key(&t),
+        ("iqn.x:golden-w11.g7", Some(k.as_str()))
+    );
+}

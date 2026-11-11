@@ -48,6 +48,11 @@ pub struct Config {
     /// Its MAC: the update session needs both (an IP alone is set by anyone on the LAN). None = IP only.
     #[serde(default)]
     pub update_mac: Option<String>,
+    /// This server's own update session (a VM of its own: "Add hardware", maintenance in the browser): the secret of
+    /// that one job. The update session must then log in to "<iqn>.g<k>.u<key>" — the loopback address alone is not
+    /// enough (any program on the server, and a VM's guest through QEMU's NAT, sends from it).
+    #[serde(default)]
+    pub update_key: Option<String>,
     /// Serve games.img from a copy in RAM.
     #[serde(default)]
     pub ram: bool,
@@ -274,8 +279,41 @@ fn load(dir: &Path, size: u64) -> Result<(u64, Vec<Layer>), String> {
     Ok((base_ver, layers))
 }
 
+/// A target name as a session gives it → (the disk's target "<iqn>.g<k>", the write key after it if any):
+/// "<iqn>.g<k>.u<key>" is how this server's own update session names it (Config.update_key).
+pub(crate) fn split_key(iqn: &str) -> (&str, Option<&str>) {
+    match iqn.rsplit_once(".u") {
+        Some((t, k))
+            if k.len() >= 16
+                && k.bytes().all(|b| b.is_ascii_hexdigit())
+                && t.rsplit_once(".g").is_some_and(|(_, g)| {
+                    !g.is_empty() && g.bytes().all(|b| b.is_ascii_digit())
+                }) =>
+        {
+            (t, Some(k))
+        }
+        _ => (iqn, None),
+    }
+}
+
+/// The session may write as far as the job's secret goes: no secret asked (a LAN update machine, checked by IP +
+/// MAC), or exactly the one the session's target name carries.
+pub(crate) fn key_allowed(cfg: &Config, given: Option<&str>, name: &str, peer: &str) -> bool {
+    let Some(want) = &cfg.update_key else {
+        return true;
+    };
+    if !want.is_empty() && given.is_some_and(|g| crate::auth::same(g, want)) {
+        return true;
+    }
+    tracing::warn!(
+        "{name}: {peer} logged in to the version being updated without this job's key — read-only"
+    );
+    false
+}
+
 /// The disk and gen `iqn` names, if it is a gen still served.
 fn find<'a>(d: &'a mut HashMap<String, State>, iqn: &str) -> Option<(&'a mut State, u64)> {
+    let (iqn, _) = split_key(iqn);
     d.values_mut().find_map(|s| {
         let k: u64 = iqn
             .strip_prefix(&s.cfg.iqn)?
@@ -410,7 +448,8 @@ impl Registry {
             }
         }
         if let Some(p) = self.cfg_file() {
-            let _ = std::fs::write(p, serde_json::to_vec(&cfgs).unwrap());
+            // Root only: a config can hold a job's write key (Config.update_key).
+            let _ = crate::tls::write_private(&p, &serde_json::to_vec(&cfgs).unwrap());
         }
         if errs.is_empty() {
             Ok(())
@@ -552,8 +591,9 @@ impl Registry {
                 .collect();
             let mut ov = None;
             let label = format!("{} {}", self.what, s.cfg.name);
-            let writer =
-                ver == s.ver && update_allowed(&s.cfg, peer, || super::arp_mac(peer), &label);
+            let writer = ver == s.ver
+                && update_allowed(&s.cfg, peer, || super::arp_mac(peer), &label)
+                && key_allowed(&s.cfg, split_key(iqn).1, &label, peer);
             if writer {
                 if s.update.is_none() {
                     let (ovl, list) = update_files(&s.dir);
