@@ -396,7 +396,13 @@ pub fn prepare(
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let (s_ovl, s_list, s_gen) = files(&dir, "session");
     let (b_ovl, b_list, b_gen) = files(&dir, "base");
-    if promote && read_gen(&s_gen) == Some(ver) && s_ovl.exists() {
+    // Only a first boot's session becomes the base: with a base for this version already there, the session lies on
+    // top of it and holds a guest's writes — never kept, whatever the caller asks.
+    let has_base = read_gen(&b_gen) == Some(ver) && b_ovl.exists();
+    if promote && has_base {
+        tracing::warn!("golden {name}: machine {mac} already has its base on g{ver} — its session is not kept");
+    }
+    if promote && !has_base && read_gen(&s_gen) == Some(ver) && s_ovl.exists() {
         // The base's version file last: a promotion cut off midway leaves a base without one → dropped below.
         remove(&dir, "base");
         let r = std::fs::rename(&s_ovl, &b_ovl).and_then(|_| {

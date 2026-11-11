@@ -211,6 +211,17 @@ fn machine_layers_lifecycle() {
     write(&v, &lun, 4096, b"name=PC11");
     detach(&v);
     assert!(!prepare("w11", mac, true, false, false, None).unwrap().first);
+    // A later session is never kept as the base, even when asked: its writes are gone, the base as it was.
+    let v = attach(&t, pc).unwrap();
+    assert_eq!(&read(&v, &lun, 4096, 9), b"name=PC11");
+    write(&v, &lun, 4096, b"name=EVIL");
+    write(&v, &lun, 8192, b"guest");
+    detach(&v);
+    assert!(!prepare("w11", mac, true, false, false, None).unwrap().first);
+    let v = attach(&t, pc).unwrap();
+    assert_eq!(&read(&v, &lun, 4096, 9), b"name=PC11", "base untouched");
+    assert_ne!(&read(&v, &lun, 8192, 5), b"guest", "session's writes gone");
+    detach(&v);
     // drop_base (renamed / new licence): set up again.
     assert!(prepare("w11", mac, false, true, false, None).unwrap().first);
 

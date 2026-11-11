@@ -765,6 +765,86 @@ fn prepare_games(st: &SharedState, m: &Machine) {
     }
 }
 
+/// A machine's current diskless boot, as the server started it (kept in memory: after a server restart the machines'
+/// first boots simply run again at their next boot).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Boot {
+    /// Unix time the boot was prepared.
+    pub at: u64,
+    /// No base for this golden version: this boot builds it.
+    pub first: bool,
+    /// The agent key was handed out on this boot.
+    pub key_given: bool,
+    /// The machine reported its setup done on this boot.
+    pub done: bool,
+}
+
+/// What a machine asks for during its first boot on a golden version.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Step {
+    /// Its Remote agent key (GET /api/diskless/client/agent-key).
+    Key,
+    /// Its setup kept as its base (POST /api/diskless/client/base-done).
+    Done,
+}
+
+/// How long after a first boot was prepared its setup may ask for the key and report itself done: Windows over
+/// iSCSI, the rename, the agent's files and build take a few minutes; a session that has been used for an hour is
+/// never taken as a base.
+pub(crate) const FIRST_BOOT_S: u64 = 15 * 60;
+
+/// Whether `step` is allowed on boot `b` at `now` — and noted on it. Only a first boot, only within FIRST_BOOT_S of
+/// its start, each step once, the key before "done": otherwise any program in a guest's session (a guest is an
+/// administrator of their machine) could have its session kept as the machine's base — surviving every later
+/// reset — or fetch the key again.
+pub(crate) fn first_boot_step(b: Option<&mut Boot>, now: u64, step: Step) -> Result<(), &'static str> {
+    let b = b.ok_or("the server started no boot of this machine (restarted since?)")?;
+    if !b.first {
+        return Err("not its first boot on this golden version");
+    }
+    if now.saturating_sub(b.at) > FIRST_BOOT_S {
+        return Err("too long after this boot started");
+    }
+    if b.done {
+        return Err("its setup was already reported done on this boot");
+    }
+    match step {
+        Step::Key if b.key_given => return Err("its key was already handed out on this boot"),
+        Step::Key => b.key_given = true,
+        Step::Done => b.done = true,
+    }
+    Ok(())
+}
+
+/// The boots in progress, by golden + MAC.
+static BOOTS: parking_lot::Mutex<std::collections::BTreeMap<String, Boot>> =
+    parking_lot::Mutex::new(std::collections::BTreeMap::new());
+
+fn boot_key(golden: &str, mac: &str) -> String {
+    format!("{golden}\n{}", golden::mac12(mac).unwrap_or_default())
+}
+
+fn note_boot(golden: &str, mac: &str, first: bool) {
+    BOOTS.lock().insert(
+        boot_key(golden, mac),
+        Boot {
+            at: crate::now_secs(),
+            first,
+            key_given: false,
+            done: false,
+        },
+    );
+}
+
+/// `step` on machine `mac`'s current boot of `golden` (see `first_boot_step`).
+fn boot_step(golden: &str, mac: &str, step: Step) -> Result<(), &'static str> {
+    first_boot_step(
+        BOOTS.lock().get_mut(&boot_key(golden, mac)),
+        crate::now_secs(),
+        step,
+    )
+}
+
 /// Machines whose diskless boot is being prepared right now (by MAC): see `boot_diskless`.
 static BOOTING: parking_lot::Mutex<std::collections::BTreeSet<String>> =
     parking_lot::Mutex::new(std::collections::BTreeSet::new());
@@ -869,6 +949,7 @@ pub(crate) fn boot_diskless(
     if promote {
         tracing::info!("golden {name}: {}'s first boot kept as its base", who(m));
     }
+    note_boot(name, &m.mac, p.first);
     let t = machine_target(st, name, m).ok_or("bad MAC")?;
     tracing::info!(
         "golden {name}: {} boots diskless on g{}{}",
@@ -1172,7 +1253,8 @@ pub(crate) fn client_env(v: &serde_json::Value) -> String {
 }
 
 /// POST /api/diskless/client/base-done (public) — the asking machine finished its first-boot setup on its golden version
-/// (and restarts now): that session becomes its base at the next boot.
+/// (and restarts now): that session becomes its base at the next boot. Accepted once, on a first boot, within
+/// FIRST_BOOT_S of its start (`first_boot_step`); anything else is 403 and changes nothing.
 async fn base_done(
     State(st): State<SharedState>,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
@@ -1185,6 +1267,23 @@ async fn base_done(
     let Some((g, x)) = on else {
         return Err(bad("not running a diskless golden"));
     };
+    // Only the boot that builds the base (the daemon has none for this version, and the server started this boot as
+    // a first boot a short while ago), and only once.
+    let why = if x.base_ver.is_some() && x.base_ver == x.session_ver {
+        Err("it already has its base for this golden version")
+    } else {
+        boot_step(&g, &m.mac, Step::Done)
+    };
+    if let Err(why) = why {
+        tracing::warn!(
+            "golden {g}: {} reported its setup done — refused ({why})",
+            who(&m)
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            "not this machine's first boot on its golden version".to_string(),
+        ));
+    }
     set_base_state(
         &st,
         &g,
@@ -1206,8 +1305,10 @@ async fn base_done(
 
 /// GET /api/diskless/client/agent-key (public) — the asking machine's Remote agent key (hex), for broom-diskless.ps1 to
 /// keep in the base it is building: only to a registered machine (its IP with its MAC behind it) on the first boot of
-/// its golden version (the base is built right then and restarts at once). Anything else: 403. The maintenance
-/// machine never gets one: what it writes goes into the golden, which every machine shares.
+/// its golden version (the base is built right then and restarts at once), once per boot and within FIRST_BOOT_S of
+/// its start. The key is a new one for each base (agentauth::hand_to_base): the one in an older base stops working.
+/// Anything else: 403. The maintenance machine never gets one: what it writes goes into the golden, which every
+/// machine shares.
 async fn agent_key(
     State(st): State<SharedState>,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
@@ -1226,6 +1327,9 @@ async fn agent_key(
     };
     if x.base_ver.is_some() && x.base_ver == x.session_ver {
         return refuse("not the first boot of its golden version");
+    }
+    if let Err(why) = boot_step(&g, &m.mac, Step::Key) {
+        return refuse(why);
     }
     let key = crate::agentauth::hand_to_base(&st, &m.mac).map_err(ise)?;
     tracing::info!(

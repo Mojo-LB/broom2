@@ -390,3 +390,37 @@ fn one_boot_in_flight_per_machine() {
     assert!(InFlight::enter("52:54:00:aa:00:01").is_some());
     drop(b);
 }
+
+/// A machine's setup may ask for its key and report itself done only on a first boot, shortly after it started, each
+/// once: a later session (a guest's) is never accepted as a base, and the key is never handed out twice.
+#[test]
+fn first_boot_steps() {
+    let boot = |first| Boot {
+        at: 1000,
+        first,
+        key_given: false,
+        done: false,
+    };
+    // No boot known (server restarted) / not a first boot: nothing.
+    assert!(first_boot_step(None, 1000, Step::Done).is_err());
+    assert!(first_boot_step(None, 1000, Step::Key).is_err());
+    let mut b = boot(false);
+    assert!(first_boot_step(Some(&mut b), 1001, Step::Done).is_err());
+    assert!(first_boot_step(Some(&mut b), 1001, Step::Key).is_err());
+    assert_eq!(b, boot(false), "nothing noted on a refusal");
+    // A first boot: the key once, then done once.
+    let mut b = boot(true);
+    assert_eq!(first_boot_step(Some(&mut b), 1060, Step::Key), Ok(()));
+    assert!(first_boot_step(Some(&mut b), 1061, Step::Key).is_err(), "the key only once");
+    assert_eq!(first_boot_step(Some(&mut b), 1100, Step::Done), Ok(()));
+    assert!(first_boot_step(Some(&mut b), 1101, Step::Done).is_err(), "done only once");
+    assert!(first_boot_step(Some(&mut b), 1102, Step::Key).is_err(), "no key after done");
+    // Without the agent (its setup failed): done alone is fine.
+    let mut b = boot(true);
+    assert_eq!(first_boot_step(Some(&mut b), 1000 + FIRST_BOOT_S, Step::Done), Ok(()));
+    // Too late: a session in use for a while.
+    let mut b = boot(true);
+    assert!(first_boot_step(Some(&mut b), 1001 + FIRST_BOOT_S, Step::Done).is_err());
+    assert!(first_boot_step(Some(&mut b), 1001 + FIRST_BOOT_S, Step::Key).is_err());
+    assert!(!b.done && !b.key_given);
+}

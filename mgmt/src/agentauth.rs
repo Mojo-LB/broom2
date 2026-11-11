@@ -104,13 +104,19 @@ pub(crate) fn fingerprint(st: &SharedState, mac: &str) -> String {
     load(st, mac).map_or(String::new(), |r| fingerprint_of(&r.key))
 }
 
-/// Diskless machines: the key, hex, for the base layer being built on this first boot (made now if none), marked
-/// delivered. The caller checked the machine (IP + MAC) and that this boot builds its base.
+/// Diskless machines: a NEW key, hex, for the base layer being built on this first boot, marked delivered. Each base
+/// gets its own key, handed out once: the key of an older base (which its guests could read) stops working the
+/// moment the next base is built, and no key is ever sent twice. The caller checked the machine (IP + MAC), that
+/// this boot builds its base, and that the key was not handed out on this boot before (diskless::first_boot_step).
 pub(crate) fn hand_to_base(st: &SharedState, mac: &str) -> Result<String, String> {
     crate::db::edit_json(&*st.db, &rec_key(mac), |r: &mut Option<KeyRec>| {
-        let rec = r.get_or_insert_with(fresh);
-        rec.delivered = Some(crate::now_secs());
-        Ok::<_, String>(rec.key.clone())
+        let rec = KeyRec {
+            delivered: Some(crate::now_secs()),
+            ..fresh()
+        };
+        let key = rec.key.clone();
+        *r = Some(rec);
+        Ok::<_, String>(key)
     })?
 }
 
