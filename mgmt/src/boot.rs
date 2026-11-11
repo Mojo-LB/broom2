@@ -430,11 +430,21 @@ pub async fn diskless(
     st.saw_pxe(&mac, Some(&peer));
     let st2 = st.clone();
     let gw = router(&q);
-    let r = tokio::task::spawn_blocking(move || {
-        crate::diskless::boot_diskless(&st2, &name, &m, &peer, gw.as_deref())
-    })
-    .await
-    .unwrap_or_else(|e| Err(e.to_string()));
+    // Every machine is prepared at once, side by side (a room switched on together). Only a machine's own second
+    // request waits — for its first one to end — then it is prepared again: the PC was reset meanwhile.
+    let r = match crate::diskless::is_machine(&m, &peer) {
+        Err(e) => Err(e),
+        Ok(()) => match crate::diskless::Turn::take(&m.mac).await {
+            None => Err("this machine's boot is already being prepared".to_string()),
+            // The turn goes with the work: kept to its end, also when the PC hangs up before the answer.
+            Some(turn) => tokio::task::spawn_blocking(move || {
+                let _turn = turn;
+                crate::diskless::boot_diskless(&st2, &name, &m, &peer, gw.as_deref())
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string())),
+        },
+    };
     script(match r {
         Ok(s) => s,
         Err(e) => {

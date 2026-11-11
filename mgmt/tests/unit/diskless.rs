@@ -379,19 +379,54 @@ fn router_kept_only_when_the_boot_left_it_out() {
     }
 }
 
-/// One boot of a machine is prepared at a time (a guest asking /boot/diskless in a loop holds one worker, not many);
-/// another machine is not held up, and the place is free again afterwards.
-#[test]
-fn one_boot_in_flight_per_machine() {
-    let a = InFlight::enter("52:54:00:AA:00:01").expect("first");
+/// A machine's boots are prepared one after the other: its second request waits for the first and then goes on (the
+/// PC was reset meanwhile), a third at the same moment is turned away (a guest asking in a loop holds one worker).
+/// Other machines never wait: a whole room takes its turns at once.
+#[tokio::test]
+async fn one_boot_at_a_time_per_machine_others_at_once() {
+    use std::time::Duration;
+    let a = Turn::take("52:54:00:AA:00:01").await.expect("first");
+    // The same machine (any case) again: it waits…
+    let mut second = tokio::spawn(Turn::take("52:54:00:aa:00:01"));
     assert!(
-        InFlight::enter("52:54:00:aa:00:01").is_none(),
-        "same machine, any case"
+        tokio::time::timeout(Duration::from_millis(100), &mut second)
+            .await
+            .is_err(),
+        "the second request waits for the first"
     );
-    let b = InFlight::enter("52:54:00:aa:00:02").expect("another machine");
+    // …and a third is not queued.
+    assert!(Turn::take("52:54:00:aa:00:01").await.is_none());
+    // 45 other machines meanwhile: every one has its turn at once, none behind another.
+    let mut room = Vec::new();
+    for i in 0..45 {
+        let t = tokio::time::timeout(
+            Duration::from_secs(1),
+            Turn::take(&format!("52:54:00:bb:00:{i:02x}")),
+        )
+        .await
+        .expect("no machine waits for another");
+        room.push(t.expect("its turn"));
+    }
+    // The first one done → the waiting one goes on, and the machine may queue one more again.
     drop(a);
-    assert!(InFlight::enter("52:54:00:aa:00:01").is_some());
+    let b = tokio::time::timeout(Duration::from_secs(1), second)
+        .await
+        .expect("the second request goes on")
+        .unwrap()
+        .expect("its turn");
+    let mut next = tokio::spawn(Turn::take("52:54:00:aa:00:01"));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut next)
+            .await
+            .is_err()
+    );
+    // A waiting request that goes away (its PC was reset again) gives its place back.
+    next.abort();
+    let _ = next.await;
     drop(b);
+    drop(room);
+    assert!(BOOTING.lock().is_empty(), "nothing kept once all are done");
+    assert!(Turn::take("52:54:00:aa:00:01").await.is_some());
 }
 
 /// A machine's setup may ask for its key and report itself done only on a first boot, shortly after it started, each

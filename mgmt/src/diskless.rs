@@ -859,32 +859,74 @@ fn boot_step(golden: &str, mac: &str, step: Step) -> Result<(), &'static str> {
     )
 }
 
-/// Machines whose diskless boot is being prepared right now (by MAC): see `boot_diskless`.
-static BOOTING: parking_lot::Mutex<std::collections::BTreeSet<String>> =
-    parking_lot::Mutex::new(std::collections::BTreeSet::new());
+/// Seconds a booting machine's last iSCSI sessions get to close (boot_diskless) before its boot is refused.
+const CLOSE_S: u64 = 6;
 
-/// A machine's place in `BOOTING`, given back when dropped.
-pub(crate) struct InFlight(String);
+/// A machine's boot preparations, one after the other (by MAC). Each machine has its own line: a room switched on at
+/// once is prepared side by side, nobody waits for another machine.
+#[derive(Default)]
+struct Line {
+    /// Requests of this machine: the one being prepared + the ones waiting.
+    users: usize,
+    lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+}
 
-impl InFlight {
-    /// None = that machine already has a boot in preparation.
-    pub(crate) fn enter(mac: &str) -> Option<InFlight> {
+static BOOTING: parking_lot::Mutex<std::collections::BTreeMap<String, Line>> =
+    parking_lot::Mutex::new(std::collections::BTreeMap::new());
+
+/// Requests one machine may have here at once: one being prepared, one waiting behind it (the machine was reset while
+/// its boot was being prepared and asks again). More than that is not a PC booting.
+const TURNS: usize = 2;
+
+/// A machine's turn to have its boot prepared, given back when dropped.
+pub(crate) struct Turn {
+    mac: String,
+    held: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl Turn {
+    /// Wait for machine `mac`'s turn (at once when none of its boots is being prepared). None = it already has one
+    /// being prepared and one waiting: a guest asking again and again holds one worker, never many.
+    pub(crate) async fn take(mac: &str) -> Option<Turn> {
         let k = mac.to_ascii_lowercase();
-        // The guard is made only for the one that got in (and after the lock is let go): dropping one frees the place.
-        let got = BOOTING.lock().insert(k.clone());
-        got.then(|| InFlight(k))
+        let lock = {
+            let mut all = BOOTING.lock();
+            let l = all.entry(k.clone()).or_default();
+            if l.users >= TURNS {
+                return None;
+            }
+            l.users += 1;
+            l.lock.clone()
+        };
+        // Counted from here: given back by Drop also when this request goes away while it waits (the PC was reset).
+        let mut t = Turn { mac: k, held: None };
+        t.held = Some(lock.lock_owned().await);
+        Some(t)
     }
 }
 
-impl Drop for InFlight {
+impl Drop for Turn {
     fn drop(&mut self) {
-        BOOTING.lock().remove(&self.0);
+        self.held.take(); // the next one of this machine goes on
+        let mut all = BOOTING.lock();
+        if let Some(l) = all.get_mut(&self.mac) {
+            l.users -= 1;
+            if l.users == 0 {
+                all.remove(&self.mac);
+            }
+        }
     }
+}
+
+/// `peer` is machine `m` itself, at its fixed IP (boot.rs, before the machine takes its turn).
+pub(crate) fn is_machine(m: &Machine, peer: &str) -> Result<(), String> {
+    from_machine(m, m.ip.as_deref(), peer)
 }
 
 /// Machine `m` boots golden `name` diskless: its earlier sessions closed, its session layer reset (its base kept while
 /// the golden version stays), then iPXE boots its own target (the iBFT tells Windows / Linux where its disk is).
-/// Blocking.
+/// Blocking — and one at a time per machine: the caller holds the machine's `Turn` (it can wait several seconds for
+/// the machine's last sessions to close).
 pub(crate) fn boot_diskless(
     st: &SharedState,
     name: &str,
@@ -893,9 +935,7 @@ pub(crate) fn boot_diskless(
     router: Option<&str>,
 ) -> Result<String, String> {
     from_machine(m, m.ip.as_deref(), peer)?;
-    // One boot of a machine at a time: this request can wait several seconds for the machine's last sessions to
-    // close, and a machine asking again and again (a guest's script) would hold a worker each time.
-    let _one = InFlight::enter(&m.mac).ok_or("this machine's boot is already being prepared")?;
+    let began = std::time::Instant::now();
     let g = goldens(st)
         .into_iter()
         .find(|g| g.name == name)
@@ -928,8 +968,10 @@ pub(crate) fn boot_diskless(
         m.license_gen,
         &akey,
     );
-    let mut p = None;
-    for i in 0..30 {
+    // Its last sessions were just told to close (a reset PC never logged out): that takes a moment — asked again
+    // soon, then less often, for up to CLOSE_S. Only this machine waits here; the others are prepared meanwhile.
+    let mut pause = std::time::Duration::from_millis(10);
+    let p = loop {
         match crate::iscsi::diskless_prepare(
             name,
             &m.mac,
@@ -937,17 +979,14 @@ pub(crate) fn boot_diskless(
             drop_base,
             crate::pins::pin_for(&g.pins, m.grp.as_deref()),
         ) {
-            Ok(x) => {
-                p = Some(x);
-                break;
-            }
-            Err(e) if e.contains("still connected") && i < 29 => {
-                std::thread::sleep(std::time::Duration::from_millis(200))
+            Ok(x) => break x,
+            Err(e) if e.contains("still connected") && began.elapsed().as_secs() < CLOSE_S => {
+                std::thread::sleep(pause);
+                pause = (pause * 2).min(std::time::Duration::from_millis(200));
             }
             Err(e) => return Err(e),
         }
-    }
-    let p = p.ok_or("still connected")?;
+    };
     // Its own copy of each games disk it gets (Windows): the newest version again, last boot's writes dropped.
     if g.os == "windows" {
         prepare_games(st, m);
@@ -966,14 +1005,15 @@ pub(crate) fn boot_diskless(
     note_boot(name, &m.mac, p.first);
     let t = machine_target(st, name, m).ok_or("bad MAC")?;
     tracing::info!(
-        "golden {name}: {} boots diskless on g{}{}",
+        "golden {name}: {} boots diskless on g{}{} — prepared in {} ms",
         who(m),
         p.ver,
         if p.first {
             " (first boot on this version)"
         } else {
             ""
-        }
+        },
+        began.elapsed().as_millis()
     );
     let gw = ibft_gateway_line(&g.os, &st.db.get_config("dhcp_server_ip", ""), peer);
     note_router(&m.mac, gw, router);

@@ -211,6 +211,11 @@ PC down.
 - **Machines:** registered machines of the golden's groups with a **fixed IP**. Each gets its own disk (target
   `<golden>.m<mac>`, answered only from its IP with its MAC behind it): the golden, then the machine's own **base**
   layer, then a **session** layer that is wiped at every PXE boot.
+- **A room switched on at once:** every machine's boot is prepared the moment it asks, side by side — none waits
+  for another, however many start together. What they then share is the server itself (its disks, its link):
+  reads and writes of all machines are served in turn, so a busy server makes every PC a little slower instead
+  of turning some away. Only a machine's own second request waits for its first (the PC was reset mid-boot). The
+  log tells how long each one took (`… boots diskless on g3 — prepared in 40 ms`).
 - **Storage** (Diskless page): goldens, the machines' layers and the ISO library each go on broom's own folder or a
   server disk. Layers are sparse files of 64 KB blocks: a machine costs what it writes.
 - **ISO library:** upload installer ISOs (Windows or Linux); they are served read-only as a DVD-ROM.
