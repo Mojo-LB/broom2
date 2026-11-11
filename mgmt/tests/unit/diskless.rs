@@ -265,7 +265,9 @@ fn linux_goldens_boot_their_distribution_loader() {
 #[test]
 fn ubuntu_installer_boot() {
     let s = casper_script("ubu", "iscsi:10.20.0.1::::iqn.x:golden-ubu.g3", "10.20.0.1");
-    let lines: Vec<&str> = s.lines().collect();
+    // iPXE's leftover images (the EFI autoexec.ipxe) freed before the kernel, as for the stage.
+    assert!(s.starts_with("imgfree\n"), "{s}");
+    let lines: Vec<&str> = s.lines().skip(1).collect();
     assert_eq!(
         lines[0],
         "sanhook --drive 0x80 iscsi:10.20.0.1::::iqn.x:golden-ubu.g3 || goto failed"
@@ -375,4 +377,16 @@ fn router_kept_only_when_the_boot_left_it_out() {
         note_router(mac, "set net0/gateway 0.0.0.0\n", bad);
         assert_eq!(router_of(mac), None, "{bad:?}");
     }
+}
+
+/// One boot of a machine is prepared at a time (a guest asking /boot/diskless in a loop holds one worker, not many);
+/// another machine is not held up, and the place is free again afterwards.
+#[test]
+fn one_boot_in_flight_per_machine() {
+    let a = InFlight::enter("52:54:00:AA:00:01").expect("first");
+    assert!(InFlight::enter("52:54:00:aa:00:01").is_none(), "same machine, any case");
+    let b = InFlight::enter("52:54:00:aa:00:02").expect("another machine");
+    drop(a);
+    assert!(InFlight::enter("52:54:00:aa:00:01").is_some());
+    drop(b);
 }

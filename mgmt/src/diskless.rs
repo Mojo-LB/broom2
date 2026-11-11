@@ -699,8 +699,10 @@ pub(crate) fn casper_files(
 /// iPXE body: the golden attached as drive 0x80, Ubuntu's installer booted from the ISO's own kernel + initrd.
 pub(crate) fn casper_script(name: &str, disk: &str, srv: &str) -> String {
     let http = format!("http://{srv}");
+    // iPXE's leftover images freed first (boot.rs FREE_IMAGES): it would hand them to the kernel as initrd.
+    let free = crate::boot::FREE_IMAGES;
     format!(
-        "sanhook --drive 0x80 {disk} || goto failed\n\
+        "{free}sanhook --drive 0x80 {disk} || goto failed\n\
          kernel /boot/iso/{name}/vmlinuz initrd=initrd ip=dhcp url={http}/boot/iso/{name}/installer.iso \
          cloud-config-url=/dev/null ds=nocloud;s={http}/boot/nocloud/{name}/ --- || goto failed\n\
          initrd --name initrd /boot/iso/{name}/initrd || goto failed\n\
@@ -763,6 +765,29 @@ fn prepare_games(st: &SharedState, m: &Machine) {
     }
 }
 
+/// Machines whose diskless boot is being prepared right now (by MAC): see `boot_diskless`.
+static BOOTING: parking_lot::Mutex<std::collections::BTreeSet<String>> =
+    parking_lot::Mutex::new(std::collections::BTreeSet::new());
+
+/// A machine's place in `BOOTING`, given back when dropped.
+pub(crate) struct InFlight(String);
+
+impl InFlight {
+    /// None = that machine already has a boot in preparation.
+    pub(crate) fn enter(mac: &str) -> Option<InFlight> {
+        let k = mac.to_ascii_lowercase();
+        // The guard is made only for the one that got in (and after the lock is let go): dropping one frees the place.
+        let got = BOOTING.lock().insert(k.clone());
+        got.then(|| InFlight(k))
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        BOOTING.lock().remove(&self.0);
+    }
+}
+
 /// Machine `m` boots golden `name` diskless: its earlier sessions closed, its session layer reset (its base kept while
 /// the golden version stays), then iPXE boots its own target (the iBFT tells Windows / Linux where its disk is).
 /// Blocking.
@@ -774,6 +799,9 @@ pub(crate) fn boot_diskless(
     router: Option<&str>,
 ) -> Result<String, String> {
     from_machine(m, m.ip.as_deref(), peer)?;
+    // One boot of a machine at a time: this request can wait several seconds for the machine's last sessions to
+    // close, and a machine asking again and again (a guest's script) would hold a worker each time.
+    let _one = InFlight::enter(&m.mac).ok_or("this machine's boot is already being prepared")?;
     let g = goldens(st)
         .into_iter()
         .find(|g| g.name == name)
