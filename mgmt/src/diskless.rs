@@ -52,6 +52,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/diskless/save", post(save))
         .route("/api/diskless/discard", post(discard))
         .route("/api/diskless/volume", post(set_volume))
+        .route("/api/diskless/room", post(set_room))
         .route("/api/diskless/iso/upload-start", post(iso_start))
         .route(
             "/api/diskless/iso/upload-chunk",
@@ -230,6 +231,8 @@ pub(crate) fn ip_of(st: &SharedState, m: &Machine) -> Option<String> {
 fn configs(st: &SharedState) -> Result<Vec<golden::Config>, String> {
     let wb = dir_of(st, "writeback")?;
     let all = st.db.machines().map_err(|e| e.to_string())?;
+    // (most bytes one machine may hold per disk and session, % of the drive kept free): see "room" below.
+    let room = (pc_gb(st) << 30, free_pct(st));
     let mut out = Vec::new();
     for g in goldens(st) {
         let path = golden_img(st, &g.name)?;
@@ -240,15 +243,17 @@ fn configs(st: &SharedState) -> Result<Vec<golden::Config>, String> {
         // "Add hardware" (onboard.rs) running: its VM on this server writes the golden, through 127.0.0.1 (no LAN
         // host can send from the loopback address).
         // Same for the maintenance VM (vmmaint.rs, Maintain in the browser).
-        let (update_ip, update_mac) =
-            if crate::onboard::vm_owns(&g.name) || crate::vmmaint::owns_golden(&g.name) {
-                (Some("127.0.0.1".to_string()), None)
-            } else {
-                (
-                    maint.and_then(|m| ip_of(st, m)),
-                    maint.map(|m| m.mac.to_lowercase()),
-                )
-            };
+        // Loopback alone is not trusted (any program on the server, a VM's guest through QEMU's NAT): that job's
+        // write key must come with the login (games::Config.update_key).
+        let local = crate::onboard::vm_key(&g.name).or_else(|| crate::vmmaint::golden_key(&g.name));
+        let (update_ip, update_mac, update_key) = match local {
+            Some(k) => (Some("127.0.0.1".to_string()), None, Some(k)),
+            None => (
+                maint.and_then(|m| ip_of(st, m)),
+                maint.map(|m| m.mac.to_lowercase()),
+                None,
+            ),
+        };
         out.push(golden::Config {
             disk: crate::iscsid::games::Config {
                 name: g.name.clone(),
@@ -256,9 +261,10 @@ fn configs(st: &SharedState) -> Result<Vec<golden::Config>, String> {
                 path: path.to_string_lossy().into(),
                 update_ip,
                 update_mac,
+                update_key,
                 ram: g.ram,
                 reserve: crate::publish::ram_reserve(st),
-                retain: true,
+                retain: crate::pins::keep(st),
                 min_free_pct: crate::pins::min_free_pct(st),
                 keep_from: crate::pins::keep_from(&g.pins),
             },
@@ -271,6 +277,8 @@ fn configs(st: &SharedState) -> Result<Vec<golden::Config>, String> {
                 })
                 .collect(),
             games: false,
+            session_max: room.0,
+            free_pct: room.1,
         });
     }
     // Games disks for the diskless Windows machines: each its own copy (golden.rs Config.games), its writes kept on
@@ -296,6 +304,8 @@ fn configs(st: &SharedState) -> Result<Vec<golden::Config>, String> {
             disk: c,
             machines,
             games: true,
+            session_max: room.0,
+            free_pct: room.1,
         });
     }
     Ok(out)
@@ -699,8 +709,10 @@ pub(crate) fn casper_files(
 /// iPXE body: the golden attached as drive 0x80, Ubuntu's installer booted from the ISO's own kernel + initrd.
 pub(crate) fn casper_script(name: &str, disk: &str, srv: &str) -> String {
     let http = format!("http://{srv}");
+    // iPXE's leftover images freed first (boot.rs FREE_IMAGES): it would hand them to the kernel as initrd.
+    let free = crate::boot::FREE_IMAGES;
     format!(
-        "sanhook --drive 0x80 {disk} || goto failed\n\
+        "{free}sanhook --drive 0x80 {disk} || goto failed\n\
          kernel /boot/iso/{name}/vmlinuz initrd=initrd ip=dhcp url={http}/boot/iso/{name}/installer.iso \
          cloud-config-url=/dev/null ds=nocloud;s={http}/boot/nocloud/{name}/ --- || goto failed\n\
          initrd --name initrd /boot/iso/{name}/initrd || goto failed\n\
@@ -763,9 +775,158 @@ fn prepare_games(st: &SharedState, m: &Machine) {
     }
 }
 
+/// A machine's current diskless boot, as the server started it (kept in memory: after a server restart the machines'
+/// first boots simply run again at their next boot).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Boot {
+    /// Unix time the boot was prepared.
+    pub at: u64,
+    /// No base for this golden version: this boot builds it.
+    pub first: bool,
+    /// The agent key was handed out on this boot.
+    pub key_given: bool,
+    /// The machine reported its setup done on this boot.
+    pub done: bool,
+}
+
+/// What a machine asks for during its first boot on a golden version.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Step {
+    /// Its Remote agent key (GET /api/diskless/client/agent-key).
+    Key,
+    /// Its setup kept as its base (POST /api/diskless/client/base-done).
+    Done,
+}
+
+/// How long after a first boot was prepared its setup may ask for the key and report itself done: Windows over
+/// iSCSI, the rename, the agent's files and build take a few minutes; a session that has been used for an hour is
+/// never taken as a base.
+pub(crate) const FIRST_BOOT_S: u64 = 15 * 60;
+
+/// Whether `step` is allowed on boot `b` at `now` — and noted on it. Only a first boot, only within FIRST_BOOT_S of
+/// its start, each step once, the key before "done": otherwise any program in a guest's session (a guest is an
+/// administrator of their machine) could have its session kept as the machine's base — surviving every later
+/// reset — or fetch the key again.
+pub(crate) fn first_boot_step(
+    b: Option<&mut Boot>,
+    now: u64,
+    step: Step,
+) -> Result<(), &'static str> {
+    let b = b.ok_or("the server started no boot of this machine (restarted since?)")?;
+    if !b.first {
+        return Err("not its first boot on this golden version");
+    }
+    if now.saturating_sub(b.at) > FIRST_BOOT_S {
+        return Err("too long after this boot started");
+    }
+    if b.done {
+        return Err("its setup was already reported done on this boot");
+    }
+    match step {
+        Step::Key if b.key_given => return Err("its key was already handed out on this boot"),
+        Step::Key => b.key_given = true,
+        Step::Done => b.done = true,
+    }
+    Ok(())
+}
+
+/// The boots in progress, by golden + MAC.
+static BOOTS: parking_lot::Mutex<std::collections::BTreeMap<String, Boot>> =
+    parking_lot::Mutex::new(std::collections::BTreeMap::new());
+
+fn boot_key(golden: &str, mac: &str) -> String {
+    format!("{golden}\n{}", golden::mac12(mac).unwrap_or_default())
+}
+
+fn note_boot(golden: &str, mac: &str, first: bool) {
+    BOOTS.lock().insert(
+        boot_key(golden, mac),
+        Boot {
+            at: crate::now_secs(),
+            first,
+            key_given: false,
+            done: false,
+        },
+    );
+}
+
+/// `step` on machine `mac`'s current boot of `golden` (see `first_boot_step`).
+fn boot_step(golden: &str, mac: &str, step: Step) -> Result<(), &'static str> {
+    first_boot_step(
+        BOOTS.lock().get_mut(&boot_key(golden, mac)),
+        crate::now_secs(),
+        step,
+    )
+}
+
+/// Seconds a booting machine's last iSCSI sessions get to close (boot_diskless) before its boot is refused.
+const CLOSE_S: u64 = 6;
+
+/// A machine's boot preparations, one after the other (by MAC). Each machine has its own line: a room switched on at
+/// once is prepared side by side, nobody waits for another machine.
+#[derive(Default)]
+struct Line {
+    /// Requests of this machine: the one being prepared + the ones waiting.
+    users: usize,
+    lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+}
+
+static BOOTING: parking_lot::Mutex<std::collections::BTreeMap<String, Line>> =
+    parking_lot::Mutex::new(std::collections::BTreeMap::new());
+
+/// Requests one machine may have here at once: one being prepared, one waiting behind it (the machine was reset while
+/// its boot was being prepared and asks again). More than that is not a PC booting.
+const TURNS: usize = 2;
+
+/// A machine's turn to have its boot prepared, given back when dropped.
+pub(crate) struct Turn {
+    mac: String,
+    held: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl Turn {
+    /// Wait for machine `mac`'s turn (at once when none of its boots is being prepared). None = it already has one
+    /// being prepared and one waiting: a guest asking again and again holds one worker, never many.
+    pub(crate) async fn take(mac: &str) -> Option<Turn> {
+        let k = mac.to_ascii_lowercase();
+        let lock = {
+            let mut all = BOOTING.lock();
+            let l = all.entry(k.clone()).or_default();
+            if l.users >= TURNS {
+                return None;
+            }
+            l.users += 1;
+            l.lock.clone()
+        };
+        // Counted from here: given back by Drop also when this request goes away while it waits (the PC was reset).
+        let mut t = Turn { mac: k, held: None };
+        t.held = Some(lock.lock_owned().await);
+        Some(t)
+    }
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        self.held.take(); // the next one of this machine goes on
+        let mut all = BOOTING.lock();
+        if let Some(l) = all.get_mut(&self.mac) {
+            l.users -= 1;
+            if l.users == 0 {
+                all.remove(&self.mac);
+            }
+        }
+    }
+}
+
+/// `peer` is machine `m` itself, at its fixed IP (boot.rs, before the machine takes its turn).
+pub(crate) fn is_machine(m: &Machine, peer: &str) -> Result<(), String> {
+    from_machine(m, m.ip.as_deref(), peer)
+}
+
 /// Machine `m` boots golden `name` diskless: its earlier sessions closed, its session layer reset (its base kept while
 /// the golden version stays), then iPXE boots its own target (the iBFT tells Windows / Linux where its disk is).
-/// Blocking.
+/// Blocking — and one at a time per machine: the caller holds the machine's `Turn` (it can wait several seconds for
+/// the machine's last sessions to close).
 pub(crate) fn boot_diskless(
     st: &SharedState,
     name: &str,
@@ -774,6 +935,7 @@ pub(crate) fn boot_diskless(
     router: Option<&str>,
 ) -> Result<String, String> {
     from_machine(m, m.ip.as_deref(), peer)?;
+    let began = std::time::Instant::now();
     let g = goldens(st)
         .into_iter()
         .find(|g| g.name == name)
@@ -806,8 +968,10 @@ pub(crate) fn boot_diskless(
         m.license_gen,
         &akey,
     );
-    let mut p = None;
-    for i in 0..30 {
+    // Its last sessions were just told to close (a reset PC never logged out): that takes a moment — asked again
+    // soon, then less often, for up to CLOSE_S. Only this machine waits here; the others are prepared meanwhile.
+    let mut pause = std::time::Duration::from_millis(10);
+    let p = loop {
         match crate::iscsi::diskless_prepare(
             name,
             &m.mac,
@@ -815,17 +979,14 @@ pub(crate) fn boot_diskless(
             drop_base,
             crate::pins::pin_for(&g.pins, m.grp.as_deref()),
         ) {
-            Ok(x) => {
-                p = Some(x);
-                break;
-            }
-            Err(e) if e.contains("still connected") && i < 29 => {
-                std::thread::sleep(std::time::Duration::from_millis(200))
+            Ok(x) => break x,
+            Err(e) if e.contains("still connected") && began.elapsed().as_secs() < CLOSE_S => {
+                std::thread::sleep(pause);
+                pause = (pause * 2).min(std::time::Duration::from_millis(200));
             }
             Err(e) => return Err(e),
         }
-    }
-    let p = p.ok_or("still connected")?;
+    };
     // Its own copy of each games disk it gets (Windows): the newest version again, last boot's writes dropped.
     if g.os == "windows" {
         prepare_games(st, m);
@@ -841,16 +1002,18 @@ pub(crate) fn boot_diskless(
     if promote {
         tracing::info!("golden {name}: {}'s first boot kept as its base", who(m));
     }
+    note_boot(name, &m.mac, p.first);
     let t = machine_target(st, name, m).ok_or("bad MAC")?;
     tracing::info!(
-        "golden {name}: {} boots diskless on g{}{}",
+        "golden {name}: {} boots diskless on g{}{} — prepared in {} ms",
         who(m),
         p.ver,
         if p.first {
             " (first boot on this version)"
         } else {
             ""
-        }
+        },
+        began.elapsed().as_millis()
     );
     let gw = ibft_gateway_line(&g.os, &st.db.get_config("dhcp_server_ip", ""), peer);
     note_router(&m.mac, gw, router);
@@ -1144,7 +1307,8 @@ pub(crate) fn client_env(v: &serde_json::Value) -> String {
 }
 
 /// POST /api/diskless/client/base-done (public) — the asking machine finished its first-boot setup on its golden version
-/// (and restarts now): that session becomes its base at the next boot.
+/// (and restarts now): that session becomes its base at the next boot. Accepted once, on a first boot, within
+/// FIRST_BOOT_S of its start (`first_boot_step`); anything else is 403 and changes nothing.
 async fn base_done(
     State(st): State<SharedState>,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
@@ -1157,6 +1321,23 @@ async fn base_done(
     let Some((g, x)) = on else {
         return Err(bad("not running a diskless golden"));
     };
+    // Only the boot that builds the base (the daemon has none for this version, and the server started this boot as
+    // a first boot a short while ago), and only once.
+    let why = if x.base_ver.is_some() && x.base_ver == x.session_ver {
+        Err("it already has its base for this golden version")
+    } else {
+        boot_step(&g, &m.mac, Step::Done)
+    };
+    if let Err(why) = why {
+        tracing::warn!(
+            "golden {g}: {} reported its setup done — refused ({why})",
+            who(&m)
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            "not this machine's first boot on its golden version".to_string(),
+        ));
+    }
     set_base_state(
         &st,
         &g,
@@ -1178,8 +1359,10 @@ async fn base_done(
 
 /// GET /api/diskless/client/agent-key (public) — the asking machine's Remote agent key (hex), for broom-diskless.ps1 to
 /// keep in the base it is building: only to a registered machine (its IP with its MAC behind it) on the first boot of
-/// its golden version (the base is built right then and restarts at once). Anything else: 403. The maintenance
-/// machine never gets one: what it writes goes into the golden, which every machine shares.
+/// its golden version (the base is built right then and restarts at once), once per boot and within FIRST_BOOT_S of
+/// its start. The key is a new one for each base (agentauth::hand_to_base): the one in an older base stops working.
+/// Anything else: 403. The maintenance machine never gets one: what it writes goes into the golden, which every
+/// machine shares.
 async fn agent_key(
     State(st): State<SharedState>,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
@@ -1198,6 +1381,9 @@ async fn agent_key(
     };
     if x.base_ver.is_some() && x.base_ver == x.session_ver {
         return refuse("not the first boot of its golden version");
+    }
+    if let Err(why) = boot_step(&g, &m.mac, Step::Key) {
+        return refuse(why);
     }
     let key = crate::agentauth::hand_to_base(&st, &m.mac).map_err(ise)?;
     tracing::info!(
@@ -1261,6 +1447,7 @@ async fn status(State(st): State<SharedState>) -> Result<Json<serde_json::Value>
         "goldens": list,
         "isos": isos(&st),
         "places": places,
+        "room": {"pc_gb": pc_gb(&st), "free_pct": free_pct(&st), "fair_gb": crate::iscsid::overlay::FAIR >> 30},
         "machines": machines,
         // The address the machines reach the server at (boot LAN), for the commands shown on the page.
         "server": st.db.get_config("dhcp_server_ip", ""),
@@ -1589,6 +1776,83 @@ async fn discard(
     .map_err(ise)?
     .map_err(|e| (StatusCode::CONFLICT, e))?;
     tracing::info!("golden {}: maintenance work discarded", b.name);
+    Ok(ok())
+}
+
+// ---------- room for the machines' writes ----------
+// A diskless machine's writes stay on the server until its next boot (its session layer, its copy of each games disk),
+// all on the writeback drive. Two settings bound them (iscsid/overlay.rs Limit), both generous by default — installing
+// a game mid-session must simply work while there is room:
+// - `diskless_pc_gb`: the most one machine may write to one disk in one session; 0 (the default) = no limit of its own.
+// - `diskless_free_pct`: the drive keeps this % free (default 5); below it only machines holding less than 8 GB still
+//   get new room, so the one big writer stops and the room goes on. 0 = no reserve.
+
+const PC_GB_KEY: &str = "diskless_pc_gb";
+const FREE_PCT_KEY: &str = "diskless_free_pct";
+const FREE_PCT_DEFAULT: u8 = 5;
+/// Largest per-machine limit that can be set (GB).
+pub(crate) const PC_GB_MAX: u64 = 100_000;
+
+/// The most one machine may write to one disk in one session, GB (0 = no limit of its own).
+pub(crate) fn pc_gb(st: &SharedState) -> u64 {
+    st.db
+        .get_config(PC_GB_KEY, "0")
+        .parse::<u64>()
+        .ok()
+        .filter(|g| *g <= PC_GB_MAX)
+        .unwrap_or(0)
+}
+
+/// The % of the writeback drive kept free for everyone (0 = no reserve).
+pub(crate) fn free_pct(st: &SharedState) -> u8 {
+    st.db
+        .get_config(FREE_PCT_KEY, "")
+        .parse::<u8>()
+        .ok()
+        .filter(|p| *p <= 50)
+        .unwrap_or(FREE_PCT_DEFAULT)
+}
+
+#[derive(Deserialize)]
+struct RoomBody {
+    pc_gb: u64,
+    free_pct: u8,
+}
+
+/// POST /api/diskless/room {pc_gb, free_pct} (owner) — the room for the machines' writes (see above). Machines get a
+/// change at their next boot.
+async fn set_room(
+    State(st): State<SharedState>,
+    Json(b): Json<RoomBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if b.pc_gb > PC_GB_MAX {
+        return Err(bad(format!(
+            "limit per machine: 0 (none) to {PC_GB_MAX} GB"
+        )));
+    }
+    if b.free_pct > 50 {
+        return Err(bad("kept free: 0 (no reserve) to 50 %"));
+    }
+    st.db
+        .set_config(PC_GB_KEY, &b.pc_gb.to_string())
+        .map_err(ise)?;
+    st.db
+        .set_config(FREE_PCT_KEY, &b.free_pct.to_string())
+        .map_err(ise)?;
+    let st2 = st.clone();
+    tokio::task::spawn_blocking(move || sync(&st2))
+        .await
+        .map_err(ise)?
+        .map_err(ise)?;
+    tracing::info!(
+        "diskless: a machine may write {} per session; the drive keeps {}% free",
+        if b.pc_gb == 0 {
+            "without a limit of its own".to_string()
+        } else {
+            format!("up to {} GB", b.pc_gb)
+        },
+        b.free_pct
+    );
     Ok(ok())
 }
 

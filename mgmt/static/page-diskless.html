@@ -15,8 +15,8 @@
     <div id="vm_form" class="d-flex flex-wrap gap-3 align-items-end">
       <div><label class="form-label small mb-1" for="vm_golden">Golden</label><select class="form-select form-select-sm" id="vm_golden"></select></div>
       <div><span class="form-label small mb-1 d-block">Games disks (writable)</span><div id="vm_games" class="d-flex flex-wrap gap-3 small"></div></div>
-      <div class="form-check mb-1" data-owner><input class="form-check-input" type="checkbox" id="vm_keep"><label class="form-check-label small" for="vm_keep">Keep Windows changes</label></div>
-      <button class="btn btn-sm btn-primary" data-click="vmStart">Start VM</button>
+      <div class="form-check mb-1" data-perm="maintain"><input class="form-check-input" type="checkbox" id="vm_keep"><label class="form-check-label small" for="vm_keep">Keep Windows changes</label></div>
+      <button class="btn btn-sm btn-primary" data-perm="vm" data-click="vmStart">Start VM</button>
     </div>
     <span id="vm_msg" class="msg"></span>
     <div id="vm_problem" class="small text-danger"></div>
@@ -35,9 +35,9 @@
     <div class="d-flex flex-wrap gap-2 align-items-end" data-owner>
       <div><label class="form-label small mb-1" for="ob_golden">Golden</label><select class="form-select form-select-sm" id="ob_golden"></select></div>
       <div><label class="form-label small mb-1" for="ob_machine">PC with the new card</label><select class="form-select form-select-sm" id="ob_machine"></select></div>
-      <button class="btn btn-sm btn-primary" data-click="startOnboard">Start</button>
-      <button class="btn btn-sm btn-outline-secondary" data-click="cancelOnboard">Cancel</button>
-      <button class="btn btn-sm btn-outline-secondary" data-click="retryOnboard" title="run the server side again with the cards the PC already reported">Retry</button>
+      <button class="btn btn-sm btn-primary" data-perm="maintain" data-click="startOnboard">Start</button>
+      <button class="btn btn-sm btn-outline-secondary" data-perm="maintain" data-click="cancelOnboard">Cancel</button>
+      <button class="btn btn-sm btn-outline-secondary" data-perm="maintain" data-click="retryOnboard" title="run the server side again with the cards the PC already reported">Retry</button>
       <span id="ob_msg" class="msg align-self-center"></span>
     </div>
     <div id="ob_missing" class="small text-danger mt-2"></div>
@@ -78,9 +78,18 @@
   <div class="card card-body mb-3" data-owner>
     <h2 class="h6 text-uppercase text-body-secondary mb-3">Where things are kept</h2>
     <div id="dl_places" class="d-flex flex-column gap-2"></div>
-    <div class="d-flex flex-wrap gap-2 align-items-center mt-3"><span>Old versions of goldens and iSCSI disks are kept until a drive has less than</span>
-      <input class="form-control form-control-sm" id="ver_pct" type="number" min="1" max="90" style="width:80px"> % free; then the oldest go (never one a group is held on).
+    <div class="d-flex flex-wrap gap-2 align-items-center mt-3">
+      <label class="form-check mb-0"><input class="form-check-input" type="checkbox" id="ver_keep"> <span class="form-check-label">Keep older versions of goldens and iSCSI disks</span></label>
+      <span>until a drive has less than</span>
+      <input class="form-control form-control-sm" id="ver_pct" type="number" min="1" max="90" style="width:80px"> % free; then the oldest go.
       <button class="btn btn-sm btn-outline-primary" data-click="verKeepFree">Save</button> <span id="ver_msg" class="msg"></span></div>
+    <div class="small text-body-secondary mt-1">Off (the default): once the machines have restarted onto the newest version, older ones are merged away. A version a group is held on is always kept, with every newer one.</div>
+    <div class="d-flex flex-wrap gap-2 align-items-center mt-3">
+      <span>A machine's writes of one session (kept on the machines' layers drive until its next start): at most</span>
+      <input class="form-control form-control-sm" id="room_gb" type="number" min="0" style="width:90px"> GB per disk (0 = no limit of its own); the drive keeps
+      <input class="form-control form-control-sm" id="room_pct" type="number" min="0" max="50" style="width:70px"> % free.
+      <button class="btn btn-sm btn-outline-primary" data-click="setRoom">Save</button> <span id="room_msg" class="msg"></span></div>
+    <div class="small text-body-secondary mt-1" id="room_note"></div>
     <div class="small text-body-secondary mt-2">Server disks are added on the Server page. A place can change only while it is empty.</div>
     <span id="dl_pmsg" class="msg"></span>
   </div>

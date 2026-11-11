@@ -82,6 +82,46 @@ fn net_setup() {
     ));
 }
 
+/// A PC on the test LAN with its own network card: what a diskless machine is to the server (its IP, and by ARP its
+/// MAC).
+pub struct Pc {
+    pub mac: String,
+    pub mac6: [u8; 6],
+    pub ip: std::net::Ipv4Addr,
+    pub name: String,
+}
+
+/// `n` (≤ 80) more PCs next to this host, 10.99.0.11 onwards: one macvlan card each on the LAN's cable (cli0), with
+/// its own MAC and address. What a client sends from a PC's address (clients::connect) leaves through that PC's card,
+/// and only that card answers ARP for it — the server sees `n` machines, not one host with many addresses.
+pub fn add_pcs(n: usize) -> Vec<Pc> {
+    assert!(n <= 80, "10.99.0.11-.90, under the DHCP pool");
+    let mut script = String::from(
+        "echo 1 > /proc/sys/net/ipv4/conf/all/arp_ignore
+         echo 2 > /proc/sys/net/ipv4/conf/all/arp_announce\n",
+    );
+    let pcs: Vec<Pc> = (0..n)
+        .map(|i| Pc {
+            mac: format!("02:00:00:00:01:{i:02x}"),
+            mac6: [2, 0, 0, 0, 1, i as u8],
+            ip: std::net::Ipv4Addr::new(10, 99, 0, 11 + i as u8),
+            name: format!("pc{:02}", i + 1),
+        })
+        .collect();
+    for (i, pc) in pcs.iter().enumerate() {
+        let (dev, table, ip, mac) = (format!("pc{i}"), 100 + i, pc.ip, &pc.mac);
+        script += &format!(
+            "ip link add {dev} link {CLI_IF} address {mac} type macvlan mode bridge
+             ip addr add {ip}/32 dev {dev}
+             ip link set {dev} up
+             ip rule add from {ip} lookup {table}
+             ip route add 10.99.0.0/24 dev {dev} table {table}\n"
+        );
+    }
+    sh(&script);
+    pcs
+}
+
 /// A server data directory (BOOTROM_HOME), removed when the test passes (kept for a look when it fails).
 pub struct Home(pub PathBuf);
 
@@ -168,7 +208,7 @@ impl Server {
         while t.elapsed() < Duration::from_secs(30) {
             // A public path: with HTTPS on, the sign-in API is on https:// only.
             if std::net::TcpStream::connect((SRV, 80)).is_ok()
-                && Http::new().get("/api/tls/cert").status == 200
+                && Http::new().get("/api/tls/port").status == 200
             {
                 return;
             }

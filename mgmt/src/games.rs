@@ -123,7 +123,9 @@ pub(crate) fn with_groups(st: &SharedState) -> Vec<(Config, Vec<String>)> {
                 Config {
                     iqn: format!("{base}:games-{}", d.name),
                     path: img(&d.name).to_string_lossy().into(),
-                    // The maintenance VM on this server holds it (vmmaint.rs): it writes through 127.0.0.1.
+                    // The maintenance VM on this server holds it (vmmaint.rs): it writes through 127.0.0.1, with
+                    // its session's key (the loopback address alone is not trusted).
+                    update_key: crate::vmmaint::games_key(&d.name),
                     update_ip: if crate::vmmaint::owns_games(&d.name) {
                         Some("127.0.0.1".into())
                     } else {
@@ -136,7 +138,7 @@ pub(crate) fn with_groups(st: &SharedState) -> Vec<(Config, Vec<String>)> {
                         .map(|m| m.mac.to_lowercase()),
                     ram: d.ram,
                     reserve: crate::publish::ram_reserve(st),
-                    retain: true,
+                    retain: crate::pins::keep(st),
                     min_free_pct: crate::pins::min_free_pct(st),
                     keep_from: crate::pins::keep_from(&d.pins),
                     name: d.name,

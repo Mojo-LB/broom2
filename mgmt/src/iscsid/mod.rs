@@ -8,7 +8,7 @@
 mod conn;
 pub mod games;
 pub mod golden;
-mod overlay;
+pub(crate) mod overlay;
 pub(crate) mod ramimg; // also the Windows goldens' RAM copies (goldenram.rs)
 mod scsi;
 

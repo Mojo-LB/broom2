@@ -59,7 +59,7 @@ fn tool(srv: &str) -> Result<(), String> {
 
 /// Sign in with an owner account typed here (asked again after a wrong password or a staff account).
 fn login(srv: &str) -> Result<Api, String> {
-    let link = Link::to(srv);
+    let link = Link::to(srv)?;
     loop {
         let user = ask("Owner account [admin]: ")?;
         let user = if user.is_empty() {
@@ -685,76 +685,173 @@ fn wait_job(api: &Api, name: &str) -> Result<(), String> {
     }
 }
 
-/// How this tool reaches the server's web API. The web admin is on HTTPS (tls.rs): with the server's own self-signed
-/// certificate (the default) the tool trusts exactly that certificate, fetched from the server like this binary itself
-/// (GET /api/tls/cert; same trust as the boot, which is all plain HTTP from the same server). With a certificate the
-/// owner uploaded (made for a name, not this IP) the tool stays on plain HTTP, marked so the server lets it through.
+/// How this tool reaches the server's web API: over HTTPS, to the one certificate whose fingerprint the admin
+/// confirmed. Nothing about that trust comes over plain HTTP (a host on the LAN could answer in the server's place):
+/// the tool reads the certificate from the TLS handshake itself, shows its SHA-256, and goes on only when the admin
+/// says it is the one on the server's Settings -> HTTPS (or BROOM_TLS holds that fingerprint). From then on every
+/// connection must present exactly that certificate (tls::Pinned) — self-signed or uploaded, by IP or by name.
+/// Plain HTTP is used only for a server whose admin pages are on plain HTTP, and only after the admin says so
+/// (BROOM_TLS=plain): otherwise a host in the middle could talk the tool down to it.
 #[derive(Clone)]
 struct Link {
     agent: ureq::Agent,
     base: String,
-    /// Plain HTTP while the server is on HTTPS: send X-Broom-Tool.
-    plain: bool,
+}
+
+/// Where the server's HTTPS listens, as it says itself over plain HTTP (a hint, checked by the handshake that
+/// follows): None = it did not say (an older server, or no answer), Some(0) = its admin pages are on plain HTTP.
+fn https_port_hint(agent: &ureq::Agent, srv: &str) -> Option<u16> {
+    let t = agent
+        .get(format!("http://{srv}/api/tls/port"))
+        .call()
+        .ok()
+        .filter(|r| r.status() == 200)
+        .and_then(|mut r| r.body_mut().read_to_string().ok())?;
+    let v: Value = serde_json::from_str(&t).ok()?;
+    v["port"].as_u64().and_then(|p| u16::try_from(p).ok())
+}
+
+/// The SHA-256 of the certificate the server at `host`:`port` presents (a handshake that trusts nothing and sends
+/// nothing but itself).
+fn presented_certificate(host: &str, port: u16) -> Result<[u8; 32], String> {
+    use tokio_rustls::rustls;
+    let (cfg, seen) = crate::tls::pinned_client(None);
+    let name = rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|e| format!("{host}: {e}"))?;
+    let mut conn = rustls::ClientConnection::new(cfg, name).map_err(|e| e.to_string())?;
+    let addr = std::net::ToSocketAddrs::to_socket_addrs(&(host, port))
+        .map_err(|e| format!("{host}:{port}: {e}"))?
+        .next()
+        .ok_or_else(|| format!("{host}:{port}: no address"))?;
+    let mut sock = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(10))
+        .map_err(|e| format!("https://{host}:{port}: {e}"))?;
+    let _ = sock.set_read_timeout(Some(Duration::from_secs(10)));
+    let _ = sock.set_write_timeout(Some(Duration::from_secs(10)));
+    while conn.is_handshaking() {
+        conn.complete_io(&mut sock)
+            .map_err(|e| format!("https://{host}:{port}: {e}"))?;
+    }
+    seen.lock()
+        .ok_or_else(|| format!("https://{host}:{port}: no certificate presented"))
+}
+
+/// What the admin decided about the server's certificate `seen` — from BROOM_TLS (a fingerprint; for scripts and
+/// tests) or asked here. Err = not confirmed: the tool stops.
+fn confirm_certificate(seen: &[u8; 32], preset: Option<&str>) -> Result<(), String> {
+    let shown = crate::tls::fingerprint(seen);
+    if let Some(p) = preset {
+        return match crate::tls::parse_fingerprint(p) {
+            Some(want) if want == *seen => Ok(()),
+            Some(_) => Err(format!(
+                "the server's certificate is {shown}, not the one given in BROOM_TLS"
+            )),
+            None => Err("BROOM_TLS: a SHA-256 fingerprint (64 hex digits), or plain".into()),
+        };
+    }
+    println!("  The server's HTTPS certificate (SHA-256 fingerprint):\n\n    {shown}\n");
+    println!(
+        "  Compare it with Settings -> HTTPS in the server's web admin (any signed-in browser)."
+    );
+    let a = ask("  Is it the same? Type yes to go on: ")?;
+    if a.eq_ignore_ascii_case("yes") {
+        Ok(())
+    } else {
+        Err("certificate not confirmed".into())
+    }
+}
+
+/// A listener on this machine's loopback whose every connection goes to `host`:`port` inside TLS that accepts only
+/// the certificate `pin`: the tool's HTTP client talks to it in plain HTTP, and what leaves the machine is HTTPS to
+/// exactly that certificate. Returns its address. (The HTTP client's own TLS can check a certificate against roots
+/// and names only, not against a fingerprint.)
+fn pinned_tunnel(host: &str, port: u16, pin: [u8; 32]) -> Result<std::net::SocketAddr, String> {
+    use tokio_rustls::rustls;
+    let l = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    l.set_nonblocking(true).map_err(|e| e.to_string())?;
+    let at = l.local_addr().map_err(|e| e.to_string())?;
+    let name = rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|e| format!("{host}: {e}"))?;
+    let (cfg, _) = crate::tls::pinned_client(Some(pin));
+    let host = host.to_string();
+    std::thread::spawn(move || {
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return;
+        };
+        rt.block_on(async move {
+            let Ok(l) = tokio::net::TcpListener::from_std(l) else {
+                return;
+            };
+            let tls = tokio_rustls::TlsConnector::from(cfg);
+            while let Ok((mut inbound, _)) = l.accept().await {
+                let (tls, name, host) = (tls.clone(), name.clone(), host.clone());
+                tokio::spawn(async move {
+                    let out = match tokio::net::TcpStream::connect((host.as_str(), port)).await {
+                        Ok(s) => s,
+                        Err(e) => return eprintln!("  https://{host}:{port}: {e}"),
+                    };
+                    match tls.connect(name, out).await {
+                        Ok(mut t) => {
+                            let _ = tokio::io::copy_bidirectional(&mut inbound, &mut t).await;
+                        }
+                        Err(e) => eprintln!("  https://{host}:{port}: {e}"),
+                    }
+                });
+            }
+        });
+    });
+    Ok(at)
 }
 
 impl Link {
-    fn to(srv: &str) -> Link {
-        let cfg = || {
-            ureq::Agent::config_builder()
-                .http_status_as_error(false)
-                .timeout_connect(Some(Duration::from_secs(10)))
-                .timeout_global(Some(Duration::from_secs(300)))
-        };
-        let http = Link {
-            agent: cfg().build().into(),
-            base: format!("http://{srv}"),
-            plain: false,
-        };
-        let info: Value = match http
-            .agent
-            .get(format!("http://{srv}/api/tls/cert"))
-            .call()
-            .ok()
-            .filter(|r| r.status() == 200)
-            .and_then(|mut r| r.body_mut().read_to_string().ok())
-            .and_then(|t| serde_json::from_str(&t).ok())
-        {
-            Some(v) => v,
-            None => return http, // an older server: no HTTPS
-        };
-        let port = info["port"].as_u64().unwrap_or(0);
-        if port == 0 {
-            return http;
-        }
+    fn to(srv: &str) -> Result<Link, String> {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_connect(Some(Duration::from_secs(10)))
+            .timeout_global(Some(Duration::from_secs(300)))
+            .build()
+            .into();
+        let preset = std::env::var("BROOM_TLS").ok().filter(|v| !v.is_empty());
         let host = srv.split(':').next().unwrap_or(srv);
-        let pem = info["cert"].as_str().unwrap_or("");
-        let certs: Vec<ureq::tls::Certificate<'static>> = ureq::tls::parse_pem(pem.as_bytes())
-            .filter_map(|i| match i {
-                Ok(ureq::tls::PemItem::Certificate(c)) => Some(c),
-                _ => None,
-            })
-            .collect();
-        if info["self_signed"] != true || certs.is_empty() {
-            println!(
-                "  (the server uses an uploaded certificate: this tool talks plain HTTP to it, as the boot does)"
-            );
-            return Link {
-                plain: true,
-                ..http
-            };
-        }
-        let tls = ureq::tls::TlsConfig::builder()
-            .root_certs(ureq::tls::RootCerts::new_with_certs(&certs))
-            .build();
-        let base = if port == 443 {
-            format!("https://{host}")
-        } else {
-            format!("https://{host}:{port}")
-        };
-        Link {
-            agent: cfg().tls_config(tls).build().into(),
-            base,
-            plain: false,
+        let hint = https_port_hint(&agent, srv);
+        // HTTPS first, wherever the hint points (443 when it says nothing or "none": the hint proves nothing).
+        let port = hint.filter(|p| *p != 0).unwrap_or(443);
+        match presented_certificate(host, port) {
+            Ok(seen) => {
+                if preset.as_deref() == Some("plain") {
+                    return Err(format!(
+                        "BROOM_TLS=plain, but the server answers HTTPS on port {port}"
+                    ));
+                }
+                confirm_certificate(&seen, preset.as_deref())?;
+                let at = pinned_tunnel(host, port, seen)?;
+                Ok(Link {
+                    agent,
+                    base: format!("http://{at}"),
+                })
+            }
+            Err(e) => {
+                // No HTTPS there. Plain HTTP only when the admin says the server has HTTPS turned off.
+                if preset.as_deref() != Some("plain") {
+                    if preset.is_some() {
+                        return Err(format!("{e} (BROOM_TLS expects HTTPS)"));
+                    }
+                    println!("  No HTTPS answer from the server ({e}).");
+                    println!(
+                        "  Plain HTTP is right only when HTTPS is turned OFF on the server (Settings -> HTTPS)."
+                    );
+                    let a = ask("  Go on over plain HTTP? Type yes: ")?;
+                    if !a.eq_ignore_ascii_case("yes") {
+                        return Err("no HTTPS, and plain HTTP not confirmed".into());
+                    }
+                }
+                Ok(Link {
+                    agent,
+                    base: format!("http://{srv}"),
+                })
+            }
         }
     }
 }
@@ -763,7 +860,6 @@ impl Link {
 struct Api {
     agent: ureq::Agent,
     base: String,
-    plain: bool,
     user: String,
     pass: String,
     cookie: Mutex<String>,
@@ -774,7 +870,6 @@ impl Api {
         Api {
             agent: link.agent.clone(),
             base: link.base.clone(),
-            plain: link.plain,
             user,
             pass,
             cookie: Mutex::new(String::new()),
@@ -790,25 +885,17 @@ impl Api {
     ) -> Result<(u16, Vec<u8>, Option<String>), String> {
         let url = format!("{}{path}", self.base);
         let ck = self.cookie.lock().clone();
-        let tool = if self.plain { "capture" } else { "" };
         let r = match method {
-            "GET" => self
-                .agent
-                .get(&url)
-                .header("Cookie", ck.as_str())
-                .header("X-Broom-Tool", tool)
-                .call(),
+            "GET" => self.agent.get(&url).header("Cookie", ck.as_str()).call(),
             "PUT" => self
                 .agent
                 .put(&url)
                 .header("Cookie", ck.as_str())
-                .header("X-Broom-Tool", tool)
                 .send(body),
             _ => self
                 .agent
                 .post(&url)
                 .header("Cookie", ck.as_str())
-                .header("X-Broom-Tool", tool)
                 .header("Content-Type", "application/json")
                 .send(body),
         };

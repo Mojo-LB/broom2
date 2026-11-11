@@ -1,14 +1,17 @@
 // pins.rs — versions of the diskless goldens and the games disks: how long they are kept, and which one each group
 // gets.
-// - Kept: every saved version stays (its layer, iscsid/games.rs Config.retain) until the drive holding the golden /
-//   games disk has less than `versions_min_free_pct` % free; then the oldest one nobody uses and no group is held on
-//   goes, one at a time, until there is room again. The owner can drop the oldest by hand too.
+// - Default: as Broom always did for games disks — once the machines have restarted onto the newest version, the
+//   older ones are merged away (iscsid/games.rs).
+// - Kept (`versions_keep`, off unless the owner turns it on — Diskless page): every saved version stays (its layer,
+//   Config.retain) until the drive holding the golden / games disk has less than `versions_min_free_pct` % free; then
+//   the oldest one nobody uses and no group is held on goes, one at a time, until there is room again. The owner can
+//   drop the oldest by hand too.
 // - Held (pinned): a group can be held on one version of a golden or a games disk instead of the newest. Its machines
-//   boot that version (diskless.rs boot_diskless / prepare_games, games.rs for_client) and it is never dropped
-//   (Config.keep_from). The usual flow: a test group on the newest, the lounge held on the last good version; once the
+//   boot that version (diskless.rs boot_diskless / prepare_games, games.rs for_client) and it — with every newer
+//   one — is never dropped (Config.keep_from), keeping versions or not. The usual flow: a test group on the newest, the lounge held on the last good version; once the
 //   new one is checked on a test PC, move the lounge to it (Approve). Machines get a change at their next boot.
 // Why: a golden or games update that breaks something must never reach the whole room at once. Keeping versions
-// (instead of merging each one away as before) gives a way back, and holding a group lets one PC test the newest
+// (instead of merging each one away) gives a way back, and holding a group lets one PC test the newest
 // version while the others stay on the last good one — an approve-before-rollout flow like the one some commercial
 // diskless systems offer, here as a version picker per group. Space decides how long versions stay, not a count: a 4 TB goldens drive
 // holds many versions, and the oldest go only when the drive actually fills up.
@@ -33,6 +36,13 @@ pub fn routes() -> Router<SharedState> {
 }
 
 const KEY: &str = "versions_min_free_pct";
+const KEEP_KEY: &str = "versions_keep";
+
+/// Whether saved versions are kept until space runs short (off by default: older versions are merged away once no
+/// machine uses them, as for games disks before this setting existed).
+pub(crate) fn keep(st: &SharedState) -> bool {
+    st.db.get_config(KEEP_KEY, "off") == "on"
+}
 /// Default: older versions go once their drive has less than 10 % free.
 const DEFAULT_PCT: u8 = 10;
 
@@ -248,7 +258,9 @@ async fn status(State(st): State<SharedState>) -> Json<serde_json::Value> {
             )
         })
         .collect();
-    Json(serde_json::json!({"min_free_pct": min_free_pct(&st), "goldens": goldens, "games": games}))
+    Json(serde_json::json!({
+        "keep": keep(&st), "min_free_pct": min_free_pct(&st), "goldens": goldens, "games": games,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -319,18 +331,30 @@ async fn drop_oldest(
 
 #[derive(Deserialize)]
 struct KeepFreeBody {
-    pct: u8,
+    /// Keep saved versions until space runs short (else: merged away once unused).
+    #[serde(default)]
+    keep: Option<bool>,
+    #[serde(default)]
+    pct: Option<u8>,
 }
 
-/// POST /api/versions/keep-free {pct} (owner) — old versions go once a drive has less than pct % free (1-90).
+/// POST /api/versions/keep-free {keep, pct} (owner) — keep saved versions or not; kept ones go once a drive has less
+/// than pct % free (1-90).
 async fn keep_free(
     State(st): State<SharedState>,
     Json(b): Json<KeepFreeBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    if !(1..=90).contains(&b.pct) {
+    if b.pct.is_some_and(|p| !(1..=90).contains(&p)) {
         return Err(bad("1 to 90 %"));
     }
-    st.db.set_config(KEY, &b.pct.to_string()).map_err(ise)?;
+    if let Some(k) = b.keep {
+        st.db
+            .set_config(KEEP_KEY, if k { "on" } else { "off" })
+            .map_err(ise)?;
+    }
+    if let Some(p) = b.pct {
+        st.db.set_config(KEY, &p.to_string()).map_err(ise)?;
+    }
     let st2 = st.clone();
     tokio::task::spawn_blocking(move || {
         let _ = crate::games::sync(&st2);
@@ -338,7 +362,17 @@ async fn keep_free(
     })
     .await
     .map_err(ise)?;
-    tracing::info!("versions: old versions go below {}% free", b.pct);
+    tracing::info!(
+        "versions: {}",
+        if keep(&st) {
+            format!(
+                "kept until a drive has less than {}% free",
+                min_free_pct(&st)
+            )
+        } else {
+            "older ones merged away once unused (not kept)".into()
+        }
+    );
     Ok(Json(serde_json::json!({"ok": true})))
 }
 

@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 
 use crate::SharedState;
 use crate::api::{ApiError, bad, ise};
-use crate::auth::{Role, Who};
+use crate::auth::Who;
 
 pub fn routes() -> Router<SharedState> {
     Router::new()
@@ -88,9 +88,29 @@ pub(crate) struct Session {
     /// QEMU's process when there is no systemd (else its unit).
     #[serde(default)]
     pub pid: Option<u32>,
+    /// This session's write key (onboard::new_write_key): the server logs in to the disks' update targets with it,
+    /// the loopback address alone does not get to write. Never shown (`public`).
+    #[serde(default)]
+    pub wkey: String,
 }
 
 impl Session {
+    /// As the web admin sees it: without the write key.
+    pub(crate) fn public(mut self) -> Session {
+        self.wkey.clear();
+        self
+    }
+
+    /// The target this server logs in to for `target` ("<iqn>.g<k>") of this session: with its key (a session
+    /// started by an older build has none: the plain name, as it was logged in).
+    pub(crate) fn local(&self, target: &str) -> String {
+        if self.wkey.is_empty() {
+            target.to_string()
+        } else {
+            crate::onboard::local_target(target, &self.wkey)
+        }
+    }
+
     /// QEMU may be running (or the disks still attached).
     pub(crate) fn active(&self) -> bool {
         matches!(self.state.as_str(), "starting" | "running" | "stopping")
@@ -102,6 +122,8 @@ impl Session {
 struct Owns {
     golden: String,
     games: Vec<String>,
+    /// The session's write key.
+    key: String,
 }
 static OWNS: parking_lot::Mutex<Option<Owns>> = parking_lot::Mutex::new(None);
 /// Start / finish one at a time.
@@ -109,6 +131,22 @@ static LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 pub(crate) fn owns_golden(name: &str) -> bool {
     OWNS.lock().as_ref().is_some_and(|o| o.golden == name)
+}
+
+/// The write key of the session holding golden `name` (None = the VM does not hold it).
+pub(crate) fn golden_key(name: &str) -> Option<String> {
+    OWNS.lock()
+        .as_ref()
+        .filter(|o| o.golden == name)
+        .map(|o| o.key.clone())
+}
+
+/// The write key of the session holding games disk `name` (None = the VM does not hold it).
+pub(crate) fn games_key(name: &str) -> Option<String> {
+    OWNS.lock()
+        .as_ref()
+        .filter(|o| o.games.iter().any(|g| g == name))
+        .map(|o| o.key.clone())
 }
 
 pub(crate) fn owns_games(name: &str) -> bool {
@@ -255,6 +293,33 @@ fn alive(s: &Session) -> bool {
     })
 }
 
+/// systemd's limits on the VM's unit, on top of QEMU's own (onboard::confine_args): the whole file system read-only
+/// but the VM's work folder, no home folders, its own /tmp, no kernel settings / modules / control groups, no
+/// set-uid programs, and of root's capabilities only the two QEMU needs once, to change to its unprivileged user.
+/// Not narrowed: devices (KVM, the disks attached over iSCSI) and the network (the VM reaches the internet and the
+/// server's LANs).
+pub(crate) fn unit_limits(work: &Path) -> Vec<String> {
+    let mut v = Vec::new();
+    for p in [
+        "NoNewPrivileges=yes".to_string(),
+        "CapabilityBoundingSet=CAP_SETUID CAP_SETGID".to_string(),
+        "ProtectSystem=strict".to_string(),
+        format!("ReadWritePaths={}", work.display()),
+        "ProtectHome=yes".to_string(),
+        "PrivateTmp=yes".to_string(),
+        "ProtectKernelTunables=yes".to_string(),
+        "ProtectKernelModules=yes".to_string(),
+        "ProtectControlGroups=yes".to_string(),
+        "RestrictSUIDSGID=yes".to_string(),
+        "RestrictNamespaces=yes".to_string(),
+        "LockPersonality=yes".to_string(),
+    ] {
+        v.push("-p".to_string());
+        v.push(p);
+    }
+    v
+}
+
 /// Start QEMU outside bootrom-mgmt.service (whose restart kills its cgroup): its own unit, or its own session.
 /// → Some(pid) without systemd.
 fn launch(golden: &str, args: &[String], log: &Path) -> Result<Option<u32>, String> {
@@ -280,6 +345,7 @@ fn launch(golden: &str, args: &[String], log: &Path) -> Result<Option<u32>, Stri
                 "-p",
                 &format!("StandardError=append:{}", log.display()),
             ])
+            .args(unit_limits(log.parent().unwrap_or(Path::new("/"))))
             .arg(&qemu)
             .args(args)
             .output()
@@ -444,6 +510,7 @@ fn plan(
         msg: "attaching the disks".into(),
         ended: 0,
         pid: None,
+        wkey: crate::onboard::new_write_key(),
     })
 }
 
@@ -468,17 +535,18 @@ pub(crate) fn begin(
     *OWNS.lock() = Some(Owns {
         golden: s.golden.clone(),
         games: s.games.iter().map(|g| g.name.clone()).collect(),
+        key: s.wkey.clone(),
     });
     let r = (|| -> Result<Option<u32>, String> {
         crate::diskless::sync(st)?;
         if !s.games.is_empty() {
             crate::games::sync(st)?;
         }
-        let disk = crate::onboard::login(&s.golden_target)?;
+        let disk = crate::onboard::login(&s.local(&s.golden_target))?;
         let mut gdev = Vec::new();
         for g in &s.games {
             gdev.push((
-                crate::onboard::login(&g.target)?
+                crate::onboard::login(&s.local(&g.target))?
                     .to_string_lossy()
                     .to_string(),
                 g.serial.clone(),
@@ -509,13 +577,14 @@ pub(crate) fn begin(
         let (qmp_s, vnc_s) = (work.join("qmp.sock"), work.join("vnc.sock"));
         let _ = std::fs::remove_file(&qmp_s);
         let _ = std::fs::remove_file(&vnc_s);
-        let args = qemu_args(
+        let mut args = qemu_args(
             &s.golden,
             &disk.to_string_lossy(),
             &gdev,
             (&code.to_string_lossy(), &vars.to_string_lossy()),
             (&qmp_s.to_string_lossy(), &vnc_s.to_string_lossy()),
         );
+        args.extend(crate::onboard::confine_args(crate::onboard::qemu_version()));
         let pid = launch(&s.golden, &args, &work.join("qemu.log"))?;
         let t0 = Instant::now();
         while !vnc_s.exists() {
@@ -591,9 +660,9 @@ fn finish(st: &SharedState, why: Option<String>) {
         return;
     };
     for g in &s.games {
-        crate::onboard::logout(&g.target);
+        crate::onboard::logout(&s.local(&g.target));
     }
-    crate::onboard::logout(&s.golden_target);
+    crate::onboard::logout(&s.local(&s.golden_target));
     *OWNS.lock() = None;
     let _ = crate::diskless::sync(st);
     if !s.games.is_empty() {
@@ -663,6 +732,7 @@ pub fn restore(st: &SharedState) {
     *OWNS.lock() = Some(Owns {
         golden: s.golden.clone(),
         games: s.games.iter().map(|g| g.name.clone()).collect(),
+        key: s.wkey.clone(),
     });
     if alive(&s) {
         tracing::info!("vm: {} still running — taken over", s.golden);
@@ -734,13 +804,24 @@ async fn status(State(st): State<SharedState>) -> Json<serde_json::Value> {
         })
         .collect();
     Json(serde_json::json!({
-        "session": current(&st),
+        "session": current(&st).map(Session::public),
         "goldens": goldens,
         "games": games,
         "cpus": CPUS,
         "mem_mb": MEM_MB,
         "problem": problem,
     }))
+}
+
+/// What it takes to start, stop or use the screen of a VM: one that keeps Windows changes → Maintain; games disks
+/// only → Vm (or Maintain).
+pub(crate) fn needed_for(keep: bool) -> &'static [crate::auth::Perm] {
+    use crate::auth::Perm;
+    if keep {
+        &[Perm::Maintain]
+    } else {
+        &[Perm::Vm, Perm::Maintain]
+    }
 }
 
 #[derive(Deserialize)]
@@ -753,18 +834,15 @@ struct StartBody {
     keep: bool,
 }
 
-/// POST /api/vm/start {golden, games: [names], keep} (staff: games only, keep = false).
+/// POST /api/vm/start {golden, games: [names], keep} — keep = false (games disks only): the Vm permission; keep =
+/// true: Maintain.
 async fn start(
     State(st): State<SharedState>,
     axum::Extension(w): axum::Extension<Who>,
     Json(b): Json<StartBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    if b.keep && w.role != Role::Owner {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "keeping Windows changes is for an owner — staff update the games disks only".into(),
-        ));
-    }
+    // Keeping what is done to Windows changes the golden every machine boots: Maintain. Games disks only: Vm.
+    w.require(needed_for(b.keep))?;
     if !crate::diskless::valid_name(&b.golden) {
         return Err(bad("golden: its name"));
     }
@@ -774,7 +852,7 @@ async fn start(
         .await
         .map_err(ise)?
         .map_err(|e| (StatusCode::CONFLICT, e))?;
-    Ok(Json(serde_json::json!({"ok": true, "session": s})))
+    Ok(Json(serde_json::json!({"ok": true, "session": s.public()})))
 }
 
 #[derive(Deserialize)]
@@ -784,7 +862,8 @@ struct StopBody {
     force: bool,
 }
 
-/// POST /api/vm/stop {force} — the power button (Windows shuts down), or force: turned off at once.
+/// POST /api/vm/stop {force} — the power button (Windows shuts down), or force: turned off at once. A VM that keeps
+/// Windows changes is stopped only by an account that could have started it.
 async fn stop(
     State(st): State<SharedState>,
     axum::Extension(w): axum::Extension<Who>,
@@ -793,6 +872,7 @@ async fn stop(
     let s = current(&st)
         .filter(|s| s.state == "running" || s.state == "stopping")
         .ok_or((StatusCode::CONFLICT, "no VM is running".to_string()))?;
+    w.require(needed_for(s.keep))?;
     let st2 = st.clone();
     let msg = tokio::task::spawn_blocking(move || -> Result<String, String> {
         if b.force {
@@ -825,11 +905,12 @@ async fn stop(
     Ok(Json(serde_json::json!({"ok": true, "msg": msg})))
 }
 
-/// GET /api/vm/console (WebSocket, signed in) — the VM's screen: RFB bytes both ways between noVNC and QEMU's VNC
+/// GET /api/vm/console (WebSocket; the Vm permission, Maintain for a VM that keeps Windows changes) — the VM's screen: RFB bytes both ways between noVNC and QEMU's VNC
 /// socket. The session is checked again every 30 s.
 async fn console(
     ws: WebSocketUpgrade,
     State(st): State<SharedState>,
+    axum::Extension(w): axum::Extension<Who>,
     headers: HeaderMap,
 ) -> Response {
     if !crate::vnc::same_origin(&headers) {
@@ -838,6 +919,10 @@ async fn console(
     let Some(s) = current(&st).filter(|s| s.state == "running" || s.state == "stopping") else {
         return (StatusCode::CONFLICT, "no VM is running").into_response();
     };
+    // Its keyboard and mouse: for a VM that keeps Windows changes, typing there is changing the golden.
+    if let Err(e) = w.require(needed_for(s.keep)) {
+        return e.into_response();
+    }
     let sock = match work_dir(&st, &s.golden) {
         Ok(w) => w.join("vnc.sock"),
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),

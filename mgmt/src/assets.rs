@@ -58,7 +58,6 @@ assets!(
     "scripts/broom-diskless.ps1",
     "scripts/broom-diskless.sh",
     "scripts/broom-onboard.ps1",
-    "scripts/broom-report.exe",
     "scripts/broom-fw.cs",
     "scripts/broom-vnc.cs",
     // Maintain in the browser (vmmaint.rs): its page, and noVNC 1.7.0 (static/novnc/README.broom.md: MPL-2.0 / MIT).
@@ -120,10 +119,16 @@ assets!(
     "static/novnc/vendor/pako/lib/zlib/zstream.js",
 );
 
-/// Assets only a release has: built by CI on another OS and added to its broom-assets.zip (a local build has none).
+/// Assets only a release has: built by CI from their source and added to its broom-assets.zip (a local build has
+/// none) — no binary of our own is committed to the repository.
 /// broom-fw.dll / broom-vnc.exe: broom-fw.cs / broom-vnc.cs compiled on a Windows runner, so the clients never run the
-/// C# compiler for them.
-const OPTIONAL: &[&str] = &["scripts/broom-fw.dll", "scripts/broom-vnc.exe"];
+/// C# compiler for them. broom-report.exe: winpe/broom-report.c built with mingw-w64 ("Add hardware", Windows PE has no
+/// compiler; a local build takes the one winpe/build.sh makes, see onboard::reporter).
+const OPTIONAL: &[&str] = &[
+    "scripts/broom-fw.dll",
+    "scripts/broom-vnc.exe",
+    "scripts/broom-report.exe",
+];
 
 /// An asset of OPTIONAL: Some in a release whose zip has it.
 pub fn optional(name: &str) -> Option<&'static [u8]> {

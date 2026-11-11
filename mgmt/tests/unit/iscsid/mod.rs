@@ -507,6 +507,7 @@ async fn diskless_machine_session() {
             },
         ],
         games: false,
+        ..Default::default()
     };
     golden::set(vec![cfg]).unwrap();
     let mine = golden::machine_iqn("iqn.test:golden-w11tcp", mac).unwrap();
@@ -830,5 +831,374 @@ async fn games_disk_keeps_versions() {
             .contains("only one version")
     );
     games::set(Vec::new()).unwrap();
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// This server's own update session (a VM of its own) is not trusted for coming from the loopback address: with a
+/// job key on the disk, only a login to "<iqn>.g<k>.u<key>" writes; the plain target or another key reads only, from
+/// the very same address. A LAN update machine (no key on the disk) is unaffected: see games_disk_versions.
+#[tokio::test]
+async fn local_update_needs_job_key() {
+    let _one = crate::iscsid::golden::TEST_LOCK.lock().await;
+    let d = std::env::temp_dir().join("broom_test_games_key");
+    let _ = std::fs::remove_dir_all(&d);
+    let img = d.join("k/games.img");
+    std::fs::create_dir_all(img.parent().unwrap()).unwrap();
+    std::fs::write(&img, vec![0x11u8; 1 << 20]).unwrap();
+    let key = "0123456789abcdef0123456789abcdef";
+    games::set(vec![games::Config {
+        name: "k".into(),
+        iqn: "iqn.test:keyed".into(),
+        path: img.to_string_lossy().into(),
+        update_ip: Some("127.0.0.1".into()),
+        update_key: Some(key.into()),
+        ..Default::default()
+    }])
+    .unwrap();
+    assert_eq!(
+        games::iqns(),
+        ["iqn.test:keyed.g0"],
+        "the keyed name is never listed"
+    );
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = l.accept().await {
+            tokio::spawn(conn::serve(s, "127.0.0.1".into()));
+        }
+    });
+    let write_status = |target: String| async move {
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        assert_eq!(
+            login(&mut s, &target).await.bhs[36],
+            0,
+            "{target}: logged in"
+        );
+        s.write_all(&scsi_cmd(31, 1, 0xa0, 0x2a, 8, 1))
+            .await
+            .unwrap();
+        let r = conn::read_pdu(&mut s).await.unwrap();
+        (r.bhs[0], r.bhs[3])
+    };
+    // From 127.0.0.1, the update machine's address — but without the job's key: read-only.
+    assert_eq!(
+        write_status("iqn.test:keyed.g0".into()).await,
+        (0x21, 0x02),
+        "plain target: write refused"
+    );
+    assert_eq!(
+        write_status(format!("iqn.test:keyed.g0.u{}", "f".repeat(32))).await,
+        (0x21, 0x02),
+        "another key: write refused"
+    );
+    let info = games::info().into_iter().find(|i| i.name == "k").unwrap();
+    assert!(!info.update_connected && info.update_bytes == 0);
+    // With the key: an R2T asks for the data — the session writes.
+    assert_eq!(
+        write_status(format!("iqn.test:keyed.g0.u{key}")).await.0,
+        0x31,
+        "keyed target: write accepted"
+    );
+    games::set(Vec::new()).unwrap();
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Target names with a write key: only "<iqn>.g<digits>.u<16+ hex>" is split; anything else is a plain name.
+#[test]
+fn write_key_in_target_name() {
+    use games::split_key;
+    assert_eq!(split_key("iqn.x:d.g3"), ("iqn.x:d.g3", None));
+    assert_eq!(
+        split_key("iqn.x:d.g3.u0123456789abcdef"),
+        ("iqn.x:d.g3", Some("0123456789abcdef"))
+    );
+    assert_eq!(
+        split_key("iqn.x:d.g3.uabc"),
+        ("iqn.x:d.g3.uabc", None),
+        "too short"
+    );
+    assert_eq!(
+        split_key("iqn.x:d.g3.u0123456789abcdeg"),
+        ("iqn.x:d.g3.u0123456789abcdeg", None),
+        "not hex"
+    );
+    assert_eq!(
+        split_key("iqn.x:d.u0123456789abcdef"),
+        ("iqn.x:d.u0123456789abcdef", None),
+        "no version before it"
+    );
+    let cfg = |k: Option<&str>| games::Config {
+        update_key: k.map(Into::into),
+        ..Default::default()
+    };
+    assert!(
+        games::key_allowed(&cfg(None), None, "t", "p"),
+        "no key asked"
+    );
+    assert!(games::key_allowed(
+        &cfg(Some("abcd")),
+        Some("abcd"),
+        "t",
+        "p"
+    ));
+    assert!(!games::key_allowed(
+        &cfg(Some("abcd")),
+        Some("abce"),
+        "t",
+        "p"
+    ));
+    assert!(!games::key_allowed(&cfg(Some("abcd")), None, "t", "p"));
+    assert!(
+        !games::key_allowed(&cfg(Some("")), Some(""), "t", "p"),
+        "an empty key opens nothing"
+    );
+    assert!(!games::key_allowed(&cfg(Some("")), None, "t", "p"));
+}
+
+/// Versions without keeping (the default, Config.retain off): saved versions are merged away once no machine uses
+/// them — what a games disk always did. A group held on a version (keep_from) keeps that version and every newer
+/// one; only what lies below it goes. The hold lifted: everything merges into the newest again.
+#[tokio::test]
+async fn versions_merge_by_default_held_ones_stay() {
+    let _one = crate::iscsid::golden::TEST_LOCK.lock().await;
+    let d = std::env::temp_dir().join("broom_test_nokeep");
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("n")).unwrap();
+    let img = d.join("n/games.img");
+    std::fs::write(&img, vec![0x11u8; 1 << 20]).unwrap();
+    let iqn = "iqn.test:nokeep";
+    let cfg = |keep_from: Option<u64>| games::Config {
+        name: "n".into(),
+        iqn: iqn.into(),
+        path: img.to_string_lossy().into(),
+        update_ip: Some("127.0.0.1".into()),
+        keep_from,
+        ..Default::default() // retain: false
+    };
+    games::set(vec![cfg(Some(1))]).unwrap();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = l.accept().await {
+            tokio::spawn(conn::serve(s, "127.0.0.1".into()));
+        }
+    });
+    let info = || games::info().into_iter().find(|i| i.name == "n").unwrap();
+    let vers = || info().versions.iter().map(|v| v.ver).collect::<Vec<_>>();
+    let idle = || async {
+        for _ in 0..100 {
+            let i = info();
+            if !i.update_connected && i.versions.iter().all(|v| v.sessions == 0) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("sessions still open: {:?}", info());
+    };
+    // g1, g2, g3: each writes its own byte at blocks 8..16.
+    for (ver, b) in [(0u64, 0xa1u8), (1, 0xb2), (2, 0xc3)] {
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        assert_eq!(login(&mut s, &format!("{iqn}.g{ver}")).await.bhs[36], 0);
+        write_blocks(&mut s, 10, 1, 8, &vec![b; 8 * 512]).await;
+        drop(s);
+        idle().await;
+        games::save("n").unwrap();
+    }
+    assert_eq!(vers(), [0, 1, 2, 3]);
+    let read = |ver: u64| async move {
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        if login(&mut s, &format!("{iqn}.g{ver}")).await.bhs[36] != 0 {
+            return None;
+        }
+        Some(read_blocks(&mut s, 20, 1, 8, 8).await[0])
+    };
+    // A group is held on g1: g0 goes (one tick), g1 and the newer ones stay, tick after tick.
+    games::tick();
+    assert_eq!(
+        vers(),
+        [1, 2, 3],
+        "only what lies below the held version went"
+    );
+    games::tick();
+    games::tick();
+    assert_eq!(
+        vers(),
+        [1, 2, 3],
+        "the held version and the newer ones stay"
+    );
+    assert_eq!(
+        (read(0).await, read(1).await, read(2).await, read(3).await),
+        (None, Some(0xa1), Some(0xb2), Some(0xc3))
+    );
+    idle().await;
+    // The hold lifted: the default again — everything merged into the newest once unused.
+    games::set(vec![cfg(None)]).unwrap();
+    games::merge_if_idle("n", std::time::Duration::ZERO);
+    assert_eq!(vers(), [3], "merged away: only the newest is left");
+    assert_eq!(
+        (read(1).await, read(2).await, read(3).await),
+        (None, None, Some(0xc3))
+    );
+    games::set(Vec::new()).unwrap();
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Discovery (SendTargets) for a client that is no diskless machine — an SSD PC's Windows looking for its games
+/// disks — lists what it always listed: the plain targets and each games disk's newest version. No golden, no other
+/// machine's disk, no keyed name of a job on this server; and a plain target still serves after it.
+#[tokio::test]
+async fn discovery_for_ssd_clients_unchanged() {
+    let _one = crate::iscsid::golden::TEST_LOCK.lock().await;
+    let d = std::env::temp_dir().join("broom_test_discovery");
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("g")).unwrap();
+    let (plain, img) = (d.join("plain.img"), d.join("g/games.img"));
+    std::fs::write(&plain, vec![0x33u8; 1 << 20]).unwrap();
+    std::fs::write(&img, vec![0x11u8; 1 << 20]).unwrap();
+    let plain_iqn = "iqn.test:disc-plain.g1";
+    export(Entry {
+        iqn: plain_iqn.into(),
+        path: plain.to_string_lossy().into(),
+        ram: false,
+        reserve: 0,
+        stamp: String::new(),
+        cd: false,
+    })
+    .unwrap();
+    games::set(vec![games::Config {
+        name: "g".into(),
+        iqn: "iqn.test:disc-games".into(),
+        path: img.to_string_lossy().into(),
+        update_ip: Some("127.0.0.1".into()),
+        update_key: Some("00112233445566778899aabbccddeeff".into()),
+        ..Default::default()
+    }])
+    .unwrap();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = l.accept().await {
+            tokio::spawn(conn::serve(s, "127.0.0.1".into()));
+        }
+    });
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    assert_eq!(login(&mut s, plain_iqn).await.bhs[36], 0);
+    s.write_all(&pdu(0x04, 0x80, 7, 1, b"SendTargets=All\0"))
+        .await
+        .unwrap();
+    let r = conn::read_pdu(&mut s).await.unwrap();
+    assert_eq!(r.bhs[0], 0x24, "Text response");
+    let text = String::from_utf8_lossy(&r.data).into_owned();
+    let mut names: Vec<&str> = text
+        .split('\0')
+        .filter_map(|kv| kv.strip_prefix("TargetName="))
+        .filter(|n| n.contains(":disc-")) // other tests' targets of this process aside
+        .collect();
+    names.sort();
+    assert_eq!(names, ["iqn.test:disc-games.g0", plain_iqn], "{text}");
+    assert!(
+        !text.contains(".u0011"),
+        "a job's keyed name is never listed"
+    );
+    // The plain target reads as ever on that same session.
+    assert!(
+        read_blocks(&mut s, 8, 2, 0, 8)
+            .await
+            .iter()
+            .all(|&b| b == 0x33),
+        "plain target served"
+    );
+    drop(s);
+    TARGETS.lock().remove(plain_iqn);
+    games::set(Vec::new()).unwrap();
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A diskless machine over its room for one session (golden::Config.session_max), over the wire: the write that
+/// needs a new block is answered CHECK CONDITION "space allocation failed" (data protect 27h/07h) — not a medium
+/// error — while what it already wrote stays writable and readable. Another machine's room is its own.
+#[tokio::test]
+async fn diskless_machine_out_of_room() {
+    let _one = golden::TEST_LOCK.lock().await;
+    let d = std::env::temp_dir().join("broom_test_diskless_room");
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("img")).unwrap();
+    let img = d.join("img/golden.img");
+    std::fs::write(&img, vec![0x22u8; 1 << 20]).unwrap();
+    let mac = "02:00:00:00:00:41";
+    TEST_ARP.lock().insert("127.0.0.1".into(), mac.into());
+    golden::set(vec![golden::Config {
+        disk: games::Config {
+            name: "w11room".into(),
+            iqn: "iqn.test:golden-w11room".into(),
+            path: img.to_string_lossy().into(),
+            ..Default::default()
+        },
+        dir: d.join("wb").to_string_lossy().into(),
+        machines: vec![golden::Machine {
+            mac: mac.into(),
+            ip: "127.0.0.1".into(),
+        }],
+        session_max: 2 * overlay::BLOCK, // two 64 KB blocks
+        ..Default::default()
+    }])
+    .unwrap();
+    let mine = golden::machine_iqn("iqn.test:golden-w11room", mac).unwrap();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = l.accept().await {
+            tokio::spawn(conn::serve(s, "127.0.0.1".into()));
+        }
+    });
+    golden::prepare("w11room", mac, false, false, false, None).unwrap();
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    assert_eq!(login(&mut s, &mine).await.bhs[36], 0);
+    // One 4 KB write → (opcode, status, sense key, ASC, ASCQ) of its answer.
+    async fn write4k(
+        s: &mut tokio::net::TcpStream,
+        itt: u32,
+        cmdsn: u32,
+        lba: u32,
+    ) -> (u8, u8, u8, u8, u8) {
+        s.write_all(&scsi_cmd(itt, cmdsn, 0xa0, 0x2a, lba, 8))
+            .await
+            .unwrap();
+        let r = conn::read_pdu(s).await.unwrap();
+        assert_eq!(r.bhs[0], 0x31, "R2T");
+        let mut p = pdu(0x05, 0x80, itt, 0, &[0x77u8; 4096]);
+        p[8..16].fill(0);
+        p[20..24].copy_from_slice(&r.bhs[20..24]);
+        s.write_all(&p).await.unwrap();
+        let r = conn::read_pdu(s).await.unwrap();
+        let sense = |i: usize| r.data.get(2 + i).copied().unwrap_or(0);
+        (r.bhs[0], r.bhs[3], sense(2), sense(12), sense(13))
+    }
+    const GOOD: (u8, u8, u8, u8, u8) = (0x21, 0, 0, 0, 0);
+    // Blocks 0 and 1 (LBA 0.. and 128..): its two blocks.
+    assert_eq!(write4k(&mut s, 50, 1, 0).await, GOOD);
+    assert_eq!(write4k(&mut s, 51, 2, 128).await, GOOD);
+    // A third block: no room — space allocation failed, write protect.
+    assert_eq!(
+        write4k(&mut s, 52, 3, 256).await,
+        (0x21, 0x02, 0x07, 0x27, 0x07)
+    );
+    // What it holds is rewritten and read; the refused place reads the golden.
+    assert_eq!(write4k(&mut s, 53, 4, 8).await, GOOD);
+    assert!(
+        read_blocks(&mut s, 54, 5, 8, 8)
+            .await
+            .iter()
+            .all(|&b| b == 0x77)
+    );
+    assert!(
+        read_blocks(&mut s, 55, 6, 256, 8)
+            .await
+            .iter()
+            .all(|&b| b == 0x22)
+    );
+    drop(s);
+    golden::set(Vec::new()).unwrap();
+    TEST_ARP.lock().remove("127.0.0.1");
     let _ = std::fs::remove_dir_all(&d);
 }

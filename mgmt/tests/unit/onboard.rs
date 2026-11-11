@@ -2,6 +2,7 @@ use super::{
     Job, Nic, WINPE_FILES, active, busid_card, judge, parse_pnputil, parse_report, parse_wmic,
     qemu_args, secure_boot, startnet, waiting_hint, wimboot_script,
 };
+use super::{ci_path, g_child, g_read, g_write};
 
 /// pnputil /enum-devices /class Net /ids as Windows PE 26100 prints it (English), with a miniport and two cards.
 const PNPUTIL: &str = "Microsoft PnP Utility\r\n\r\n\
@@ -139,7 +140,6 @@ fn startnet_runs_the_reporter() {
         c,
         "@echo off\r\nwpeinit\r\ncls\r\necho.\r\nbroom-report.exe http://10.20.0.1 tok 10.20.0.22 255.255.255.0 10.20.0.1\r\n"
     );
-    assert!(super::super::assets::bytes("scripts/broom-report.exe").starts_with(b"MZ"));
 }
 
 #[test]
@@ -359,4 +359,262 @@ fn judge_finds_the_boot_card_by_ipxe() {
         judge(&nics, &r(true, false), mac, "").is_ok(),
         "boot card unknown: any card"
     );
+}
+
+/// Nothing in a mounted golden is reached through a symbolic link: a link as a folder on the way, as the file
+/// itself, or at the name of a file this server is about to write, is refused — the server's own files outside the
+/// mount stay untouched (it works there as root).
+#[test]
+fn golden_paths_never_follow_links() {
+    use std::os::unix::fs::symlink;
+    let d = std::env::temp_dir().join(format!("broom-golden-links-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    let (root, out) = (d.join("mnt"), d.join("outside"));
+    std::fs::create_dir_all(root.join("Windows/Setup/Scripts")).unwrap();
+    std::fs::create_dir_all(root.join("WINDOWS2/setup")).unwrap();
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(out.join("secret"), b"server file").unwrap();
+    std::fs::write(root.join("Windows/Setup/Scripts/broom-diskless.ps1"), b"ps").unwrap();
+
+    // Plain paths, any case.
+    let dir = ci_path(&root, "windows/SETUP/scripts").expect("found without case");
+    assert_eq!(dir, root.join("Windows/Setup/Scripts"));
+    let ps = ci_path(&dir, "Broom-Diskless.ps1").unwrap();
+    assert_eq!(g_read(&ps).unwrap(), b"ps");
+    g_write(&ps, b"new").unwrap();
+    assert_eq!(std::fs::read(&ps).unwrap(), b"new");
+    assert!(ci_path(&root, "Windows/Nope").is_none());
+
+    // A folder on the way that is a link out of the mount.
+    symlink("../../../outside", root.join("WINDOWS2/setup/Scripts")).unwrap();
+    assert!(ci_path(&root, "WINDOWS2/setup/Scripts").is_none());
+    assert!(ci_path(&root, "WINDOWS2/setup/Scripts/secret").is_none());
+    symlink(&out, root.join("ProgramData")).unwrap();
+    assert!(ci_path(&root, "ProgramData/secret").is_none());
+
+    // The file itself a link (also a dangling one, which a write would otherwise create at its target).
+    symlink(out.join("secret"), dir.join("broom-onboard-result.json")).unwrap();
+    assert!(ci_path(&dir, "broom-onboard-result.json").is_none());
+    assert!(g_read(&dir.join("broom-onboard-result.json")).is_err());
+    symlink(out.join("made-by-server"), dir.join("broom-onboard.json")).unwrap();
+    assert!(g_child(&dir, "broom-onboard.json").is_err());
+    assert!(g_write(&dir.join("broom-onboard.json"), b"{}").is_err());
+    symlink(&out, dir.join("broom-drv")).unwrap();
+    assert!(g_child(&dir, "broom-drv").is_err());
+    assert_eq!(
+        g_child(&dir, "new-file").unwrap(),
+        dir.join("new-file"),
+        "a name not there yet is fine"
+    );
+
+    // Outside: as it was.
+    assert_eq!(std::fs::read(out.join("secret")).unwrap(), b"server file");
+    assert!(!out.join("made-by-server").exists());
+    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 1);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Live: the same on a real NTFS volume mounted as the server mounts a golden (ntfs-3g, root, /dev/fuse).
+/// BROOM_NTFS_IMG = an NTFS image file prepared with a link `Windows/Setup/Scripts -> ../../../outside` and a plain
+/// folder `Plain`; BROOM_NTFS_MNT = an empty folder two levels below the one holding `outside`.
+#[test]
+#[ignore]
+fn live_ntfs_mount_refuses_links() {
+    let (Ok(img), Ok(mnt)) = (
+        std::env::var("BROOM_NTFS_IMG"),
+        std::env::var("BROOM_NTFS_MNT"),
+    ) else {
+        return;
+    };
+    let mnt = std::path::PathBuf::from(mnt);
+    let m = super::Mount::new(std::path::Path::new(&img), &mnt, true).expect("mount");
+    assert!(ci_path(&m.dir, "Windows/Setup").is_some());
+    assert!(
+        ci_path(&m.dir, "Windows/Setup/Scripts").is_none(),
+        "the link is not followed"
+    );
+    let plain = ci_path(&m.dir, "plain").expect("plain folder, any case");
+    g_write(&g_child(&plain, "f.txt").unwrap(), b"ok").unwrap();
+    assert_eq!(g_read(&plain.join("f.txt")).unwrap(), b"ok");
+    let opts = std::fs::read_to_string("/proc/mounts").unwrap();
+    let line = opts
+        .lines()
+        .find(|l| l.split(' ').nth(1) == mnt.to_str())
+        .expect("mounted");
+    for o in ["nosuid", "nodev", "noexec"] {
+        assert!(line.contains(o), "{o} missing: {line}");
+    }
+}
+
+/// A Windows PE report counts only with the job's token AND from the job's machine (its MAC behind the sender): the
+/// token crosses the LAN in plain-HTTP URLs.
+#[test]
+fn report_needs_token_and_machine() {
+    use super::{from_job_machine, token_matches};
+    assert!(token_matches("abc123", "abc123"));
+    assert!(!token_matches("abc123", "abc124"));
+    assert!(!token_matches("", ""), "no job token: nothing matches");
+    assert!(from_job_machine(
+        "52:54:00:aa:bb:01",
+        Some("52-54-00-AA-BB-01")
+    ));
+    assert!(
+        !from_job_machine("52:54:00:aa:bb:01", Some("52:54:00:aa:bb:02")),
+        "another PC"
+    );
+    assert!(
+        !from_job_machine("52:54:00:aa:bb:01", None),
+        "no ARP entry (not on this LAN)"
+    );
+    assert!(!from_job_machine("", None), "a job without a MAC");
+    assert!(!from_job_machine("", Some("")));
+}
+
+/// The server's own update logins carry the job's key in the target name.
+#[test]
+fn local_target_carries_the_key() {
+    let k = super::new_write_key();
+    assert!(k.len() >= 32 && k.bytes().all(|b| b.is_ascii_hexdigit()));
+    assert_ne!(k, super::new_write_key());
+    let t = super::local_target("iqn.x:golden-w11.g7", &k);
+    assert_eq!(
+        crate::iscsid::games::split_key(&t),
+        ("iqn.x:golden-w11.g7", Some(k.as_str()))
+    );
+}
+
+/// QEMU is confined on every start: it drops to an unprivileged user (the option depends on its version) and runs
+/// under its seccomp filter, which must allow that one change of user.
+#[test]
+fn qemu_confinement_args() {
+    use super::{QEMU_USER, confine_args, parse_qemu_version};
+    assert_eq!(
+        parse_qemu_version(
+            "QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)\nCopyright"
+        ),
+        Some((8, 2))
+    );
+    assert_eq!(
+        parse_qemu_version("QEMU emulator version 10.2.1"),
+        Some((10, 2))
+    );
+    assert_eq!(
+        parse_qemu_version("QEMU emulator version 9.1.0-rc2"),
+        Some((9, 1))
+    );
+    assert_eq!(parse_qemu_version("something else"), None);
+    let sandbox = "on,obsolete=deny,elevateprivileges=allow,spawn=deny,resourcecontrol=deny";
+    for v in [Some((8, 2)), Some((9, 0)), None] {
+        assert_eq!(
+            confine_args(v),
+            ["-runas", QEMU_USER, "-sandbox", sandbox],
+            "{v:?}"
+        );
+    }
+    for v in [Some((9, 1)), Some((10, 2)), Some((11, 0))] {
+        assert_eq!(
+            confine_args(v),
+            [
+                "-run-with",
+                &format!("user={QEMU_USER}"),
+                "-sandbox",
+                sandbox
+            ],
+            "{v:?}"
+        );
+    }
+    assert_eq!(QEMU_USER, "65534:65534");
+}
+
+/// Live (needs qemu-system-x86_64 and root; no KVM needed): QEMU started with this server's confinement arguments
+/// runs as the unprivileged user, with no_new_privs and a seccomp filter, a disk and user-mode networking attached.
+#[test]
+#[ignore]
+fn live_qemu_is_confined() {
+    use super::{confine_args, qemu_version, which};
+    let Some(qemu) = which("qemu-system-x86_64") else {
+        return;
+    };
+    let d = std::env::temp_dir().join(format!("broom-qemu-confine-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let img = d.join("disk.img");
+    std::fs::File::create(&img)
+        .unwrap()
+        .set_len(16 << 20)
+        .unwrap();
+    let mut c = std::process::Command::new(qemu)
+        .args([
+            "-machine",
+            "q35,accel=tcg",
+            "-m",
+            "64",
+            "-display",
+            "none",
+            "-vga",
+            "none",
+            "-nodefaults",
+            "-S",
+        ])
+        .args([
+            "-drive",
+            &format!("file={},format=raw,if=none,id=d0", img.display()),
+        ])
+        .args([
+            "-device",
+            "ahci,id=sata",
+            "-device",
+            "ide-hd,drive=d0,bus=sata.0",
+        ])
+        .args(["-netdev", "user,id=n0", "-device", "e1000e,netdev=n0"])
+        .args([
+            "-qmp",
+            &format!("unix:{},server=on,wait=off", d.join("qmp.sock").display()),
+        ])
+        .args(confine_args(qemu_version()))
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let status = std::fs::read_to_string(format!("/proc/{}/status", c.id())).unwrap_or_default();
+    let field = |k: &str| {
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix(k))
+            .map(|v| v.split_whitespace().map(String::from).collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    let _ = c.kill();
+    let _ = c.wait();
+    let _ = std::fs::remove_dir_all(&d);
+    assert!(
+        !status.is_empty(),
+        "QEMU did not stay up with the confinement arguments"
+    );
+    assert_eq!(field("Uid:"), ["65534"; 4], "runs as nobody");
+    assert_eq!(field("Gid:"), ["65534"; 4]);
+    assert_eq!(field("Groups:"), ["65534"], "no other group kept");
+    assert_eq!(field("NoNewPrivs:"), ["1"]);
+    assert_eq!(field("Seccomp:"), ["2"], "seccomp filter on");
+    assert_eq!(field("CapEff:"), ["0000000000000000"], "no capability left");
+}
+
+/// broom-report.exe is not in the repository nor embedded: a release brings it in its assets (built by CI from
+/// winpe/broom-report.c), a local build needs the one winpe/build.sh makes — and Add hardware says so instead of
+/// starting a job that cannot boot Windows PE.
+#[test]
+fn reporter_is_built_not_committed() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    assert!(root.join("winpe/broom-report.c").is_file());
+    assert!(
+        !root.join("scripts/broom-report.exe").exists(),
+        "no built program of our own in the repository"
+    );
+    // This (test) build has no release assets and no file in Broom's folder.
+    if super::reporter().is_none() {
+        let why = super::reporter_missing().expect("says why");
+        assert!(
+            why.contains("winpe/build.sh") && why.contains("broom-report.exe"),
+            "{why}"
+        );
+    }
 }

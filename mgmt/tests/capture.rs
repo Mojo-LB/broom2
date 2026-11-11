@@ -8,11 +8,16 @@ use common::*;
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
-/// The client tool with `disk` as the only disk and `input` typed on its console.
-fn tool(disk: &std::path::Path, input: &str) -> (Output, String) {
-    let mut c = Command::new(env!("CARGO_BIN_EXE_bootrom-mgmt"))
-        .args(["capture", SRV])
-        .env("BROOM_CAPTURE_DISK", disk)
+/// The client tool with `disk` as the only disk and `input` typed on its console. `tls` = BROOM_TLS (the server's
+/// certificate fingerprint as confirmed by the admin; None = the tool asks on its console).
+fn tool_with(disk: &std::path::Path, input: &str, tls: Option<&str>) -> (Output, String) {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_bootrom-mgmt"));
+    c.args(["capture", SRV]).env("BROOM_CAPTURE_DISK", disk);
+    match tls {
+        Some(t) => c.env("BROOM_TLS", t),
+        None => c.env_remove("BROOM_TLS"),
+    };
+    let mut c = c
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -22,6 +27,13 @@ fn tool(disk: &std::path::Path, input: &str) -> (Output, String) {
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     (out, text)
 }
+
+fn tool(disk: &std::path::Path, input: &str) -> (Output, String) {
+    tool_with(disk, input, FINGERPRINT.get().map(String::as_str))
+}
+
+/// The server's certificate fingerprint, as its Settings -> HTTPS page shows it (read once the admin is signed in).
+static FINGERPRINT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 fn sh(script: &str) {
     assert!(
@@ -38,13 +50,16 @@ fn sh(script: &str) {
 fn capture_then_deploy() {
     sandbox("capture_then_deploy", || {
         let home = Home::new("capture");
-        // With HTTPS on (the default): the tool trusts the server's self-signed certificate, fetched over HTTP.
+        // With HTTPS on (the default): the tool talks HTTPS only, to the certificate whose fingerprint the admin
+        // confirms — the one on the server's Settings -> HTTPS page.
         let _srv = Server::start_with(&home, &["--https-port", "443"]);
-        let cert = Http::new().get("/api/tls/cert").json()["cert"]
+        let cert = std::fs::read_to_string(home.0.join("tls/cert.pem")).unwrap();
+        let h = admin_via(&home, &Http::tls(&cert));
+        let sha = h.get("/api/config/tls").json()["sha256"]
             .as_str()
             .unwrap()
             .to_string();
-        let h = admin_via(&home, &Http::tls(&cert));
+        FINGERPRINT.set(sha.clone()).unwrap();
 
         // 64 MiB GPT disk: p1 8 MiB of data, p2 the rest, zeros but one MiB near its end.
         let disk = home.0.join("pc-disk.img");
@@ -56,6 +71,47 @@ fn capture_then_deploy() {
              yes data | head -c 1048576 | dd of={d} bs=1M seek=50 conv=notrunc status=none"
         ));
 
+        // The certificate is the tool's only trust in the server, and it must be confirmed:
+        // another fingerprint given (a host in the middle with its own certificate) → the tool stops before signing in;
+        let wrong = format!("{}00", &sha[..sha.len() - 2]).replace("0000", "1100");
+        let wrong = if wrong == sha {
+            format!("{}ff", &sha[..sha.len() - 2])
+        } else {
+            wrong
+        };
+        let (out, text) = tool_with(
+            &disk,
+            &format!("admin\n{PASSWORD}\n1\n1\nx\n"),
+            Some(&wrong),
+        );
+        assert!(!out.status.success(), "{text}");
+        assert!(text.contains("not the one given in BROOM_TLS"), "{text}");
+        assert!(
+            !text.contains("Owner account"),
+            "stopped before the sign-in: {text}"
+        );
+        // plain HTTP asked for while the server answers HTTPS → stops as well (no downgrade);
+        let (out, text) = tool_with(&disk, "yes\nadmin\n", Some("plain"));
+        assert!(
+            !out.status.success() && text.contains("answers HTTPS"),
+            "{text}"
+        );
+        // asked on its console: shown as on Settings -> HTTPS; anything but yes → stops.
+        let (out, text) = tool_with(&disk, "no\n", None);
+        assert!(!out.status.success(), "{text}");
+        let shown: String = sha
+            .to_uppercase()
+            .as_bytes()
+            .chunks(2)
+            .map(|c| String::from_utf8_lossy(c).into_owned())
+            .collect::<Vec<_>>()
+            .join(":");
+        assert!(
+            text.contains(&shown),
+            "its fingerprint {shown} shown: {text}"
+        );
+        assert!(text.contains("certificate not confirmed"), "{text}");
+
         // A wrong password first (asked again), the owner's, Capture, disk 1, the image name.
         let (out, text) = tool(
             &disk,
@@ -63,7 +119,7 @@ fn capture_then_deploy() {
         );
         assert!(text.contains("wrong user or password"), "{text}");
         assert!(text.contains("Image cap1 created"), "{text}");
-        // Over HTTPS (plain HTTP admin calls without the tool's mark are refused while HTTPS is on).
+        // Over HTTPS (plain HTTP admin calls are refused while HTTPS is on), never asking to go plain.
         assert!(!text.contains("plain HTTP"), "{text}");
         assert!(text.contains("All sent"), "{text}");
         // No Windows on this disk: the server's publish refuses it — after the convert.

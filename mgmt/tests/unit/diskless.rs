@@ -265,7 +265,9 @@ fn linux_goldens_boot_their_distribution_loader() {
 #[test]
 fn ubuntu_installer_boot() {
     let s = casper_script("ubu", "iscsi:10.20.0.1::::iqn.x:golden-ubu.g3", "10.20.0.1");
-    let lines: Vec<&str> = s.lines().collect();
+    // iPXE's leftover images (the EFI autoexec.ipxe) freed before the kernel, as for the stage.
+    assert!(s.starts_with("imgfree\n"), "{s}");
+    let lines: Vec<&str> = s.lines().skip(1).collect();
     assert_eq!(
         lines[0],
         "sanhook --drive 0x80 iscsi:10.20.0.1::::iqn.x:golden-ubu.g3 || goto failed"
@@ -375,4 +377,100 @@ fn router_kept_only_when_the_boot_left_it_out() {
         note_router(mac, "set net0/gateway 0.0.0.0\n", bad);
         assert_eq!(router_of(mac), None, "{bad:?}");
     }
+}
+
+/// A machine's boots are prepared one after the other: its second request waits for the first and then goes on (the
+/// PC was reset meanwhile), a third at the same moment is turned away (a guest asking in a loop holds one worker).
+/// Other machines never wait: a whole room takes its turns at once.
+#[tokio::test]
+async fn one_boot_at_a_time_per_machine_others_at_once() {
+    use std::time::Duration;
+    let a = Turn::take("52:54:00:AA:00:01").await.expect("first");
+    // The same machine (any case) again: it waits…
+    let mut second = tokio::spawn(Turn::take("52:54:00:aa:00:01"));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut second)
+            .await
+            .is_err(),
+        "the second request waits for the first"
+    );
+    // …and a third is not queued.
+    assert!(Turn::take("52:54:00:aa:00:01").await.is_none());
+    // 45 other machines meanwhile: every one has its turn at once, none behind another.
+    let mut room = Vec::new();
+    for i in 0..45 {
+        let t = tokio::time::timeout(
+            Duration::from_secs(1),
+            Turn::take(&format!("52:54:00:bb:00:{i:02x}")),
+        )
+        .await
+        .expect("no machine waits for another");
+        room.push(t.expect("its turn"));
+    }
+    // The first one done → the waiting one goes on, and the machine may queue one more again.
+    drop(a);
+    let b = tokio::time::timeout(Duration::from_secs(1), second)
+        .await
+        .expect("the second request goes on")
+        .unwrap()
+        .expect("its turn");
+    let mut next = tokio::spawn(Turn::take("52:54:00:aa:00:01"));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut next)
+            .await
+            .is_err()
+    );
+    // A waiting request that goes away (its PC was reset again) gives its place back.
+    next.abort();
+    let _ = next.await;
+    drop(b);
+    drop(room);
+    assert!(BOOTING.lock().is_empty(), "nothing kept once all are done");
+    assert!(Turn::take("52:54:00:aa:00:01").await.is_some());
+}
+
+/// A machine's setup may ask for its key and report itself done only on a first boot, shortly after it started, each
+/// once: a later session (a guest's) is never accepted as a base, and the key is never handed out twice.
+#[test]
+fn first_boot_steps() {
+    let boot = |first| Boot {
+        at: 1000,
+        first,
+        key_given: false,
+        done: false,
+    };
+    // No boot known (server restarted) / not a first boot: nothing.
+    assert!(first_boot_step(None, 1000, Step::Done).is_err());
+    assert!(first_boot_step(None, 1000, Step::Key).is_err());
+    let mut b = boot(false);
+    assert!(first_boot_step(Some(&mut b), 1001, Step::Done).is_err());
+    assert!(first_boot_step(Some(&mut b), 1001, Step::Key).is_err());
+    assert_eq!(b, boot(false), "nothing noted on a refusal");
+    // A first boot: the key once, then done once.
+    let mut b = boot(true);
+    assert_eq!(first_boot_step(Some(&mut b), 1060, Step::Key), Ok(()));
+    assert!(
+        first_boot_step(Some(&mut b), 1061, Step::Key).is_err(),
+        "the key only once"
+    );
+    assert_eq!(first_boot_step(Some(&mut b), 1100, Step::Done), Ok(()));
+    assert!(
+        first_boot_step(Some(&mut b), 1101, Step::Done).is_err(),
+        "done only once"
+    );
+    assert!(
+        first_boot_step(Some(&mut b), 1102, Step::Key).is_err(),
+        "no key after done"
+    );
+    // Without the agent (its setup failed): done alone is fine.
+    let mut b = boot(true);
+    assert_eq!(
+        first_boot_step(Some(&mut b), 1000 + FIRST_BOOT_S, Step::Done),
+        Ok(())
+    );
+    // Too late: a session in use for a while.
+    let mut b = boot(true);
+    assert!(first_boot_step(Some(&mut b), 1001 + FIRST_BOOT_S, Step::Done).is_err());
+    assert!(first_boot_step(Some(&mut b), 1001 + FIRST_BOOT_S, Step::Key).is_err());
+    assert!(!b.done && !b.key_given);
 }

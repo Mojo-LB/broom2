@@ -12,10 +12,10 @@
     <!-- Power (power.rs): turn on = Wake-on-LAN; restart / shut down / cancel go to the PC's Broom agent. -->
     <div class="d-flex flex-wrap gap-2 align-items-center mb-3">
       <span id="m_sel" class="msg">0 selected</span>
-      <button class="btn btn-sm btn-outline-secondary" data-click="mPower" data-args='["on"]' title="Wake-on-LAN (it must be on in the PC's firmware)">Turn on</button>
-      <button class="btn btn-sm btn-outline-warning" data-click="mPower" data-args='["restart"]' title="Through the PC's Broom agent: a countdown and your message on its screen">Restart</button>
-      <button class="btn btn-sm btn-outline-danger" data-click="mPower" data-args='["shutdown"]' title="Through the PC's Broom agent: a countdown and your message on its screen">Shut down</button>
-      <button class="btn btn-sm btn-outline-secondary" data-click="mPower" data-args='["cancel"]' title="Stop a restart / shutdown still counting down">Cancel</button>
+      <button class="btn btn-sm btn-outline-secondary" data-perm="wake" data-click="mPower" data-args='["on"]' title="Wake-on-LAN (it must be on in the PC's firmware)">Turn on</button>
+      <button class="btn btn-sm btn-outline-warning" data-perm="power" data-click="mPower" data-args='["restart"]' title="Through the PC's Broom agent: a countdown and your message on its screen">Restart</button>
+      <button class="btn btn-sm btn-outline-danger" data-perm="power" data-click="mPower" data-args='["shutdown"]' title="Through the PC's Broom agent: a countdown and your message on its screen">Shut down</button>
+      <button class="btn btn-sm btn-outline-secondary" data-perm="power" data-click="mPower" data-args='["cancel"]' title="Stop a restart / shutdown still counting down">Cancel</button>
       <label class="visually-hidden" for="m_delay">Countdown</label>
       <select class="form-select form-select-sm w-auto" id="m_delay" title="Countdown on the PC before a restart / shutdown">
         <option value="0">now</option><option value="30" selected>in 30 s</option><option value="60">in 1 min</option><option value="300">in 5 min</option>

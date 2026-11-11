@@ -35,7 +35,7 @@ pub fn routes() -> Router<SharedState> {
     Router::new()
         .route("/api/config/tls", get(status))
         .route("/api/config/tls", post(set))
-        .route("/api/tls/cert", get(for_tools))
+        .route("/api/tls/port", get(for_tools))
         .route("/api/config/tls/cert.pem", get(download))
 }
 
@@ -262,17 +262,43 @@ fn new_self_signed(st: &SharedState) -> Result<Meta, String> {
     Ok(meta)
 }
 
-/// Write cert + key (key readable by root only), then use them.
+/// `d` exists and only its owner gets in (0700): the private key lives there.
+pub(crate) fn private_dir(d: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    match std::fs::DirBuilder::new().mode(0o700).create(d) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// `data` → `p`, never readable by anyone but its owner: made 0600 (whatever the umask), written, synced, then
+/// renamed into place — there is no moment at which the file exists with wider rights.
+pub(crate) fn write_private(p: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut tmp = p.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let _ = std::fs::remove_file(&tmp); // a stale one (made by anyone) is not reused
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    f.write_all(data)?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, p)
+}
+
+/// Write cert + key (key readable by root only, from the moment it exists), then use them.
 fn install(st: &SharedState, cert: &str, key: &str, meta: Meta) -> Result<(), String> {
     let (ck, _) = certified(cert, key)?;
-    std::fs::create_dir_all(dir()).map_err(|e| e.to_string())?;
+    private_dir(&dir()).map_err(|e| format!("{}: {e}", dir().display()))?;
     let (c, k) = files();
-    crate::versions::write_durable(&k, key.as_bytes())
-        .map_err(|e| format!("{}: {e}", k.display()))?;
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&k, std::fs::Permissions::from_mode(0o600));
-    }
+    write_private(&k, key.as_bytes()).map_err(|e| format!("{}: {e}", k.display()))?;
     crate::versions::write_durable(&c, cert.as_bytes())
         .map_err(|e| format!("{}: {e}", c.display()))?;
     st.db
@@ -526,15 +552,6 @@ pub async fn http_side(State(st): State<SharedState>, req: Request<Body>, next: 
     if !LISTENING.load(Ordering::Relaxed) || !enabled(&st) {
         return next.run(req).await;
     }
-    // The capture tool (capture.rs) when it cannot check the certificate: it says so; a browser never sends this
-    // header on its own (and its Secure cookie never travels on plain HTTP anyway).
-    if req
-        .headers()
-        .get("x-broom-tool")
-        .is_some_and(|v| v == "capture")
-    {
-        return next.run(req).await;
-    }
     let host = req
         .headers()
         .get(header::HOST)
@@ -571,24 +588,126 @@ async fn status(State(st): State<SharedState>) -> Json<serde_json::Value> {
     }))
 }
 
-/// GET /api/tls/cert (public, plain HTTP) — for the capture tool: the HTTPS port (0 = none) and, while the server's own
-/// self-signed certificate is in use, that certificate (PEM) to trust exactly.
+/// GET /api/tls/port (public, plain HTTP) — for the capture tool: where HTTPS listens (0 = the admin is on plain
+/// HTTP). Only a hint, and nothing to trust: no certificate is handed out over plain HTTP — the tool reads it from
+/// the TLS handshake and the admin confirms its fingerprint (`fingerprint`, capture.rs).
 async fn for_tools(State(st): State<SharedState>) -> Json<serde_json::Value> {
     let on = LISTENING.load(Ordering::Relaxed) && enabled(&st);
-    let m = meta(&st);
-    let self_signed = m.kind == "self-signed";
-    let cert = if on && self_signed {
-        tokio::task::spawn_blocking(|| std::fs::read_to_string(files().0).unwrap_or_default())
-            .await
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
     Json(serde_json::json!({
         "port": if on { HTTPS_PORT.load(Ordering::Relaxed) } else { 0 },
-        "self_signed": self_signed,
-        "cert": cert,
     }))
+}
+
+// ---------- a client that trusts one certificate by its fingerprint (the capture tool) ----------
+
+/// A SHA-256 fingerprint as people compare it: "AB:CD:…" (as on Settings → HTTPS).
+pub(crate) fn fingerprint(sha: &[u8; 32]) -> String {
+    sha.iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// A fingerprint as typed or pasted: 64 hex digits, any case, ':' / spaces / '-' between them or not.
+pub(crate) fn parse_fingerprint(s: &str) -> Option<[u8; 32]> {
+    let h: String = s
+        .chars()
+        .filter(|c| !matches!(c, ':' | ' ' | '-'))
+        .collect();
+    if h.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(h.get(2 * i..2 * i + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
+
+/// Accepts the server by its certificate's SHA-256 alone — exactly `pin`, whoever issued it and whatever names it
+/// holds (the tool reaches the server by IP) — and still checks the handshake's signature, so the server holds that
+/// certificate's key. `pin` None: any certificate (only to read which one the server presents, `seen`; nothing is
+/// sent on such a connection).
+#[derive(Debug)]
+pub(crate) struct Pinned {
+    pin: Option<[u8; 32]>,
+    pub seen: SeenCert,
+    provider: Arc<rustls::crypto::CryptoProvider>,
+}
+
+impl rustls::client::danger::ServerCertVerifier for Pinned {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _name: &rustls::pki_types::ServerName<'_>,
+        _ocsp: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        let sha: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(end_entity.as_ref()).into();
+        *self.seen.lock() = Some(sha);
+        match self.pin {
+            Some(p) if p != sha => Err(rustls::Error::General(
+                "the server's certificate is not the one that was confirmed".into(),
+            )),
+            _ => Ok(rustls::client::danger::ServerCertVerified::assertion()),
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+/// Where a handshake notes the SHA-256 of the certificate the server presented.
+pub(crate) type SeenCert = Arc<parking_lot::Mutex<Option<[u8; 32]>>>;
+
+/// A TLS client configuration that trusts the certificate with SHA-256 `pin` only (None: see `Pinned`), and where
+/// the certificate each handshake presented is noted.
+pub(crate) fn pinned_client(pin: Option<[u8; 32]>) -> (Arc<rustls::ClientConfig>, SeenCert) {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let seen = Arc::new(parking_lot::Mutex::new(None));
+    let cfg = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .expect("TLS versions")
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(Pinned {
+            pin,
+            seen: seen.clone(),
+            provider,
+        }))
+        .with_no_client_auth();
+    (Arc::new(cfg), seen)
 }
 
 #[derive(Deserialize)]

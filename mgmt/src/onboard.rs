@@ -258,11 +258,32 @@ pub(crate) fn busy(st: &SharedState, name: &str) -> bool {
     job(st).is_some_and(|j| active(&j) && j.golden == name)
 }
 
-/// Golden whose update session belongs to the onboarding VM right now: the daemon lets 127.0.0.1 write it.
-static VM_GOLDEN: parking_lot::Mutex<Option<String>> = parking_lot::Mutex::new(None);
+/// Golden whose update session belongs to this server right now (the onboarding VM, the script refresh), and that
+/// job's write key: the daemon lets 127.0.0.1 write it only through the target name carrying the key (`local_target`).
+static VM_GOLDEN: parking_lot::Mutex<Option<(String, String)>> = parking_lot::Mutex::new(None);
 
 pub(crate) fn vm_owns(name: &str) -> bool {
-    VM_GOLDEN.lock().as_deref() == Some(name)
+    VM_GOLDEN.lock().as_ref().is_some_and(|(g, _)| g == name)
+}
+
+/// The write key of the job holding golden `name` (None = no job of this server holds it).
+pub(crate) fn vm_key(name: &str) -> Option<String> {
+    VM_GOLDEN
+        .lock()
+        .as_ref()
+        .filter(|(g, _)| g == name)
+        .map(|(_, k)| k.clone())
+}
+
+/// A new write key for one job of this server on a golden or games disk (never sent anywhere: it only appears in
+/// the target name this server logs in to over its own loopback).
+pub(crate) fn new_write_key() -> String {
+    crate::auth::random_token()
+}
+
+/// The target this server logs in to for writing: version target `target` ("<iqn>.g<k>") with the job's key.
+pub(crate) fn local_target(target: &str, key: &str) -> String {
+    format!("{target}.u{key}")
 }
 
 /// The VM's QEMU process (cancel kills it).
@@ -616,6 +637,33 @@ fn valid_id(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || "\\&_-.#{}".contains(c))
 }
 
+/// broom-report.exe, the program Windows PE runs to report the PC's cards: built from winpe/broom-report.c — by CI
+/// into a release's assets, or by `mgmt/winpe/build.sh` for a local build, which puts it at
+/// `<Broom's folder>/winpe/broom-report.exe`. None = this build has none (Add hardware says how to get it).
+pub(crate) fn reporter() -> Option<Vec<u8>> {
+    if let Some(b) = crate::assets::optional("scripts/broom-report.exe") {
+        return Some(b.to_vec());
+    }
+    std::fs::read(reporter_path())
+        .ok()
+        .filter(|b| b.starts_with(b"MZ"))
+}
+
+fn reporter_path() -> PathBuf {
+    crate::home().join("winpe/broom-report.exe")
+}
+
+/// Why Add hardware cannot run on this build (no reporter), if so.
+pub(crate) fn reporter_missing() -> Option<String> {
+    reporter().is_none().then(|| {
+        format!(
+            "this is a local build without broom-report.exe — build it (mgmt/winpe/build.sh, needs gcc-mingw-w64-x86-64) \
+             and copy it to {}, or use a release",
+            reporter_path().display()
+        )
+    })
+}
+
 // ---------- the VM side ----------
 
 /// Tools the job needs on this server; Err lists what is missing.
@@ -640,6 +688,54 @@ pub(crate) fn preflight() -> Result<(), String> {
             miss.join(", ")
         ))
     }
+}
+
+// ---------- confining QEMU ----------
+// Both VMs of this server (this one, and the maintenance VM in the browser, vmmaint.rs) run a golden — Windows with
+// whatever was installed into it, the maintenance one with internet and a person typing — inside QEMU started by
+// Broom, which is root. A flaw in QEMU's device emulation must not hand the guest a root process on the server:
+// - QEMU drops to an unprivileged user as soon as it has opened what it needs (KVM, the disks, its sockets): from
+//   then on it cannot open the server's files, other disks, or signal other processes;
+// - QEMU's seccomp filter (-sandbox): no obsolete system calls, no new processes, no scheduling / resource changes.
+// The maintenance VM's own unit adds systemd's file-system and capability limits (vmmaint::launch).
+// Its network is NOT narrowed: it reaches the internet and the LANs the server reaches, through QEMU's NAT.
+
+/// The user QEMU runs as once started: nobody (uid:gid, the same number on Debian, Ubuntu, Fedora…).
+pub(crate) const QEMU_USER: &str = "65534:65534";
+
+/// QEMU's version from the first line of `qemu-system-x86_64 --version` ("QEMU emulator version 8.2.2 (…)").
+pub(crate) fn parse_qemu_version(text: &str) -> Option<(u32, u32)> {
+    let v = text.split("version ").nth(1)?;
+    let mut n = v
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|p| !p.is_empty())
+        .map(|p| p.parse::<u32>().ok());
+    Some((n.next()??, n.next()??))
+}
+
+/// The installed QEMU's version (None = not found / not understood).
+pub(crate) fn qemu_version() -> Option<(u32, u32)> {
+    let o = Command::new(which("qemu-system-x86_64")?)
+        .arg("--version")
+        .output()
+        .ok()?;
+    parse_qemu_version(&String::from_utf8_lossy(&o.stdout))
+}
+
+/// The arguments that confine QEMU (see above), for QEMU `version`: the option that drops the user is `-runas`
+/// up to 9.0 and `-run-with user=` from 9.1 on (which deprecated `-runas`). The filter must allow the one change
+/// of user at start (elevateprivileges=allow); as nobody there is nothing left to elevate to.
+pub(crate) fn confine_args(version: Option<(u32, u32)>) -> Vec<String> {
+    let mut a: Vec<String> = if version.is_some_and(|v| v >= (9, 1)) {
+        vec!["-run-with".into(), format!("user={QEMU_USER}")]
+    } else {
+        vec!["-runas".into(), QEMU_USER.into()]
+    };
+    a.extend([
+        "-sandbox".to_string(),
+        "on,obsolete=deny,elevateprivileges=allow,spawn=deny,resourcecontrol=deny".to_string(),
+    ]);
+    a
 }
 
 pub(crate) fn which(t: &str) -> Option<PathBuf> {
@@ -801,23 +897,87 @@ pub(crate) fn logout(target: &str) {
     );
 }
 
-/// `rel` ("Windows/Setup/Scripts") under `root`, each part matched without case (NTFS keeps the case Windows used).
-fn ci_path(root: &FsPath, rel: &str) -> Option<PathBuf> {
+// ---------- files inside a mounted golden ----------
+// A golden is written by whatever ran in it (its maintenance session, with internet), and an NTFS volume can hold
+// symbolic links to anywhere — ntfs-3g shows them as Linux links, and "../../.." climbs out of the mount. This server
+// reads, writes and deletes there as root, so nothing inside a mounted golden is ever reached through a link: every
+// part of a path is checked (`ci_path`), and files are opened with O_NOFOLLOW (`g_read`, `g_write`). The volume is
+// mounted by this server alone while it works on it, so what was checked cannot change underneath.
+
+/// `rel` under `root` (a mounted golden), its parts matched without regard to case (NTFS names) — None when a part
+/// is missing or is a symbolic link (logged: a golden has no business holding one on these paths).
+pub(crate) fn ci_path(root: &FsPath, rel: &str) -> Option<PathBuf> {
     let mut cur = root.to_path_buf();
     for part in rel.split('/').filter(|p| !p.is_empty()) {
         let exact = cur.join(part);
-        if exact.exists() {
-            cur = exact;
-            continue;
+        let next = if std::fs::symlink_metadata(&exact).is_ok() {
+            exact
+        } else {
+            std::fs::read_dir(&cur)
+                .ok()?
+                .flatten()
+                .find(|e| {
+                    e.file_name()
+                        .to_str()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(part))
+                })?
+                .path()
+        };
+        if is_link(&next) {
+            tracing::warn!(
+                "golden: {} is a symbolic link - not followed",
+                next.strip_prefix(root).unwrap_or(&next).display()
+            );
+            return None;
         }
-        let hit = std::fs::read_dir(&cur).ok()?.flatten().find(|e| {
-            e.file_name()
-                .to_str()
-                .is_some_and(|n| n.eq_ignore_ascii_case(part))
-        })?;
-        cur = hit.path();
+        cur = next;
     }
     Some(cur)
+}
+
+/// `p` itself is a symbolic link (not what it points to).
+fn is_link(p: &FsPath) -> bool {
+    std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+/// `name` in folder `dir` of a mounted golden (`dir` from `ci_path`), for a file or folder this server makes there:
+/// refused when something of that name is there as a symbolic link.
+pub(crate) fn g_child(dir: &FsPath, name: &str) -> Result<PathBuf, String> {
+    let p = dir.join(name);
+    if is_link(&p) {
+        return Err(format!(
+            "{name} in the golden is a symbolic link - not touched"
+        ));
+    }
+    Ok(p)
+}
+
+/// A file of a mounted golden, read without following a link at its name.
+pub(crate) fn g_read(p: &FsPath) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut v = Vec::new();
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(p)
+        .and_then(|mut f| f.read_to_end(&mut v))
+        .map_err(|e| format!("{}: {e}", p.display()))?;
+    Ok(v)
+}
+
+/// A file of a mounted golden written (made or replaced) without following a link at its name.
+pub(crate) fn g_write(p: &FsPath, data: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(p)
+        .and_then(|mut f| f.write_all(data))
+        .map_err(|e| format!("{}: {e}", p.display()))
 }
 
 struct Mount {
@@ -829,12 +989,17 @@ impl Mount {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         let p = part.to_string_lossy();
         let d = dir.to_string_lossy();
-        let mut args = vec![p.as_ref(), d.as_ref()];
-        if !rw {
-            args.insert(0, "-o");
-            args.insert(1, "ro");
-        }
-        sh("ntfs-3g", &args, Duration::from_secs(60))?;
+        // Nothing in a golden is run, trusted as a device or as a set-uid program on this server.
+        let opts = if rw {
+            "nosuid,nodev,noexec"
+        } else {
+            "ro,nosuid,nodev,noexec"
+        };
+        sh(
+            "ntfs-3g",
+            &["-o", opts, p.as_ref(), d.as_ref()],
+            Duration::from_secs(60),
+        )?;
         Ok(Mount {
             dir: dir.to_path_buf(),
         })
@@ -895,12 +1060,13 @@ fn run_vm(st: &SharedState, token: &str, disk: &FsPath, work: &FsPath) -> Result
     std::fs::copy(&vars_t, &vars).map_err(|e| format!("OVMF vars: {e}"))?;
     let qmp = work.join("qmp.sock");
     let _ = std::fs::remove_file(&qmp);
-    let args = qemu_args(
+    let mut args = qemu_args(
         &disk.to_string_lossy(),
         &code.to_string_lossy(),
         &vars.to_string_lossy(),
         &qmp.to_string_lossy(),
     );
+    args.extend(confine_args(qemu_version()));
     let log = std::fs::File::create(work.join("qemu.log")).map_err(|e| e.to_string())?;
     let mut c = Command::new(which("qemu-system-x86_64").ok_or("no qemu-system-x86_64")?)
         .args(&args)
@@ -945,13 +1111,20 @@ fn run_vm(st: &SharedState, token: &str, disk: &FsPath, work: &FsPath) -> Result
 
 /// The whole VM step for the current job → (status line, results). The golden's update session holds all its writes:
 /// on Err the caller discards them, so the golden stays as it was. Blocking.
-fn install(st: &SharedState, j: &Job) -> Result<(String, Vec<serde_json::Value>), String> {
+fn install(
+    st: &SharedState,
+    j: &Job,
+    key: &str,
+) -> Result<(String, Vec<serde_json::Value>), String> {
     let t = &j.token;
     let info = diskless::served(&j.golden).ok_or("the golden is not served")?;
     if info.disk.update_bytes > 0 || info.disk.update_connected {
         return Err("the golden has unsaved maintenance work - Save or Discard it first".into());
     }
-    let target = format!("{}.g{}", diskless::iqn(st, &j.golden), info.disk.ver);
+    let target = local_target(
+        &format!("{}.g{}", diskless::iqn(st, &j.golden), info.disk.ver),
+        key,
+    );
     let work = work_dir(st)?;
     let mnt = work.join("mnt");
     say(
@@ -976,7 +1149,7 @@ fn install(st: &SharedState, j: &Job) -> Result<(String, Vec<serde_json::Value>)
             let ps = ci_path(&dir, "broom-diskless.ps1")
                 .filter(|f| f.is_file())
                 .ok_or("the golden has no broom-diskless.ps1 (its startup task) — run it on the golden first")?;
-            orig = std::fs::read(&ps).map_err(|e| e.to_string())?;
+            orig = g_read(&ps)?;
             std::fs::write(work.join("broom-diskless.ps1.orig"), &orig)
                 .map_err(|e| e.to_string())?;
             for f in ["broom-onboard-result.json", "broom-onboard.log"] {
@@ -991,10 +1164,14 @@ fn install(st: &SharedState, j: &Job) -> Result<(String, Vec<serde_json::Value>)
                 .flat_map(|n| n.hwids.iter().chain(n.compat.iter()).cloned())
                 .chain((!j.boot_card.is_empty()).then(|| j.boot_card.clone()))
                 .collect();
-            let _ = std::fs::remove_dir_all(dir.join("broom-drv"));
+            let drv_dir = g_child(&dir, "broom-drv")?;
+            let _ = std::fs::remove_dir_all(&drv_dir);
+            if std::fs::symlink_metadata(&drv_dir).is_ok() {
+                return Err("an old broom-drv folder in the golden could not be removed".into());
+            }
             let mut drv = Vec::new();
             for d in crate::drivers::matching(&nets, &ids) {
-                crate::drivers::unpack(d, &dir.join("broom-drv").join(&d.name))?;
+                crate::drivers::unpack(d, &drv_dir.join(&d.name))?;
                 drv.push(format!("broom-drv\\{}", d.name));
             }
             if !drv.is_empty() {
@@ -1009,10 +1186,14 @@ fn install(st: &SharedState, j: &Job) -> Result<(String, Vec<serde_json::Value>)
             }
             let job_json =
                 serde_json::json!({ "golden": j.golden, "nics": j.nics, "drivers": drv });
-            std::fs::write(dir.join("broom-onboard.json"), job_json.to_string())
-                .map_err(|e| e.to_string())?;
-            std::fs::write(&ps, crate::assets::text("scripts/broom-onboard.ps1"))
-                .map_err(|e| e.to_string())?;
+            g_write(
+                &g_child(&dir, "broom-onboard.json")?,
+                job_json.to_string().as_bytes(),
+            )?;
+            g_write(
+                &ps,
+                crate::assets::text("scripts/broom-onboard.ps1").as_bytes(),
+            )?;
         }
         // 2. Boot it until the script has written its result.
         let mut result = None;
@@ -1030,9 +1211,10 @@ fn install(st: &SharedState, j: &Job) -> Result<(String, Vec<serde_json::Value>)
             if let Some(f) = ci_path(&m.dir, "Windows/Setup/Scripts/broom-onboard-result.json")
                 .filter(|f| f.is_file())
             {
-                let txt = std::fs::read_to_string(&f).map_err(|e| e.to_string())?;
+                let txt = String::from_utf8(g_read(&f)?).map_err(|e| e.to_string())?;
                 let log = ci_path(&m.dir, "Windows/Setup/Scripts/broom-onboard.log")
-                    .and_then(|f| std::fs::read_to_string(f).ok())
+                    .and_then(|f| g_read(&f).ok())
+                    .map(|b| String::from_utf8_lossy(&b).into_owned())
                     .unwrap_or_default();
                 let _ = std::fs::write(work.join("broom-onboard.log"), &log);
                 result = Some(txt);
@@ -1051,8 +1233,11 @@ fn install(st: &SharedState, j: &Job) -> Result<(String, Vec<serde_json::Value>)
         {
             let m = Mount::new(&part, &mnt, true)?;
             let dir = ci_path(&m.dir, "Windows/Setup/Scripts").ok_or("Scripts folder gone")?;
-            std::fs::write(dir.join("broom-diskless.ps1"), &orig).map_err(|e| e.to_string())?;
-            let _ = std::fs::remove_dir_all(dir.join("broom-drv"));
+            let ps = ci_path(&dir, "broom-diskless.ps1").ok_or("broom-diskless.ps1 gone")?;
+            g_write(&ps, &orig)?;
+            if let Ok(d) = g_child(&dir, "broom-drv") {
+                let _ = std::fs::remove_dir_all(d);
+            }
             for f in [
                 "broom-onboard.json",
                 "broom-onboard-result.json",
@@ -1081,8 +1266,9 @@ fn worker(st: SharedState, token: String) {
         return;
     };
     let name = j.golden.clone();
-    *VM_GOLDEN.lock() = Some(name.clone());
-    let r = diskless::sync(&st).and_then(|()| install(&st, &j));
+    let key = new_write_key();
+    *VM_GOLDEN.lock() = Some((name.clone(), key.clone()));
+    let r = diskless::sync(&st).and_then(|()| install(&st, &j, &key));
     *VM_GOLDEN.lock() = None;
     let _ = diskless::sync(&st);
     let save = |f: &dyn Fn() -> Result<String, String>| -> Result<String, String> {
@@ -1178,8 +1364,8 @@ fn retry_connected<T>(f: &dyn Fn() -> Result<T, String>) -> Result<T, String> {
 
 /// Broom's current broom-diskless.ps1 into golden `name`'s C:\Windows\Setup\Scripts (what its startup task runs), and
 /// no machine's agent folder (C:\ProgramData\Broom) left in it. Ok(true) = something changed. Blocking.
-fn write_script(st: &SharedState, name: &str, ver: u64) -> Result<bool, String> {
-    let target = format!("{}.g{ver}", diskless::iqn(st, name));
+fn write_script(st: &SharedState, name: &str, ver: u64, key: &str) -> Result<bool, String> {
+    let target = local_target(&format!("{}.g{ver}", diskless::iqn(st, name)), key);
     let mnt = work_dir(st)?.join("mnt-refresh");
     let dev = login(&target)?;
     let r = (|| {
@@ -1190,8 +1376,8 @@ fn write_script(st: &SharedState, name: &str, ver: u64) -> Result<bool, String> 
             .ok_or("the golden has no C:\\Windows\\Setup\\Scripts\\broom-diskless.ps1 (its startup task) — install it on the golden once from its maintenance machine (Diskless page)")?;
         let new = diskless::script_text(st);
         let mut changed = false;
-        if std::fs::read(&ps).ok().as_deref() != Some(new.as_bytes()) {
-            std::fs::write(&ps, &new).map_err(|e| format!("{}: {e}", ps.display()))?;
+        if g_read(&ps).ok().as_deref() != Some(new.as_bytes()) {
+            g_write(&ps, new.as_bytes())?;
             changed = true;
         }
         if let Some(d) = ci_path(&m.dir, "ProgramData/Broom").filter(|d| d.is_dir()) {
@@ -1240,12 +1426,13 @@ fn refresh_script(st: &SharedState, name: &str) -> Result<String, String> {
     }
     {
         let mut v = VM_GOLDEN.lock();
-        if let Some(o) = v.as_ref() {
+        if let Some((o, _)) = v.as_ref() {
             return Err(format!("{o} is being updated on the server right now"));
         }
-        *v = Some(name.to_string());
+        *v = Some((name.to_string(), new_write_key()));
     }
-    let r = diskless::sync(st).and_then(|()| write_script(st, name, info.disk.ver));
+    let key = vm_key(name).unwrap_or_default();
+    let r = diskless::sync(st).and_then(|()| write_script(st, name, info.disk.ver, &key));
     *VM_GOLDEN.lock() = None;
     let _ = diskless::sync(st);
     let discard = || retry_connected(&|| crate::iscsi::golden_discard(name));
@@ -1313,7 +1500,7 @@ async fn status(State(st): State<SharedState>) -> Result<Json<serde_json::Value>
         j.token.clear();
         j
     });
-    let pre = preflight().err();
+    let pre = preflight().err().or_else(reporter_missing);
     let hint = j.as_ref().and_then(|j| waiting_hint(j, crate::now_secs()));
     Ok(Json(
         serde_json::json!({ "job": j, "hardware": hardware(&st), "missing": pre, "hint": hint }),
@@ -1340,7 +1527,7 @@ async fn start(
                 format!("a job is already {} for {} — cancel it first", j.state, j.golden),
             ));
         }
-        if let Some(g) = VM_GOLDEN.lock().as_ref() {
+        if let Some((g, _)) = VM_GOLDEN.lock().as_ref() {
             return Err((
                 StatusCode::CONFLICT,
                 format!("{g} is being updated on the server right now — try again in a minute"),
@@ -1353,6 +1540,9 @@ async fn start(
             ));
         }
         preflight().map_err(|e| (StatusCode::CONFLICT, e))?;
+        if let Some(e) = reporter_missing() {
+            return Err((StatusCode::CONFLICT, e));
+        }
         let g = diskless::goldens(&st)
             .into_iter()
             .find(|g| g.name == b.golden)
@@ -1453,18 +1643,46 @@ async fn retry(State(st): State<SharedState>) -> Result<Json<serde_json::Value>,
     ))
 }
 
-fn by_token(st: &SharedState, q: &HashMap<String, String>) -> Option<Job> {
+/// The job a Windows PE request is for: the job's token (compared in constant time) AND sent by the job's machine —
+/// the token travels in plain-HTTP URLs on the LAN, so alone it proves nothing: the kernel must see that machine's
+/// network card behind the sender (ARP), as for every other step of its boot.
+fn by_token(st: &SharedState, q: &HashMap<String, String>, peer: &str) -> Option<Job> {
     let t = q.get("t")?;
-    job(st).filter(|j| !j.token.is_empty() && j.token == *t)
+    let j = job(st).filter(|j| token_matches(&j.token, t))?;
+    if !from_job_machine(&j.mac, crate::license::arp_mac(peer).as_deref()) {
+        tracing::warn!(
+            "add hardware: {peer} used the job's token but is not the job's machine ({}) - refused",
+            j.mac
+        );
+        return None;
+    }
+    Some(j)
+}
+
+/// `given` is the job's token (never an empty one).
+pub(crate) fn token_matches(token: &str, given: &str) -> bool {
+    !token.is_empty() && crate::auth::same(token, given)
+}
+
+/// The sender's MAC as the kernel sees it (`seen`) is the job machine's.
+pub(crate) fn from_job_machine(job_mac: &str, seen: Option<&str>) -> bool {
+    let want = crate::iscsid::golden::mac12(job_mac);
+    want.is_some() && seen.and_then(crate::iscsid::golden::mac12) == want
 }
 
 /// POST /api/onboard/report?t= (public: Windows PE) — pnputil's text; starts the VM step.
 async fn report(
     State(st): State<SharedState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Query(q): Query<HashMap<String, String>>,
     body: String,
 ) -> Result<String, ApiError> {
-    let j = by_token(&st, &q).ok_or((StatusCode::NOT_FOUND, "no such job".to_string()))?;
+    let peer = peer.ip().to_canonical().to_string();
+    let j = by_token(&st, &q, &peer).ok_or((
+        StatusCode::NOT_FOUND,
+        "no such job for this PC (the report must come through the network card it booted from)"
+            .to_string(),
+    ))?;
     if j.state != "waiting" {
         return Err((StatusCode::CONFLICT, format!("the job is {}", j.state)));
     }
@@ -1529,9 +1747,10 @@ async fn report(
 /// GET /api/onboard/state?t= (public: Windows PE) — {state, msg}; an unknown token answers state "".
 async fn state_q(
     State(st): State<SharedState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Json<serde_json::Value> {
-    match by_token(&st, &q) {
+    match by_token(&st, &q, &peer.ip().to_canonical().to_string()) {
         Some(j) => Json(serde_json::json!({"state": j.state, "msg": j.msg})),
         None => Json(serde_json::json!({"state": "", "msg": "no such job"})),
     }
@@ -1630,7 +1849,7 @@ async fn file(
     let (j, path) =
         tokio::task::spawn_blocking(move || -> Result<(Job, Option<PathBuf>), ApiError> {
             let (j, _) = job_machine(&st2, &peer).map_err(|e| (StatusCode::FORBIDDEN, e))?;
-            if q2.get("t") != Some(&j.token) {
+            if !q2.get("t").is_some_and(|t| token_matches(&j.token, t)) {
                 return Err((StatusCode::FORBIDDEN, "wrong job".into()));
             }
             let iso = diskless::goldens(&st2)
@@ -1673,7 +1892,10 @@ async fn file(
         )),
         "broom-report.exe" => Ok(text(
             "application/octet-stream",
-            crate::assets::bytes("scripts/broom-report.exe").to_vec(),
+            reporter().ok_or((
+                StatusCode::NOT_FOUND,
+                "no broom-report.exe in this build".to_string(),
+            ))?,
         )),
         "broom-drivers.tar" => {
             let b = tokio::task::spawn_blocking(move || crate::drivers::winpe_bundle(&st))

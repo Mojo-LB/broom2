@@ -1,7 +1,9 @@
 // auth.rs — login for the web UI + API. The web admin controls DHCP, images and license keys and runs as root on a
 // shared LAN, so every admin route needs a session. Client/boot routes stay open (a PXE client can't log in).
-// Accounts (config `users`: a password verifier each, no password) with one of two roles: owner (everything) or staff
-// (the day-to-day: look, Remote, Wake, save a games update — staff_may()). Signing in is a handshake that never sends
+// Accounts (config `users`: a password verifier each, no password), each with a role: owner (everything), staff (the
+// day-to-day, built in: look, Remote, Wake, save a games update) or a role the owner made — a name and a set of
+// permissions (config `roles`; Perm). What a request needs is one table (needs()), checked for every request by the
+// guard: the server decides, whatever the page shows. Signing in is a handshake that never sends
 // the password (pwproof.rs: hello → salt + nonce → proof → the server's proof). The first owner is made with a
 // one-time setup token printed to the server log (so only someone with access to the server can claim the install);
 // it seals that account's verifier, it is never sent either. Sessions live in the database
@@ -32,11 +34,110 @@ use crate::now_secs as now;
 const COOKIE: &str = "broom_session";
 const SESSION_SECS: u64 = 8 * 3600;
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+/// An account's role. Two are built in and cannot be changed: owner (everything) and staff (what Broom's staff
+/// always could: look, Remote, wake machines, save / discard a games update). The owner can make more (`roles`):
+/// each a name and a set of permissions. Stored and sent as its name.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Role {
     Owner,
     Staff,
+    /// A role the owner made (config `roles`); one that no longer exists gives no permission (the account can look).
+    Custom(String),
+}
+
+impl Role {
+    pub fn name(&self) -> &str {
+        match self {
+            Role::Owner => "owner",
+            Role::Staff => "staff",
+            Role::Custom(n) => n,
+        }
+    }
+
+    /// A role by its name (any well-formed name: whether a custom one exists is checked where accounts are set).
+    pub fn parse(n: &str) -> Option<Role> {
+        match n {
+            "owner" => Some(Role::Owner),
+            "staff" => Some(Role::Staff),
+            n if name_ok(n) => Some(Role::Custom(n.to_string())),
+            _ => None,
+        }
+    }
+}
+
+impl Serialize for Role {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.name())
+    }
+}
+
+impl<'de> Deserialize<'de> for Role {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Role, D::Error> {
+        let n = String::deserialize(d)?;
+        Role::parse(&n)
+            .ok_or_else(|| serde::de::Error::custom("role: a-z, 0-9, _ or -, at most 32"))
+    }
+}
+
+/// What a role can be allowed to do beyond looking. Everything not named here (machines, groups, images, disks,
+/// network, settings, accounts, roles…) is the owner's alone and cannot be given away.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum Perm {
+    /// See and control machines' screens (Remote).
+    Remote,
+    /// Turn machines on (Wake-on-LAN).
+    Wake,
+    /// Restart / shut down machines.
+    Power,
+    /// Save / discard a games disk update.
+    Games,
+    /// Run the maintenance VM on the server for games disks (Windows changes are not kept).
+    Vm,
+    /// Maintain goldens: the maintenance machine and VM with Windows changes kept, Save / Discard, Add hardware,
+    /// refresh the startup script.
+    Maintain,
+    /// Choose which version each group boots.
+    Versions,
+}
+
+/// Every permission, with what it allows (the Users page lists them).
+pub(crate) const PERMS: [(Perm, &str); 7] = [
+    (Perm::Remote, "Remote: see and control machines' screens"),
+    (Perm::Wake, "Turn machines on"),
+    (Perm::Power, "Restart / shut down machines"),
+    (Perm::Games, "Save / discard a games disk update"),
+    (
+        Perm::Vm,
+        "Run the maintenance VM for games disks (Windows changes not kept)",
+    ),
+    (
+        Perm::Maintain,
+        "Maintain goldens: maintenance machine / VM keeping Windows changes, Save / Discard, Add hardware",
+    ),
+    (Perm::Versions, "Choose the version each group boots"),
+];
+
+/// The built-in staff role: exactly what staff could do before roles existed.
+pub(crate) const STAFF: [Perm; 3] = [Perm::Remote, Perm::Wake, Perm::Games];
+
+pub(crate) type Perms = std::collections::BTreeSet<Perm>;
+
+/// The roles the owner made: name → permissions (config `roles`).
+pub(crate) fn roles(st: &SharedState) -> std::collections::BTreeMap<String, Perms> {
+    serde_json::from_str(&st.db.get_config("roles", "{}")).unwrap_or_else(|e| {
+        tracing::error!("roles: stored value unreadable: {e}");
+        Default::default()
+    })
+}
+
+/// What `role` allows, given the owner's `custom` roles. The owner: everything.
+pub(crate) fn perms_of(role: &Role, custom: &std::collections::BTreeMap<String, Perms>) -> Perms {
+    match role {
+        Role::Owner => PERMS.iter().map(|(p, _)| *p).collect(),
+        Role::Staff => STAFF.into_iter().collect(),
+        Role::Custom(n) => custom.get(n).cloned().unwrap_or_default(),
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -47,11 +148,71 @@ pub struct User {
     pw: crate::pwproof::Verifier,
 }
 
-/// Who made a request (the guard puts it in the request's extensions).
+/// Who made a request (the guard puts it in the request's extensions), with what their role allows — read from the
+/// stored roles at every request, so a change of role or of a role's permissions counts at once.
 #[derive(Clone, Debug)]
 pub struct Who {
     pub name: String,
     pub role: Role,
+    pub perms: Perms,
+}
+
+impl Who {
+    pub fn can(&self, p: Perm) -> bool {
+        self.role == Role::Owner || self.perms.contains(&p)
+    }
+
+    /// Any of `any`.
+    pub fn can_any(&self, any: &[Perm]) -> bool {
+        any.iter().any(|p| self.can(*p))
+    }
+
+    /// 403 with what is missing, unless this account can do any of `any`. For what a handler decides beyond the
+    /// guard's table (which power action, a VM keeping Windows changes or not).
+    pub fn require(&self, any: &'static [Perm]) -> Result<(), ApiError> {
+        if self.can_any(any) {
+            Ok(())
+        } else {
+            Err((StatusCode::FORBIDDEN, denied(&self.role, &Need::Perm(any))))
+        }
+    }
+}
+
+/// What a request needs from the account that makes it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Need {
+    /// Any signed-in account.
+    Any,
+    /// One of these permissions (the handler may ask for a narrower one: `Who::require`).
+    Perm(&'static [Perm]),
+    /// The owner.
+    Owner,
+}
+
+/// The message of a refusal.
+pub(crate) fn denied(role: &Role, need: &Need) -> String {
+    let what = match need {
+        Need::Perm(any) => any
+            .iter()
+            .map(|p| {
+                PERMS
+                    .iter()
+                    .find(|(x, _)| x == p)
+                    .map_or("", |(_, d)| d)
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\" or \""),
+        _ => String::new(),
+    };
+    if what.is_empty() {
+        format!("owner only — your role ({}) cannot do this", role.name())
+    } else {
+        format!(
+            "your role ({}) cannot do this — it needs \"{what}\" (the owner sets roles on the Settings page)",
+            role.name()
+        )
+    }
 }
 
 /// Account name: letters, digits, `_`, `-` (lower case), at most 32.
@@ -92,10 +253,11 @@ pub(crate) fn new_user(name: &str, role: Role, v: crate::pwproof::Verifier) -> U
     }
 }
 
-/// What staff may do: read every page (but not the CSV with the license keys, a golden's export or the accounts) and,
-/// of the changes, only Wake / power (turn on, restart, shut down), Save / Discard a games update, their own password and logging out. Remote is a GET
-/// (WebSocket).
-pub(crate) fn staff_may(method: &axum::http::Method, path: &str) -> bool {
+/// What a request needs — the one table every request passes (the guard), so the web UI hiding a button is never what
+/// keeps an account out. Looking (GET) is for every signed-in account, but for a few owner-only reads and Remote.
+/// A change is the owner's unless it is listed here with the permission it needs; anything new is therefore
+/// owner-only until someone decides otherwise.
+pub(crate) fn needs(method: &axum::http::Method, path: &str) -> Need {
     use axum::http::Method;
     const OWNER_GET: &[&str] = &[
         "/api/machines/export.csv",
@@ -103,22 +265,47 @@ pub(crate) fn staff_may(method: &axum::http::Method, path: &str) -> bool {
         "/api/images/deploy-map",
         "/api/images/deploy-chunk",
         "/api/users",
+        "/api/roles",
     ];
-    const STAFF_POST: &[&str] = &[
-        "/api/wake",
-        "/api/power",
-        "/api/vm/start",
-        "/api/vm/stop",
-        "/api/versions/pin",
-        "/api/games/save",
-        "/api/games/discard",
-        "/api/password",
-        "/api/auth/logout",
-    ];
+    const VM: &[Perm] = &[Perm::Vm, Perm::Maintain];
     match *method {
-        Method::GET | Method::HEAD => !OWNER_GET.contains(&path),
-        Method::POST => STAFF_POST.contains(&path),
-        _ => false,
+        Method::GET | Method::HEAD => match path {
+            p if OWNER_GET.contains(&p) => Need::Owner,
+            // The screens: a machine's (Remote) and the maintenance VM's (the handler asks for Maintain when the
+            // VM keeps Windows changes).
+            "/api/vnc/view" => Need::Perm(&[Perm::Remote]),
+            "/api/vm/console" | "/vm-console" => Need::Perm(VM),
+            _ => Need::Any,
+        },
+        Method::POST => match path {
+            "/api/password" | "/api/auth/logout" => Need::Any,
+            "/api/wake" => Need::Perm(&[Perm::Wake]),
+            // on → Wake; restart / shut down → Power (power.rs).
+            "/api/power" => Need::Perm(&[Perm::Wake, Perm::Power]),
+            "/api/games/save" | "/api/games/discard" => Need::Perm(&[Perm::Games]),
+            // Keeping Windows changes → Maintain (vmmaint.rs).
+            "/api/vm/start" | "/api/vm/stop" => Need::Perm(VM),
+            "/api/diskless/maint"
+            | "/api/diskless/save"
+            | "/api/diskless/discard"
+            | "/api/diskless/refresh"
+            | "/api/onboard/start"
+            | "/api/onboard/cancel"
+            | "/api/onboard/retry" => Need::Perm(&[Perm::Maintain]),
+            "/api/versions/pin" => Need::Perm(&[Perm::Versions]),
+            _ => Need::Owner,
+        },
+        _ => Need::Owner,
+    }
+}
+
+/// Whether an account with `role` and `perms` gets what `need` asks.
+pub(crate) fn allowed(role: &Role, perms: &Perms, need: &Need) -> bool {
+    match need {
+        _ if *role == Role::Owner => true,
+        Need::Any => true,
+        Need::Perm(any) => any.iter().any(|p| perms.contains(p)),
+        Need::Owner => false,
     }
 }
 
@@ -229,9 +416,12 @@ pub(crate) fn who(st: &SharedState, tok: &str) -> Option<Who> {
         .session(&session_id(tok), now() as i64)
         .ok()
         .flatten()?;
-    users(st).into_iter().find(|u| u.name == name).map(|u| Who {
+    let u = users(st).into_iter().find(|u| u.name == name)?;
+    let perms = perms_of(&u.role, &roles(st));
+    Some(Who {
         name: u.name,
         role: u.role,
+        perms,
     })
 }
 
@@ -303,7 +493,7 @@ pub(crate) fn is_public(method: &axum::http::Method, path: &str) -> bool {
         "/boot/onboard",
         "/api/onboard/report",
         "/api/onboard/state",
-        "/api/tls/cert",
+        "/api/tls/port",
     ];
     // /boot/iso/, /boot/nocloud/: a golden's Ubuntu installer, answered to its maintenance machine only (diskless.rs).
     // /boot/onboard/: "Add hardware" Windows PE files, answered to the job's machine with the job's token (onboard.rs).
@@ -360,7 +550,7 @@ fn host_allowed(host: &str, own: &str) -> bool {
 }
 
 /// Guard middleware on the whole router: Host check, then a session for everything that is not public, then the
-/// role's rights (staff_may). Who it is goes into the request (handlers that show secrets ask), and every change is
+/// role's rights (needs / allowed). Who it is goes into the request (handlers that show secrets ask), and every change is
 /// logged with their name (Logs page).
 pub async fn guard(State(st): State<SharedState>, mut req: Request<Body>, next: Next) -> Response {
     if !host_ok(&req) {
@@ -372,12 +562,9 @@ pub async fn guard(State(st): State<SharedState>, mut req: Request<Body>, next: 
     }
     if let Some(w) = session_token(req.headers()).and_then(|t| who(&st, &t)) {
         let m = req.method().clone();
-        if w.role == Role::Staff && !staff_may(&m, &path) {
-            return (
-                StatusCode::FORBIDDEN,
-                "owner only — ask the owner (staff can look, Remote, Wake and save a games update)",
-            )
-                .into_response();
+        let need = needs(&m, &path);
+        if !allowed(&w.role, &w.perms, &need) {
+            return (StatusCode::FORBIDDEN, denied(&w.role, &need)).into_response();
         }
         // A golden upload is many PUTs of one chunk: its start / done are logged instead.
         if m != axum::http::Method::GET
@@ -439,7 +626,9 @@ async fn status(State(st): State<SharedState>, req: Request<Body>) -> Json<serde
         "configured": !users(&st).is_empty(),
         "authed": w.is_some(),
         "user": w.as_ref().map(|w| w.name.clone()),
-        "role": w.map(|w| w.role),
+        "role": w.as_ref().map(|w| w.role.clone()),
+        // What this account may do beyond looking (the page shows only those controls; the guard decides).
+        "perms": w.map(|w| w.perms),
     }))
 }
 

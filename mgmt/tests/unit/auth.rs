@@ -144,6 +144,15 @@ fn setup_token_compare() {
     assert!(same("abc", "abc") && !same("abc", "abd") && !same("abc", ""));
 }
 
+/// What the guard lets the built-in staff role do (its table, `needs`, with staff's permissions).
+fn staff_may(m: &Method, path: &str) -> bool {
+    allowed(
+        &Role::Staff,
+        &perms_of(&Role::Staff, &Default::default()),
+        &needs(m, path),
+    )
+}
+
 /// Staff: every page, but of the changes only Wake / games Save, Discard / their own password / logout.
 #[test]
 fn staff_rights() {
@@ -185,4 +194,149 @@ fn staff_rights() {
     assert!(!staff_may(&Method::PUT, "/api/images/upload-chunk"));
     assert!(name_ok("thu-ngan") && name_ok("admin_2"));
     assert!(!name_ok("Admin") && !name_ok("a.b") && !name_ok("") && !name_ok(&"x".repeat(33)));
+}
+
+/// Roles: the built-in staff role is exactly what staff could do before roles existed — none of the VM, golden
+/// maintenance, version or restart / shut-down rights; a role the owner makes gets what it was given and nothing
+/// else; and what is not a permission (accounts, roles, settings, images, machines…) stays the owner's whatever a
+/// role holds. All of it decided by the guard's table, for every request.
+#[test]
+fn roles_and_permissions() {
+    use std::collections::BTreeMap;
+    let get = Method::GET;
+    let post = Method::POST;
+    let all: Perms = PERMS.iter().map(|(p, _)| *p).collect();
+    let none = Perms::new();
+    let may = |role: &Role, perms: &Perms, m: &Method, p: &str| allowed(role, perms, &needs(m, p));
+
+    // Built-in staff: Remote, Wake, Games — and none of what the diskless work added.
+    let staff = perms_of(&Role::Staff, &BTreeMap::new());
+    assert_eq!(
+        staff,
+        [Perm::Remote, Perm::Wake, Perm::Games]
+            .into_iter()
+            .collect()
+    );
+    for p in [
+        "/api/vm/start",
+        "/api/vm/stop",
+        "/api/versions/pin",
+        "/api/diskless/maint",
+        "/api/diskless/save",
+        "/api/diskless/discard",
+        "/api/diskless/refresh",
+        "/api/onboard/start",
+        "/api/onboard/cancel",
+        "/api/onboard/retry",
+    ] {
+        assert!(!may(&Role::Staff, &staff, &post, p), "staff POST {p}");
+        assert!(may(&Role::Owner, &none, &post, p), "owner POST {p}");
+    }
+    assert!(
+        !may(&Role::Staff, &staff, &get, "/api/vm/console"),
+        "the VM's screen"
+    );
+    assert!(!may(&Role::Staff, &staff, &get, "/vm-console"));
+    assert!(
+        may(&Role::Staff, &staff, &get, "/api/vm"),
+        "its state: looking"
+    );
+    // /api/power passes the guard with Wake (turning on); restart / shut down need Power in the handler.
+    assert!(may(&Role::Staff, &staff, &post, "/api/power"));
+    assert_eq!(crate::power::needed_for("on"), Perm::Wake);
+    for a in ["restart", "shutdown", "cancel"] {
+        assert_eq!(crate::power::needed_for(a), Perm::Power, "{a}");
+    }
+    // The VM: games disks only → Vm or Maintain; keeping Windows changes → Maintain alone.
+    assert_eq!(
+        crate::vmmaint::needed_for(false),
+        [Perm::Vm, Perm::Maintain]
+    );
+    assert_eq!(crate::vmmaint::needed_for(true), [Perm::Maintain]);
+
+    // A role the owner made: what it was given, nothing else.
+    let mut custom = BTreeMap::new();
+    custom.insert(
+        "night".to_string(),
+        [Perm::Power, Perm::Wake].into_iter().collect::<Perms>(),
+    );
+    custom.insert("looker".to_string(), Perms::new());
+    let night = Role::Custom("night".into());
+    let np = perms_of(&night, &custom);
+    assert!(may(&night, &np, &post, "/api/power") && may(&night, &np, &post, "/api/wake"));
+    assert!(!may(&night, &np, &get, "/api/vnc/view"), "no Remote");
+    assert!(!may(&night, &np, &post, "/api/games/save"));
+    assert!(may(&night, &np, &get, "/api/status") && may(&night, &np, &post, "/api/password"));
+    let looker = Role::Custom("looker".into());
+    let lp = perms_of(&looker, &custom);
+    assert!(
+        may(&looker, &lp, &get, "/api/machines/detail") && !may(&looker, &lp, &post, "/api/wake")
+    );
+    // A role that no longer exists: no permission (the account can look).
+    let gone = Role::Custom("gone".into());
+    assert!(perms_of(&gone, &custom).is_empty());
+
+    // Not permissions at all: the owner's, even for a role holding every permission.
+    let every = Role::Custom("every".into());
+    for p in [
+        "/api/users",
+        "/api/users/delete",
+        "/api/roles",
+        "/api/roles/delete",
+        "/api/config/tls",
+        "/api/dhcp",
+        "/api/diskless/golden",
+        "/api/diskless/golden/delete",
+        "/api/diskless/volume",
+        "/api/diskless/room",
+        "/api/versions/drop-oldest",
+        "/api/versions/keep-free",
+        "/api/images/delete",
+        "/api/machines/update",
+        "/api/machines/display",
+        "/api/groups/set",
+        "/api/vnc/rekey",
+        "/api/volumes/format",
+        "/api/some/route/added/later",
+    ] {
+        assert!(!may(&every, &all, &post, p), "POST {p}: owner only");
+        assert!(may(&Role::Owner, &none, &post, p));
+    }
+    for p in ["/api/users", "/api/roles", "/api/machines/export.csv"] {
+        assert!(!may(&every, &all, &get, p), "GET {p}: owner only");
+    }
+    assert!(!may(
+        &every,
+        &all,
+        &Method::PUT,
+        "/api/diskless/iso/upload-chunk"
+    ));
+    assert!(!may(&every, &all, &Method::DELETE, "/api/anything"));
+
+    // A refusal says what is missing.
+    let msg = denied(&Role::Staff, &needs(&post, "/api/versions/pin"));
+    assert!(
+        msg.contains("staff") && msg.contains("version each group boots"),
+        "{msg}"
+    );
+    assert!(denied(&Role::Staff, &Need::Owner).starts_with("owner only"));
+
+    // Roles as stored and sent: their names; the two built-in names are never a custom role's.
+    assert_eq!(serde_json::to_string(&Role::Owner).unwrap(), "\"owner\"");
+    assert_eq!(
+        serde_json::from_str::<Role>("\"staff\"").unwrap(),
+        Role::Staff
+    );
+    assert_eq!(serde_json::from_str::<Role>("\"night\"").unwrap(), night);
+    assert_eq!(serde_json::to_string(&night).unwrap(), "\"night\"");
+    assert!(serde_json::from_str::<Role>("\"Bad Role\"").is_err());
+    assert!(serde_json::from_str::<Role>("\"\"").is_err());
+    assert!(crate::users::role_name_ok("night-shift"));
+    for n in ["owner", "staff", "Night", "a b", ""] {
+        assert!(!crate::users::role_name_ok(n), "{n:?}");
+    }
+    assert_eq!(
+        serde_json::to_string(&Perm::Maintain).unwrap(),
+        "\"maintain\""
+    );
 }
