@@ -1,8 +1,8 @@
-use super::{ci_path, g_child, g_read, g_write};
 use super::{
     Job, Nic, WINPE_FILES, active, busid_card, judge, parse_pnputil, parse_report, parse_wmic,
     qemu_args, secure_boot, startnet, waiting_hint, wimboot_script,
 };
+use super::{ci_path, g_child, g_read, g_write};
 
 /// pnputil /enum-devices /class Net /ids as Windows PE 26100 prints it (English), with a miniport and two cards.
 const PNPUTIL: &str = "Microsoft PnP Utility\r\n\r\n\
@@ -420,13 +420,19 @@ fn golden_paths_never_follow_links() {
 #[test]
 #[ignore]
 fn live_ntfs_mount_refuses_links() {
-    let (Ok(img), Ok(mnt)) = (std::env::var("BROOM_NTFS_IMG"), std::env::var("BROOM_NTFS_MNT")) else {
+    let (Ok(img), Ok(mnt)) = (
+        std::env::var("BROOM_NTFS_IMG"),
+        std::env::var("BROOM_NTFS_MNT"),
+    ) else {
         return;
     };
     let mnt = std::path::PathBuf::from(mnt);
     let m = super::Mount::new(std::path::Path::new(&img), &mnt, true).expect("mount");
     assert!(ci_path(&m.dir, "Windows/Setup").is_some());
-    assert!(ci_path(&m.dir, "Windows/Setup/Scripts").is_none(), "the link is not followed");
+    assert!(
+        ci_path(&m.dir, "Windows/Setup/Scripts").is_none(),
+        "the link is not followed"
+    );
     let plain = ci_path(&m.dir, "plain").expect("plain folder, any case");
     g_write(&g_child(&plain, "f.txt").unwrap(), b"ok").unwrap();
     assert_eq!(g_read(&plain.join("f.txt")).unwrap(), b"ok");
@@ -448,9 +454,18 @@ fn report_needs_token_and_machine() {
     assert!(token_matches("abc123", "abc123"));
     assert!(!token_matches("abc123", "abc124"));
     assert!(!token_matches("", ""), "no job token: nothing matches");
-    assert!(from_job_machine("52:54:00:aa:bb:01", Some("52-54-00-AA-BB-01")));
-    assert!(!from_job_machine("52:54:00:aa:bb:01", Some("52:54:00:aa:bb:02")), "another PC");
-    assert!(!from_job_machine("52:54:00:aa:bb:01", None), "no ARP entry (not on this LAN)");
+    assert!(from_job_machine(
+        "52:54:00:aa:bb:01",
+        Some("52-54-00-AA-BB-01")
+    ));
+    assert!(
+        !from_job_machine("52:54:00:aa:bb:01", Some("52:54:00:aa:bb:02")),
+        "another PC"
+    );
+    assert!(
+        !from_job_machine("52:54:00:aa:bb:01", None),
+        "no ARP entry (not on this LAN)"
+    );
     assert!(!from_job_machine("", None), "a job without a MAC");
     assert!(!from_job_machine("", Some("")));
 }
@@ -474,20 +489,37 @@ fn local_target_carries_the_key() {
 fn qemu_confinement_args() {
     use super::{QEMU_USER, confine_args, parse_qemu_version};
     assert_eq!(
-        parse_qemu_version("QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)\nCopyright"),
+        parse_qemu_version(
+            "QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)\nCopyright"
+        ),
         Some((8, 2))
     );
-    assert_eq!(parse_qemu_version("QEMU emulator version 10.2.1"), Some((10, 2)));
-    assert_eq!(parse_qemu_version("QEMU emulator version 9.1.0-rc2"), Some((9, 1)));
+    assert_eq!(
+        parse_qemu_version("QEMU emulator version 10.2.1"),
+        Some((10, 2))
+    );
+    assert_eq!(
+        parse_qemu_version("QEMU emulator version 9.1.0-rc2"),
+        Some((9, 1))
+    );
     assert_eq!(parse_qemu_version("something else"), None);
     let sandbox = "on,obsolete=deny,elevateprivileges=allow,spawn=deny,resourcecontrol=deny";
     for v in [Some((8, 2)), Some((9, 0)), None] {
-        assert_eq!(confine_args(v), ["-runas", QEMU_USER, "-sandbox", sandbox], "{v:?}");
+        assert_eq!(
+            confine_args(v),
+            ["-runas", QEMU_USER, "-sandbox", sandbox],
+            "{v:?}"
+        );
     }
     for v in [Some((9, 1)), Some((10, 2)), Some((11, 0))] {
         assert_eq!(
             confine_args(v),
-            ["-run-with", &format!("user={QEMU_USER}"), "-sandbox", sandbox],
+            [
+                "-run-with",
+                &format!("user={QEMU_USER}"),
+                "-sandbox",
+                sandbox
+            ],
             "{v:?}"
         );
     }
@@ -507,13 +539,38 @@ fn live_qemu_is_confined() {
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     let img = d.join("disk.img");
-    std::fs::File::create(&img).unwrap().set_len(16 << 20).unwrap();
+    std::fs::File::create(&img)
+        .unwrap()
+        .set_len(16 << 20)
+        .unwrap();
     let mut c = std::process::Command::new(qemu)
-        .args(["-machine", "q35,accel=tcg", "-m", "64", "-display", "none", "-vga", "none", "-nodefaults", "-S"])
-        .args(["-drive", &format!("file={},format=raw,if=none,id=d0", img.display())])
-        .args(["-device", "ahci,id=sata", "-device", "ide-hd,drive=d0,bus=sata.0"])
+        .args([
+            "-machine",
+            "q35,accel=tcg",
+            "-m",
+            "64",
+            "-display",
+            "none",
+            "-vga",
+            "none",
+            "-nodefaults",
+            "-S",
+        ])
+        .args([
+            "-drive",
+            &format!("file={},format=raw,if=none,id=d0", img.display()),
+        ])
+        .args([
+            "-device",
+            "ahci,id=sata",
+            "-device",
+            "ide-hd,drive=d0,bus=sata.0",
+        ])
         .args(["-netdev", "user,id=n0", "-device", "e1000e,netdev=n0"])
-        .args(["-qmp", &format!("unix:{},server=on,wait=off", d.join("qmp.sock").display())])
+        .args([
+            "-qmp",
+            &format!("unix:{},server=on,wait=off", d.join("qmp.sock").display()),
+        ])
         .args(confine_args(qemu_version()))
         .spawn()
         .unwrap();
@@ -529,7 +586,10 @@ fn live_qemu_is_confined() {
     let _ = c.kill();
     let _ = c.wait();
     let _ = std::fs::remove_dir_all(&d);
-    assert!(!status.is_empty(), "QEMU did not stay up with the confinement arguments");
+    assert!(
+        !status.is_empty(),
+        "QEMU did not stay up with the confinement arguments"
+    );
     assert_eq!(field("Uid:"), ["65534"; 4], "runs as nobody");
     assert_eq!(field("Gid:"), ["65534"; 4]);
     assert_eq!(field("Groups:"), ["65534"], "no other group kept");
@@ -552,6 +612,9 @@ fn reporter_is_built_not_committed() {
     // This (test) build has no release assets and no file in Broom's folder.
     if super::reporter().is_none() {
         let why = super::reporter_missing().expect("says why");
-        assert!(why.contains("winpe/build.sh") && why.contains("broom-report.exe"), "{why}");
+        assert!(
+            why.contains("winpe/build.sh") && why.contains("broom-report.exe"),
+            "{why}"
+        );
     }
 }

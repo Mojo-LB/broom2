@@ -869,8 +869,14 @@ async fn local_update_needs_job_key() {
     });
     let write_status = |target: String| async move {
         let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
-        assert_eq!(login(&mut s, &target).await.bhs[36], 0, "{target}: logged in");
-        s.write_all(&scsi_cmd(31, 1, 0xa0, 0x2a, 8, 1)).await.unwrap();
+        assert_eq!(
+            login(&mut s, &target).await.bhs[36],
+            0,
+            "{target}: logged in"
+        );
+        s.write_all(&scsi_cmd(31, 1, 0xa0, 0x2a, 8, 1))
+            .await
+            .unwrap();
         let r = conn::read_pdu(&mut s).await.unwrap();
         (r.bhs[0], r.bhs[3])
     };
@@ -906,7 +912,11 @@ fn write_key_in_target_name() {
         split_key("iqn.x:d.g3.u0123456789abcdef"),
         ("iqn.x:d.g3", Some("0123456789abcdef"))
     );
-    assert_eq!(split_key("iqn.x:d.g3.uabc"), ("iqn.x:d.g3.uabc", None), "too short");
+    assert_eq!(
+        split_key("iqn.x:d.g3.uabc"),
+        ("iqn.x:d.g3.uabc", None),
+        "too short"
+    );
     assert_eq!(
         split_key("iqn.x:d.g3.u0123456789abcdeg"),
         ("iqn.x:d.g3.u0123456789abcdeg", None),
@@ -921,11 +931,27 @@ fn write_key_in_target_name() {
         update_key: k.map(Into::into),
         ..Default::default()
     };
-    assert!(games::key_allowed(&cfg(None), None, "t", "p"), "no key asked");
-    assert!(games::key_allowed(&cfg(Some("abcd")), Some("abcd"), "t", "p"));
-    assert!(!games::key_allowed(&cfg(Some("abcd")), Some("abce"), "t", "p"));
+    assert!(
+        games::key_allowed(&cfg(None), None, "t", "p"),
+        "no key asked"
+    );
+    assert!(games::key_allowed(
+        &cfg(Some("abcd")),
+        Some("abcd"),
+        "t",
+        "p"
+    ));
+    assert!(!games::key_allowed(
+        &cfg(Some("abcd")),
+        Some("abce"),
+        "t",
+        "p"
+    ));
     assert!(!games::key_allowed(&cfg(Some("abcd")), None, "t", "p"));
-    assert!(!games::key_allowed(&cfg(Some("")), Some(""), "t", "p"), "an empty key opens nothing");
+    assert!(
+        !games::key_allowed(&cfg(Some("")), Some(""), "t", "p"),
+        "an empty key opens nothing"
+    );
     assert!(!games::key_allowed(&cfg(Some("")), None, "t", "p"));
 }
 
@@ -988,10 +1014,18 @@ async fn versions_merge_by_default_held_ones_stay() {
     };
     // A group is held on g1: g0 goes (one tick), g1 and the newer ones stay, tick after tick.
     games::tick();
-    assert_eq!(vers(), [1, 2, 3], "only what lies below the held version went");
+    assert_eq!(
+        vers(),
+        [1, 2, 3],
+        "only what lies below the held version went"
+    );
     games::tick();
     games::tick();
-    assert_eq!(vers(), [1, 2, 3], "the held version and the newer ones stay");
+    assert_eq!(
+        vers(),
+        [1, 2, 3],
+        "the held version and the newer ones stay"
+    );
     assert_eq!(
         (read(0).await, read(1).await, read(2).await, read(3).await),
         (None, Some(0xa1), Some(0xb2), Some(0xc3))
@@ -1062,10 +1096,16 @@ async fn discovery_for_ssd_clients_unchanged() {
         .collect();
     names.sort();
     assert_eq!(names, ["iqn.test:disc-games.g0", plain_iqn], "{text}");
-    assert!(!text.contains(".u0011"), "a job's keyed name is never listed");
+    assert!(
+        !text.contains(".u0011"),
+        "a job's keyed name is never listed"
+    );
     // The plain target reads as ever on that same session.
     assert!(
-        read_blocks(&mut s, 8, 2, 0, 8).await.iter().all(|&b| b == 0x33),
+        read_blocks(&mut s, 8, 2, 0, 8)
+            .await
+            .iter()
+            .all(|&b| b == 0x33),
         "plain target served"
     );
     drop(s);
@@ -1115,8 +1155,15 @@ async fn diskless_machine_out_of_room() {
     let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
     assert_eq!(login(&mut s, &mine).await.bhs[36], 0);
     // One 4 KB write → (opcode, status, sense key, ASC, ASCQ) of its answer.
-    async fn write4k(s: &mut tokio::net::TcpStream, itt: u32, cmdsn: u32, lba: u32) -> (u8, u8, u8, u8, u8) {
-        s.write_all(&scsi_cmd(itt, cmdsn, 0xa0, 0x2a, lba, 8)).await.unwrap();
+    async fn write4k(
+        s: &mut tokio::net::TcpStream,
+        itt: u32,
+        cmdsn: u32,
+        lba: u32,
+    ) -> (u8, u8, u8, u8, u8) {
+        s.write_all(&scsi_cmd(itt, cmdsn, 0xa0, 0x2a, lba, 8))
+            .await
+            .unwrap();
         let r = conn::read_pdu(s).await.unwrap();
         assert_eq!(r.bhs[0], 0x31, "R2T");
         let mut p = pdu(0x05, 0x80, itt, 0, &[0x77u8; 4096]);
@@ -1138,8 +1185,18 @@ async fn diskless_machine_out_of_room() {
     );
     // What it holds is rewritten and read; the refused place reads the golden.
     assert_eq!(write4k(&mut s, 53, 4, 8).await, GOOD);
-    assert!(read_blocks(&mut s, 54, 5, 8, 8).await.iter().all(|&b| b == 0x77));
-    assert!(read_blocks(&mut s, 55, 6, 256, 8).await.iter().all(|&b| b == 0x22));
+    assert!(
+        read_blocks(&mut s, 54, 5, 8, 8)
+            .await
+            .iter()
+            .all(|&b| b == 0x77)
+    );
+    assert!(
+        read_blocks(&mut s, 55, 6, 256, 8)
+            .await
+            .iter()
+            .all(|&b| b == 0x22)
+    );
     drop(s);
     golden::set(Vec::new()).unwrap();
     TEST_ARP.lock().remove("127.0.0.1");

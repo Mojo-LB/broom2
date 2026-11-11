@@ -365,7 +365,10 @@ async fn keep_free(
     tracing::info!(
         "versions: {}",
         if keep(&st) {
-            format!("kept until a drive has less than {}% free", min_free_pct(&st))
+            format!(
+                "kept until a drive has less than {}% free",
+                min_free_pct(&st)
+            )
         } else {
             "older ones merged away once unused (not kept)".into()
         }

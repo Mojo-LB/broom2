@@ -50,9 +50,7 @@ pub fn room(l: &Limit, held: u64, space: Option<(u64, u64)>) -> Result<(), Strin
     if free < FLOOR {
         return Err("the server's drive for the machines' writes is full".into());
     }
-    if l.free_pct > 0
-        && (free as u128) * 100 < (size as u128) * l.free_pct as u128
-        && held >= FAIR
+    if l.free_pct > 0 && (free as u128) * 100 < (size as u128) * l.free_pct as u128 && held >= FAIR
     {
         return Err(format!(
             "the server's drive for the machines' writes has less than {}% free, and this machine already holds {} GB",

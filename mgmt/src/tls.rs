@@ -631,7 +631,7 @@ pub(crate) fn parse_fingerprint(s: &str) -> Option<[u8; 32]> {
 #[derive(Debug)]
 pub(crate) struct Pinned {
     pin: Option<[u8; 32]>,
-    pub seen: Arc<parking_lot::Mutex<Option<[u8; 32]>>>,
+    pub seen: SeenCert,
     provider: Arc<rustls::crypto::CryptoProvider>,
 }
 
@@ -689,14 +689,12 @@ impl rustls::client::danger::ServerCertVerifier for Pinned {
     }
 }
 
+/// Where a handshake notes the SHA-256 of the certificate the server presented.
+pub(crate) type SeenCert = Arc<parking_lot::Mutex<Option<[u8; 32]>>>;
+
 /// A TLS client configuration that trusts the certificate with SHA-256 `pin` only (None: see `Pinned`), and where
 /// the certificate each handshake presented is noted.
-pub(crate) fn pinned_client(
-    pin: Option<[u8; 32]>,
-) -> (
-    Arc<rustls::ClientConfig>,
-    Arc<parking_lot::Mutex<Option<[u8; 32]>>>,
-) {
+pub(crate) fn pinned_client(pin: Option<[u8; 32]>) -> (Arc<rustls::ClientConfig>, SeenCert) {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let seen = Arc::new(parking_lot::Mutex::new(None));
     let cfg = rustls::ClientConfig::builder_with_provider(provider.clone())

@@ -384,7 +384,10 @@ fn router_kept_only_when_the_boot_left_it_out() {
 #[test]
 fn one_boot_in_flight_per_machine() {
     let a = InFlight::enter("52:54:00:AA:00:01").expect("first");
-    assert!(InFlight::enter("52:54:00:aa:00:01").is_none(), "same machine, any case");
+    assert!(
+        InFlight::enter("52:54:00:aa:00:01").is_none(),
+        "same machine, any case"
+    );
     let b = InFlight::enter("52:54:00:aa:00:02").expect("another machine");
     drop(a);
     assert!(InFlight::enter("52:54:00:aa:00:01").is_some());
@@ -411,13 +414,25 @@ fn first_boot_steps() {
     // A first boot: the key once, then done once.
     let mut b = boot(true);
     assert_eq!(first_boot_step(Some(&mut b), 1060, Step::Key), Ok(()));
-    assert!(first_boot_step(Some(&mut b), 1061, Step::Key).is_err(), "the key only once");
+    assert!(
+        first_boot_step(Some(&mut b), 1061, Step::Key).is_err(),
+        "the key only once"
+    );
     assert_eq!(first_boot_step(Some(&mut b), 1100, Step::Done), Ok(()));
-    assert!(first_boot_step(Some(&mut b), 1101, Step::Done).is_err(), "done only once");
-    assert!(first_boot_step(Some(&mut b), 1102, Step::Key).is_err(), "no key after done");
+    assert!(
+        first_boot_step(Some(&mut b), 1101, Step::Done).is_err(),
+        "done only once"
+    );
+    assert!(
+        first_boot_step(Some(&mut b), 1102, Step::Key).is_err(),
+        "no key after done"
+    );
     // Without the agent (its setup failed): done alone is fine.
     let mut b = boot(true);
-    assert_eq!(first_boot_step(Some(&mut b), 1000 + FIRST_BOOT_S, Step::Done), Ok(()));
+    assert_eq!(
+        first_boot_step(Some(&mut b), 1000 + FIRST_BOOT_S, Step::Done),
+        Ok(())
+    );
     // Too late: a session in use for a while.
     let mut b = boot(true);
     assert!(first_boot_step(Some(&mut b), 1001 + FIRST_BOOT_S, Step::Done).is_err());

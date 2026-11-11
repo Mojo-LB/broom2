@@ -261,7 +261,10 @@ fn fingerprint_pinned_client() {
     let make = || {
         let (cert, key, _) = self_signed(&names(), crate::now_secs()).unwrap();
         let (ck, sha) = certified(&cert, &key).unwrap();
-        (ck, parse_fingerprint(&sha).expect("the stored sha256 parses"))
+        (
+            ck,
+            parse_fingerprint(&sha).expect("the stored sha256 parses"),
+        )
     };
     let (ck, sha) = make();
     let (other_ck, other_sha) = make();
@@ -306,7 +309,10 @@ fn fingerprint_pinned_client() {
     assert_eq!(handshake(&server, None, "10.20.0.1").unwrap(), Some(sha));
     // Pinned: that certificate, by any name or address (the tool reaches the server by IP; an uploaded certificate
     // is made for a name).
-    assert_eq!(handshake(&server, Some(sha), "10.20.0.1").unwrap(), Some(sha));
+    assert_eq!(
+        handshake(&server, Some(sha), "10.20.0.1").unwrap(),
+        Some(sha)
+    );
     handshake(&server, Some(sha), "10.99.9.9").expect("an address it was not made for");
     handshake(&server, Some(sha), "anything.example").expect("any name");
     // Another certificate in its place (a host in the middle): refused.
@@ -316,11 +322,20 @@ fn fingerprint_pinned_client() {
     // As shown and as typed.
     let text = fingerprint(&sha);
     assert_eq!(text.len(), 32 * 3 - 1);
-    assert!(text.split(':').all(|p| p.len() == 2 && p == p.to_uppercase()));
+    assert!(
+        text.split(':')
+            .all(|p| p.len() == 2 && p == p.to_uppercase())
+    );
     assert_eq!(parse_fingerprint(&text), Some(sha));
-    assert_eq!(parse_fingerprint(&text.to_lowercase().replace(':', "")), Some(sha));
+    assert_eq!(
+        parse_fingerprint(&text.to_lowercase().replace(':', "")),
+        Some(sha)
+    );
     assert_eq!(parse_fingerprint(&text.replace(':', " ")), Some(sha));
     assert_eq!(parse_fingerprint("plain"), None);
     assert_eq!(parse_fingerprint(&text[..60]), None);
-    assert_eq!(parse_fingerprint(&format!("{}ZZ", &text[..text.len() - 2])), None);
+    assert_eq!(
+        parse_fingerprint(&format!("{}ZZ", &text[..text.len() - 2])),
+        None
+    );
 }

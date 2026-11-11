@@ -74,14 +74,28 @@ fn capture_then_deploy() {
         // The certificate is the tool's only trust in the server, and it must be confirmed:
         // another fingerprint given (a host in the middle with its own certificate) → the tool stops before signing in;
         let wrong = format!("{}00", &sha[..sha.len() - 2]).replace("0000", "1100");
-        let wrong = if wrong == sha { format!("{}ff", &sha[..sha.len() - 2]) } else { wrong };
-        let (out, text) = tool_with(&disk, &format!("admin\n{PASSWORD}\n1\n1\nx\n"), Some(&wrong));
+        let wrong = if wrong == sha {
+            format!("{}ff", &sha[..sha.len() - 2])
+        } else {
+            wrong
+        };
+        let (out, text) = tool_with(
+            &disk,
+            &format!("admin\n{PASSWORD}\n1\n1\nx\n"),
+            Some(&wrong),
+        );
         assert!(!out.status.success(), "{text}");
         assert!(text.contains("not the one given in BROOM_TLS"), "{text}");
-        assert!(!text.contains("Owner account"), "stopped before the sign-in: {text}");
+        assert!(
+            !text.contains("Owner account"),
+            "stopped before the sign-in: {text}"
+        );
         // plain HTTP asked for while the server answers HTTPS → stops as well (no downgrade);
         let (out, text) = tool_with(&disk, "yes\nadmin\n", Some("plain"));
-        assert!(!out.status.success() && text.contains("answers HTTPS"), "{text}");
+        assert!(
+            !out.status.success() && text.contains("answers HTTPS"),
+            "{text}"
+        );
         // asked on its console: shown as on Settings -> HTTPS; anything but yes → stops.
         let (out, text) = tool_with(&disk, "no\n", None);
         assert!(!out.status.success(), "{text}");
@@ -92,7 +106,10 @@ fn capture_then_deploy() {
             .map(|c| String::from_utf8_lossy(c).into_owned())
             .collect::<Vec<_>>()
             .join(":");
-        assert!(text.contains(&shown), "its fingerprint {shown} shown: {text}");
+        assert!(
+            text.contains(&shown),
+            "its fingerprint {shown} shown: {text}"
+        );
         assert!(text.contains("certificate not confirmed"), "{text}");
 
         // A wrong password first (asked again), the owner's, Capture, disk 1, the image name.

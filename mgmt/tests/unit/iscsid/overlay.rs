@@ -93,13 +93,19 @@ fn room_rules() {
     // Its own limit: up to it, not past it.
     assert!(room(&l(100, 5), 100 * GB - BLOCK, drive(500)).is_ok());
     assert!(room(&l(100, 5), 100 * GB, drive(500)).is_err());
-    assert!(room(&l(100, 0), 100 * GB, None).is_err(), "its own limit needs no drive figures");
+    assert!(
+        room(&l(100, 0), 100 * GB, None).is_err(),
+        "its own limit needs no drive figures"
+    );
     // Below the reserve (5 % of 1000 GB = 50 GB): the big writer stops, an ordinary session goes on.
     assert!(room(&l(0, 5), FAIR, drive(49)).is_err());
     assert!(room(&l(0, 5), 300 * GB, drive(49)).is_err());
     assert!(room(&l(0, 5), FAIR - BLOCK, drive(49)).is_ok());
     assert!(room(&l(0, 5), 0, drive(49)).is_ok());
-    assert!(room(&l(0, 5), 300 * GB, drive(50)).is_ok(), "exactly at the reserve: fine");
+    assert!(
+        room(&l(0, 5), 300 * GB, drive(50)).is_ok(),
+        "exactly at the reserve: fine"
+    );
     // No reserve set: only the floor stops it.
     assert!(room(&l(0, 0), 300 * GB, drive(2)).is_ok());
     // Under the floor nobody grows, however small.

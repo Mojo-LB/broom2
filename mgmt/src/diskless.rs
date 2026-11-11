@@ -807,7 +807,11 @@ pub(crate) const FIRST_BOOT_S: u64 = 15 * 60;
 /// its start, each step once, the key before "done": otherwise any program in a guest's session (a guest is an
 /// administrator of their machine) could have its session kept as the machine's base — surviving every later
 /// reset — or fetch the key again.
-pub(crate) fn first_boot_step(b: Option<&mut Boot>, now: u64, step: Step) -> Result<(), &'static str> {
+pub(crate) fn first_boot_step(
+    b: Option<&mut Boot>,
+    now: u64,
+    step: Step,
+) -> Result<(), &'static str> {
     let b = b.ok_or("the server started no boot of this machine (restarted since?)")?;
     if !b.first {
         return Err("not its first boot on this golden version");
@@ -1782,7 +1786,9 @@ async fn set_room(
     Json(b): Json<RoomBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     if b.pc_gb > PC_GB_MAX {
-        return Err(bad(format!("limit per machine: 0 (none) to {PC_GB_MAX} GB")));
+        return Err(bad(format!(
+            "limit per machine: 0 (none) to {PC_GB_MAX} GB"
+        )));
     }
     if b.free_pct > 50 {
         return Err(bad("kept free: 0 (no reserve) to 50 %"));

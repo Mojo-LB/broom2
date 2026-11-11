@@ -1111,7 +1111,11 @@ fn run_vm(st: &SharedState, token: &str, disk: &FsPath, work: &FsPath) -> Result
 
 /// The whole VM step for the current job → (status line, results). The golden's update session holds all its writes:
 /// on Err the caller discards them, so the golden stays as it was. Blocking.
-fn install(st: &SharedState, j: &Job, key: &str) -> Result<(String, Vec<serde_json::Value>), String> {
+fn install(
+    st: &SharedState,
+    j: &Job,
+    key: &str,
+) -> Result<(String, Vec<serde_json::Value>), String> {
     let t = &j.token;
     let info = diskless::served(&j.golden).ok_or("the golden is not served")?;
     if info.disk.update_bytes > 0 || info.disk.update_connected {
@@ -1186,7 +1190,10 @@ fn install(st: &SharedState, j: &Job, key: &str) -> Result<(String, Vec<serde_js
                 &g_child(&dir, "broom-onboard.json")?,
                 job_json.to_string().as_bytes(),
             )?;
-            g_write(&ps, crate::assets::text("scripts/broom-onboard.ps1").as_bytes())?;
+            g_write(
+                &ps,
+                crate::assets::text("scripts/broom-onboard.ps1").as_bytes(),
+            )?;
         }
         // 2. Boot it until the script has written its result.
         let mut result = None;
@@ -1673,7 +1680,8 @@ async fn report(
     let peer = peer.ip().to_canonical().to_string();
     let j = by_token(&st, &q, &peer).ok_or((
         StatusCode::NOT_FOUND,
-        "no such job for this PC (the report must come through the network card it booted from)".to_string(),
+        "no such job for this PC (the report must come through the network card it booted from)"
+            .to_string(),
     ))?;
     if j.state != "waiting" {
         return Err((StatusCode::CONFLICT, format!("the job is {}", j.state)));

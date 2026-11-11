@@ -749,7 +749,9 @@ fn confirm_certificate(seen: &[u8; 32], preset: Option<&str>) -> Result<(), Stri
         };
     }
     println!("  The server's HTTPS certificate (SHA-256 fingerprint):\n\n    {shown}\n");
-    println!("  Compare it with Settings -> HTTPS in the server's web admin (any signed-in browser).");
+    println!(
+        "  Compare it with Settings -> HTTPS in the server's web admin (any signed-in browser)."
+    );
     let a = ask("  Is it the same? Type yes to go on: ")?;
     if a.eq_ignore_ascii_case("yes") {
         Ok(())
@@ -884,11 +886,7 @@ impl Api {
         let url = format!("{}{path}", self.base);
         let ck = self.cookie.lock().clone();
         let r = match method {
-            "GET" => self
-                .agent
-                .get(&url)
-                .header("Cookie", ck.as_str())
-                .call(),
+            "GET" => self.agent.get(&url).header("Cookie", ck.as_str()).call(),
             "PUT" => self
                 .agent
                 .put(&url)

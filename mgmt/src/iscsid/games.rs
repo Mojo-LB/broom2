@@ -711,7 +711,10 @@ impl Registry {
                         // one in use, and the newest).
                         Some(_) => {
                             if let Ok(g) = self.drop_oldest(&name) {
-                                tracing::info!("{} {name}: version g{g} no longer needed — merged", self.what);
+                                tracing::info!(
+                                    "{} {name}: version g{g} no longer needed — merged",
+                                    self.what
+                                );
                             }
                         }
                     }

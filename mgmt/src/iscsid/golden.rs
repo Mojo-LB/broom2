@@ -418,7 +418,9 @@ pub fn prepare(
     // top of it and holds a guest's writes — never kept, whatever the caller asks.
     let has_base = read_gen(&b_gen) == Some(ver) && b_ovl.exists();
     if promote && has_base {
-        tracing::warn!("golden {name}: machine {mac} already has its base on g{ver} — its session is not kept");
+        tracing::warn!(
+            "golden {name}: machine {mac} already has its base on g{ver} — its session is not kept"
+        );
     }
     if promote && !has_base && read_gen(&s_gen) == Some(ver) && s_ovl.exists() {
         // The base's version file last: a promotion cut off midway leaves a base without one → dropped below.

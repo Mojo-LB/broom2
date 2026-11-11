@@ -137,8 +137,17 @@ fn vm_unit_limits() {
         assert!(props.contains(&want), "{want} missing: {props:?}");
     }
     for p in &props {
-        for narrow in ["PrivateNetwork", "RestrictAddressFamilies", "IPAddress", "PrivateDevices", "DevicePolicy"] {
-            assert!(!p.starts_with(narrow), "{p}: the VM's network and devices are not narrowed");
+        for narrow in [
+            "PrivateNetwork",
+            "RestrictAddressFamilies",
+            "IPAddress",
+            "PrivateDevices",
+            "DevicePolicy",
+        ] {
+            assert!(
+                !p.starts_with(narrow),
+                "{p}: the VM's network and devices are not narrowed"
+            );
         }
     }
 }
