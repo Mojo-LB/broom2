@@ -1,3 +1,4 @@
+use super::{ci_path, g_child, g_read, g_write};
 use super::{
     Job, Nic, WINPE_FILES, active, busid_card, judge, parse_pnputil, parse_report, parse_wmic,
     qemu_args, secure_boot, startnet, waiting_hint, wimboot_script,
@@ -359,4 +360,83 @@ fn judge_finds_the_boot_card_by_ipxe() {
         judge(&nics, &r(true, false), mac, "").is_ok(),
         "boot card unknown: any card"
     );
+}
+
+/// Nothing in a mounted golden is reached through a symbolic link: a link as a folder on the way, as the file
+/// itself, or at the name of a file this server is about to write, is refused — the server's own files outside the
+/// mount stay untouched (it works there as root).
+#[test]
+fn golden_paths_never_follow_links() {
+    use std::os::unix::fs::symlink;
+    let d = std::env::temp_dir().join(format!("broom-golden-links-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    let (root, out) = (d.join("mnt"), d.join("outside"));
+    std::fs::create_dir_all(root.join("Windows/Setup/Scripts")).unwrap();
+    std::fs::create_dir_all(root.join("WINDOWS2/setup")).unwrap();
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(out.join("secret"), b"server file").unwrap();
+    std::fs::write(root.join("Windows/Setup/Scripts/broom-diskless.ps1"), b"ps").unwrap();
+
+    // Plain paths, any case.
+    let dir = ci_path(&root, "windows/SETUP/scripts").expect("found without case");
+    assert_eq!(dir, root.join("Windows/Setup/Scripts"));
+    let ps = ci_path(&dir, "Broom-Diskless.ps1").unwrap();
+    assert_eq!(g_read(&ps).unwrap(), b"ps");
+    g_write(&ps, b"new").unwrap();
+    assert_eq!(std::fs::read(&ps).unwrap(), b"new");
+    assert!(ci_path(&root, "Windows/Nope").is_none());
+
+    // A folder on the way that is a link out of the mount.
+    symlink("../../../outside", root.join("WINDOWS2/setup/Scripts")).unwrap();
+    assert!(ci_path(&root, "WINDOWS2/setup/Scripts").is_none());
+    assert!(ci_path(&root, "WINDOWS2/setup/Scripts/secret").is_none());
+    symlink(&out, root.join("ProgramData")).unwrap();
+    assert!(ci_path(&root, "ProgramData/secret").is_none());
+
+    // The file itself a link (also a dangling one, which a write would otherwise create at its target).
+    symlink(out.join("secret"), dir.join("broom-onboard-result.json")).unwrap();
+    assert!(ci_path(&dir, "broom-onboard-result.json").is_none());
+    assert!(g_read(&dir.join("broom-onboard-result.json")).is_err());
+    symlink(out.join("made-by-server"), dir.join("broom-onboard.json")).unwrap();
+    assert!(g_child(&dir, "broom-onboard.json").is_err());
+    assert!(g_write(&dir.join("broom-onboard.json"), b"{}").is_err());
+    symlink(&out, dir.join("broom-drv")).unwrap();
+    assert!(g_child(&dir, "broom-drv").is_err());
+    assert_eq!(
+        g_child(&dir, "new-file").unwrap(),
+        dir.join("new-file"),
+        "a name not there yet is fine"
+    );
+
+    // Outside: as it was.
+    assert_eq!(std::fs::read(out.join("secret")).unwrap(), b"server file");
+    assert!(!out.join("made-by-server").exists());
+    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 1);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Live: the same on a real NTFS volume mounted as the server mounts a golden (ntfs-3g, root, /dev/fuse).
+/// BROOM_NTFS_IMG = an NTFS image file prepared with a link `Windows/Setup/Scripts -> ../../../outside` and a plain
+/// folder `Plain`; BROOM_NTFS_MNT = an empty folder two levels below the one holding `outside`.
+#[test]
+#[ignore]
+fn live_ntfs_mount_refuses_links() {
+    let (Ok(img), Ok(mnt)) = (std::env::var("BROOM_NTFS_IMG"), std::env::var("BROOM_NTFS_MNT")) else {
+        return;
+    };
+    let mnt = std::path::PathBuf::from(mnt);
+    let m = super::Mount::new(std::path::Path::new(&img), &mnt, true).expect("mount");
+    assert!(ci_path(&m.dir, "Windows/Setup").is_some());
+    assert!(ci_path(&m.dir, "Windows/Setup/Scripts").is_none(), "the link is not followed");
+    let plain = ci_path(&m.dir, "plain").expect("plain folder, any case");
+    g_write(&g_child(&plain, "f.txt").unwrap(), b"ok").unwrap();
+    assert_eq!(g_read(&plain.join("f.txt")).unwrap(), b"ok");
+    let opts = std::fs::read_to_string("/proc/mounts").unwrap();
+    let line = opts
+        .lines()
+        .find(|l| l.split(' ').nth(1) == mnt.to_str())
+        .expect("mounted");
+    for o in ["nosuid", "nodev", "noexec"] {
+        assert!(line.contains(o), "{o} missing: {line}");
+    }
 }

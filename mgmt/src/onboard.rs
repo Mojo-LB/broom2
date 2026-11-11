@@ -801,23 +801,87 @@ pub(crate) fn logout(target: &str) {
     );
 }
 
-/// `rel` ("Windows/Setup/Scripts") under `root`, each part matched without case (NTFS keeps the case Windows used).
-fn ci_path(root: &FsPath, rel: &str) -> Option<PathBuf> {
+// ---------- files inside a mounted golden ----------
+// A golden is written by whatever ran in it (its maintenance session, with internet), and an NTFS volume can hold
+// symbolic links to anywhere — ntfs-3g shows them as Linux links, and "../../.." climbs out of the mount. This server
+// reads, writes and deletes there as root, so nothing inside a mounted golden is ever reached through a link: every
+// part of a path is checked (`ci_path`), and files are opened with O_NOFOLLOW (`g_read`, `g_write`). The volume is
+// mounted by this server alone while it works on it, so what was checked cannot change underneath.
+
+/// `rel` under `root` (a mounted golden), its parts matched without regard to case (NTFS names) — None when a part
+/// is missing or is a symbolic link (logged: a golden has no business holding one on these paths).
+pub(crate) fn ci_path(root: &FsPath, rel: &str) -> Option<PathBuf> {
     let mut cur = root.to_path_buf();
     for part in rel.split('/').filter(|p| !p.is_empty()) {
         let exact = cur.join(part);
-        if exact.exists() {
-            cur = exact;
-            continue;
+        let next = if std::fs::symlink_metadata(&exact).is_ok() {
+            exact
+        } else {
+            std::fs::read_dir(&cur)
+                .ok()?
+                .flatten()
+                .find(|e| {
+                    e.file_name()
+                        .to_str()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(part))
+                })?
+                .path()
+        };
+        if is_link(&next) {
+            tracing::warn!(
+                "golden: {} is a symbolic link - not followed",
+                next.strip_prefix(root).unwrap_or(&next).display()
+            );
+            return None;
         }
-        let hit = std::fs::read_dir(&cur).ok()?.flatten().find(|e| {
-            e.file_name()
-                .to_str()
-                .is_some_and(|n| n.eq_ignore_ascii_case(part))
-        })?;
-        cur = hit.path();
+        cur = next;
     }
     Some(cur)
+}
+
+/// `p` itself is a symbolic link (not what it points to).
+fn is_link(p: &FsPath) -> bool {
+    std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+/// `name` in folder `dir` of a mounted golden (`dir` from `ci_path`), for a file or folder this server makes there:
+/// refused when something of that name is there as a symbolic link.
+pub(crate) fn g_child(dir: &FsPath, name: &str) -> Result<PathBuf, String> {
+    let p = dir.join(name);
+    if is_link(&p) {
+        return Err(format!(
+            "{name} in the golden is a symbolic link - not touched"
+        ));
+    }
+    Ok(p)
+}
+
+/// A file of a mounted golden, read without following a link at its name.
+pub(crate) fn g_read(p: &FsPath) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut v = Vec::new();
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(p)
+        .and_then(|mut f| f.read_to_end(&mut v))
+        .map_err(|e| format!("{}: {e}", p.display()))?;
+    Ok(v)
+}
+
+/// A file of a mounted golden written (made or replaced) without following a link at its name.
+pub(crate) fn g_write(p: &FsPath, data: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(p)
+        .and_then(|mut f| f.write_all(data))
+        .map_err(|e| format!("{}: {e}", p.display()))
 }
 
 struct Mount {
@@ -829,12 +893,17 @@ impl Mount {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         let p = part.to_string_lossy();
         let d = dir.to_string_lossy();
-        let mut args = vec![p.as_ref(), d.as_ref()];
-        if !rw {
-            args.insert(0, "-o");
-            args.insert(1, "ro");
-        }
-        sh("ntfs-3g", &args, Duration::from_secs(60))?;
+        // Nothing in a golden is run, trusted as a device or as a set-uid program on this server.
+        let opts = if rw {
+            "nosuid,nodev,noexec"
+        } else {
+            "ro,nosuid,nodev,noexec"
+        };
+        sh(
+            "ntfs-3g",
+            &["-o", opts, p.as_ref(), d.as_ref()],
+            Duration::from_secs(60),
+        )?;
         Ok(Mount {
             dir: dir.to_path_buf(),
         })
@@ -976,7 +1045,7 @@ fn install(st: &SharedState, j: &Job) -> Result<(String, Vec<serde_json::Value>)
             let ps = ci_path(&dir, "broom-diskless.ps1")
                 .filter(|f| f.is_file())
                 .ok_or("the golden has no broom-diskless.ps1 (its startup task) — run it on the golden first")?;
-            orig = std::fs::read(&ps).map_err(|e| e.to_string())?;
+            orig = g_read(&ps)?;
             std::fs::write(work.join("broom-diskless.ps1.orig"), &orig)
                 .map_err(|e| e.to_string())?;
             for f in ["broom-onboard-result.json", "broom-onboard.log"] {
@@ -991,10 +1060,14 @@ fn install(st: &SharedState, j: &Job) -> Result<(String, Vec<serde_json::Value>)
                 .flat_map(|n| n.hwids.iter().chain(n.compat.iter()).cloned())
                 .chain((!j.boot_card.is_empty()).then(|| j.boot_card.clone()))
                 .collect();
-            let _ = std::fs::remove_dir_all(dir.join("broom-drv"));
+            let drv_dir = g_child(&dir, "broom-drv")?;
+            let _ = std::fs::remove_dir_all(&drv_dir);
+            if std::fs::symlink_metadata(&drv_dir).is_ok() {
+                return Err("an old broom-drv folder in the golden could not be removed".into());
+            }
             let mut drv = Vec::new();
             for d in crate::drivers::matching(&nets, &ids) {
-                crate::drivers::unpack(d, &dir.join("broom-drv").join(&d.name))?;
+                crate::drivers::unpack(d, &drv_dir.join(&d.name))?;
                 drv.push(format!("broom-drv\\{}", d.name));
             }
             if !drv.is_empty() {
@@ -1009,10 +1082,11 @@ fn install(st: &SharedState, j: &Job) -> Result<(String, Vec<serde_json::Value>)
             }
             let job_json =
                 serde_json::json!({ "golden": j.golden, "nics": j.nics, "drivers": drv });
-            std::fs::write(dir.join("broom-onboard.json"), job_json.to_string())
-                .map_err(|e| e.to_string())?;
-            std::fs::write(&ps, crate::assets::text("scripts/broom-onboard.ps1"))
-                .map_err(|e| e.to_string())?;
+            g_write(
+                &g_child(&dir, "broom-onboard.json")?,
+                job_json.to_string().as_bytes(),
+            )?;
+            g_write(&ps, crate::assets::text("scripts/broom-onboard.ps1").as_bytes())?;
         }
         // 2. Boot it until the script has written its result.
         let mut result = None;
@@ -1030,9 +1104,10 @@ fn install(st: &SharedState, j: &Job) -> Result<(String, Vec<serde_json::Value>)
             if let Some(f) = ci_path(&m.dir, "Windows/Setup/Scripts/broom-onboard-result.json")
                 .filter(|f| f.is_file())
             {
-                let txt = std::fs::read_to_string(&f).map_err(|e| e.to_string())?;
+                let txt = String::from_utf8(g_read(&f)?).map_err(|e| e.to_string())?;
                 let log = ci_path(&m.dir, "Windows/Setup/Scripts/broom-onboard.log")
-                    .and_then(|f| std::fs::read_to_string(f).ok())
+                    .and_then(|f| g_read(&f).ok())
+                    .map(|b| String::from_utf8_lossy(&b).into_owned())
                     .unwrap_or_default();
                 let _ = std::fs::write(work.join("broom-onboard.log"), &log);
                 result = Some(txt);
@@ -1051,8 +1126,11 @@ fn install(st: &SharedState, j: &Job) -> Result<(String, Vec<serde_json::Value>)
         {
             let m = Mount::new(&part, &mnt, true)?;
             let dir = ci_path(&m.dir, "Windows/Setup/Scripts").ok_or("Scripts folder gone")?;
-            std::fs::write(dir.join("broom-diskless.ps1"), &orig).map_err(|e| e.to_string())?;
-            let _ = std::fs::remove_dir_all(dir.join("broom-drv"));
+            let ps = ci_path(&dir, "broom-diskless.ps1").ok_or("broom-diskless.ps1 gone")?;
+            g_write(&ps, &orig)?;
+            if let Ok(d) = g_child(&dir, "broom-drv") {
+                let _ = std::fs::remove_dir_all(d);
+            }
             for f in [
                 "broom-onboard.json",
                 "broom-onboard-result.json",
@@ -1190,8 +1268,8 @@ fn write_script(st: &SharedState, name: &str, ver: u64) -> Result<bool, String> 
             .ok_or("the golden has no C:\\Windows\\Setup\\Scripts\\broom-diskless.ps1 (its startup task) — install it on the golden once from its maintenance machine (Diskless page)")?;
         let new = diskless::script_text(st);
         let mut changed = false;
-        if std::fs::read(&ps).ok().as_deref() != Some(new.as_bytes()) {
-            std::fs::write(&ps, &new).map_err(|e| format!("{}: {e}", ps.display()))?;
+        if g_read(&ps).ok().as_deref() != Some(new.as_bytes()) {
+            g_write(&ps, new.as_bytes())?;
             changed = true;
         }
         if let Some(d) = ci_path(&m.dir, "ProgramData/Broom").filter(|d| d.is_dir()) {
