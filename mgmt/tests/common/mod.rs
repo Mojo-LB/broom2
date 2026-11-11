@@ -168,7 +168,7 @@ impl Server {
         while t.elapsed() < Duration::from_secs(30) {
             // A public path: with HTTPS on, the sign-in API is on https:// only.
             if std::net::TcpStream::connect((SRV, 80)).is_ok()
-                && Http::new().get("/api/tls/cert").status == 200
+                && Http::new().get("/api/tls/port").status == 200
             {
                 return;
             }

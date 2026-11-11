@@ -296,14 +296,13 @@ fn https_admin() {
         let _srv = Server::start_with(&home, &["--https-port", "443"]);
         let anon = Http::new();
 
-        // What the capture tool reads first (public, plain HTTP): the port and the certificate to trust.
-        let t = anon.get("/api/tls/cert").json();
-        assert_eq!(
-            (t["port"].as_u64(), t["self_signed"].as_bool()),
-            (Some(443), Some(true))
-        );
-        let cert = t["cert"].as_str().unwrap().to_string();
-        assert!(cert.starts_with("-----BEGIN CERTIFICATE-----"), "{t}");
+        // What the capture tool reads first (public, plain HTTP): where HTTPS listens — and nothing to trust: no
+        // certificate is handed out over plain HTTP (the old path for it is gone).
+        let t = anon.get("/api/tls/port").json();
+        assert_eq!(t, json!({"port": 443}));
+        assert_ne!(anon.get("/api/tls/cert").status, 200);
+        let cert = std::fs::read_to_string(home.0.join("tls/cert.pem")).unwrap();
+        assert!(cert.starts_with("-----BEGIN CERTIFICATE-----"));
 
         // Plain HTTP: pages → https://, the sign-in API refused, the machines' paths served.
         let nav = anon.request("GET", "/machines?x=1", &[("Accept", "text/html")], b"");
@@ -344,9 +343,16 @@ fn https_admin() {
                 .status,
             403
         );
-        // …except for the capture tool when it says it cannot check the certificate.
+        // …and no header opens it (the capture tool once said "I cannot check the certificate" this way).
         let tool = leaked.request("GET", "/api/status", &[("X-Broom-Tool", "capture")], b"");
-        assert_eq!(tool.status, 200);
+        assert_eq!(tool.status, 308);
+        let tool = leaked.request(
+            "POST",
+            "/api/auth/hello",
+            &[("X-Broom-Tool", "capture"), ("Content-Type", "application/json")],
+            hello.to_string().as_bytes(),
+        );
+        assert_eq!(tool.status, 403);
 
         // The System page's view: a self-signed certificate, its fingerprint, its end (≤ 825 days away).
         let c = h.get("/api/config/tls").json();
@@ -418,12 +424,7 @@ fn https_admin() {
         );
         let old = tls.handshake();
         assert!(old.is_err(), "the old certificate is gone: {old:?}");
-        let t = anon.get("/api/tls/cert").json();
-        assert_eq!(
-            (t["self_signed"].as_bool(), t["cert"].as_str()),
-            (Some(false), Some("")),
-            "nothing to pin"
-        );
+        assert_eq!(anon.get("/api/tls/port").json(), json!({"port": 443}));
         assert!(std::fs::read_to_string(home.0.join("tls/cert.pem")).unwrap() == mine_pem);
         let mode = {
             use std::os::unix::fs::PermissionsExt;
@@ -438,8 +439,7 @@ fn https_admin() {
         // A new self-signed certificate on request: a new fingerprint, pinned again by the tool.
         let r = h2.post("/api/config/tls", &json!({"self_signed": true}));
         assert_eq!(r.status, 200, "{}", r.text());
-        let t = anon.get("/api/tls/cert").json();
-        let again = t["cert"].as_str().unwrap().to_string();
+        let again = std::fs::read_to_string(home.0.join("tls/cert.pem")).unwrap();
         assert_ne!(fp(&again), fp(&cert));
         let h3 = Http {
             cookie: h.cookie.clone(),
@@ -453,7 +453,7 @@ fn https_admin() {
             200
         );
         assert_eq!(leaked.get("/api/status").status, 200);
-        assert_eq!(anon.get("/api/tls/cert").json()["port"], 0);
+        assert_eq!(anon.get("/api/tls/port").json()["port"], 0);
         assert_eq!(
             leaked
                 .post("/api/config/tls", &json!({"https": true}))

@@ -303,7 +303,7 @@ pub(crate) fn is_public(method: &axum::http::Method, path: &str) -> bool {
         "/boot/onboard",
         "/api/onboard/report",
         "/api/onboard/state",
-        "/api/tls/cert",
+        "/api/tls/port",
     ];
     // /boot/iso/, /boot/nocloud/: a golden's Ubuntu installer, answered to its maintenance machine only (diskless.rs).
     // /boot/onboard/: "Add hardware" Windows PE files, answered to the job's machine with the job's token (onboard.rs).

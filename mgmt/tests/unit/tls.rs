@@ -73,7 +73,7 @@ fn plain_http_rules() {
         "/tftp/broom-stage/vmlinuz",
         "/api/vnc/agent",
         "/broom-diskless.ps1",
-        "/api/tls/cert",
+        "/api/tls/port",
     ] {
         assert_eq!(plain_http(&get, p, "10.20.0.1", 443), None, "{p}");
     }
@@ -251,4 +251,76 @@ fn private_key_file_rights() {
         0o600
     );
     let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The capture tool's trust: the certificate with the confirmed SHA-256 and no other — whatever name it is reached
+/// by, whoever issued it — and the fingerprint as people read and type it.
+#[test]
+fn fingerprint_pinned_client() {
+    use rustls::pki_types::ServerName;
+    let make = || {
+        let (cert, key, _) = self_signed(&names(), crate::now_secs()).unwrap();
+        let (ck, sha) = certified(&cert, &key).unwrap();
+        (ck, parse_fingerprint(&sha).expect("the stored sha256 parses"))
+    };
+    let (ck, sha) = make();
+    let (other_ck, other_sha) = make();
+    assert_ne!(sha, other_sha);
+    let server_for = |ck: rustls::sign::CertifiedKey| {
+        Arc::new(
+            rustls::ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_cert_resolver(Arc::new(Resolver(RwLock::new(Arc::new(ck))))),
+        )
+    };
+    let (server, impostor) = (server_for(ck), server_for(other_ck));
+    let handshake = |server: &Arc<rustls::ServerConfig>,
+                     pin: Option<[u8; 32]>,
+                     name: &str|
+     -> Result<Option<[u8; 32]>, rustls::Error> {
+        let (client, seen) = pinned_client(pin);
+        let mut c =
+            rustls::ClientConnection::new(client, ServerName::try_from(name.to_string()).unwrap())
+                .unwrap();
+        let mut s = rustls::ServerConnection::new(server.clone()).unwrap();
+        for _ in 0..10 {
+            let mut buf = Vec::new();
+            c.write_tls(&mut buf).unwrap();
+            s.read_tls(&mut buf.as_slice()).unwrap();
+            s.process_new_packets()?;
+            let mut buf = Vec::new();
+            s.write_tls(&mut buf).unwrap();
+            c.read_tls(&mut buf.as_slice()).unwrap();
+            c.process_new_packets()?;
+            if !c.is_handshaking() && !s.is_handshaking() {
+                return Ok(*seen.lock());
+            }
+        }
+        Err(rustls::Error::General("handshake did not finish".into()))
+    };
+    // Reading which certificate a server presents (no pin): its SHA-256, nothing else.
+    assert_eq!(handshake(&server, None, "10.20.0.1").unwrap(), Some(sha));
+    // Pinned: that certificate, by any name or address (the tool reaches the server by IP; an uploaded certificate
+    // is made for a name).
+    assert_eq!(handshake(&server, Some(sha), "10.20.0.1").unwrap(), Some(sha));
+    handshake(&server, Some(sha), "10.99.9.9").expect("an address it was not made for");
+    handshake(&server, Some(sha), "anything.example").expect("any name");
+    // Another certificate in its place (a host in the middle): refused.
+    assert!(handshake(&impostor, Some(sha), "10.20.0.1").is_err());
+    assert!(handshake(&server, Some(other_sha), "10.20.0.1").is_err());
+
+    // As shown and as typed.
+    let text = fingerprint(&sha);
+    assert_eq!(text.len(), 32 * 3 - 1);
+    assert!(text.split(':').all(|p| p.len() == 2 && p == p.to_uppercase()));
+    assert_eq!(parse_fingerprint(&text), Some(sha));
+    assert_eq!(parse_fingerprint(&text.to_lowercase().replace(':', "")), Some(sha));
+    assert_eq!(parse_fingerprint(&text.replace(':', " ")), Some(sha));
+    assert_eq!(parse_fingerprint("plain"), None);
+    assert_eq!(parse_fingerprint(&text[..60]), None);
+    assert_eq!(parse_fingerprint(&format!("{}ZZ", &text[..text.len() - 2])), None);
 }
