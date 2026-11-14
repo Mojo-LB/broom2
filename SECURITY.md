@@ -54,6 +54,11 @@ Some properties come with diskless boot on a shared LAN and are documented, not 
   its first boot in its place; nothing of the golden or of other machines is touched, every refused attempt is in
   the log and at the top of the admin pages, and **Set up again** (Diskless page) rebuilds that machine's base.
   Port isolation or ARP inspection on the boot LAN's switch closes it;
+- the ports a boot needs are open to every host on the boot LAN before any check, so what one host can make the
+  server hold there is bounded, not prevented: a request that needs no sign-in is at most 256 KB and 60 s; one
+  address gets at most 256 web connections (4096 in all) and 64 iSCSI connections; iSCSI login text and ping data
+  are capped. A host that fills its share is logged; many addresses together can still keep others out for as long
+  as they hold on — the boot LAN's switch (port security, one address per port) is what closes that;
 - the guest account is a local administrator on Windows clients (games need it): a determined guest can interfere
   with the machine they sit at until its next reset.
 
