@@ -25,7 +25,7 @@
   <div class="card card-body mb-3">
     <h2 class="h6 text-uppercase text-body-secondary mb-3">Diskless machines</h2>
     <div class="table-responsive"><table class="table table-sm table-hover align-middle" id="dl_machines">
-      <thead><tr><th>Golden</th><th>Machine</th><th>MAC</th><th>IP</th><th title="writes since its last boot — gone at the next one">Session</th><th title="its own first-boot setup, kept while the golden version stays">Base</th><th>Connected</th><th>iSCSI target</th></tr></thead>
+      <thead><tr><th>Golden</th><th>Machine</th><th>MAC</th><th>IP</th><th title="writes since its last boot — gone at the next one">Session</th><th title="its own first-boot setup, kept while the golden version stays">Base</th><th>Connected</th><th>iSCSI target</th><th></th></tr></thead>
       <tbody></tbody></table></div>
     <div id="dl_noip" class="small text-danger"></div>
   </div>
@@ -87,7 +87,8 @@
     <div class="d-flex flex-wrap gap-2 align-items-center mt-3">
       <span>A machine's writes of one session (kept on the machines' layers drive until its next start): at most</span>
       <input class="form-control form-control-sm" id="room_gb" type="number" min="0" style="width:90px"> GB per disk (0 = no limit of its own); the drive keeps
-      <input class="form-control form-control-sm" id="room_pct" type="number" min="0" max="50" style="width:70px"> % free.
+      <input class="form-control form-control-sm" id="room_pct" type="number" min="0" max="50" style="width:70px"> % free. Windows pagefile on a machine:
+      <input class="form-control form-control-sm" id="room_pf" type="number" min="0" max="64" style="width:70px"> GB (0 = none; set when a machine builds its base).
       <button class="btn btn-sm btn-outline-primary" data-click="setRoom">Save</button> <span id="room_msg" class="msg"></span></div>
     <div class="small text-body-secondary mt-1" id="room_note"></div>
     <div class="small text-body-secondary mt-2">Server disks are added on the Server page. A place can change only while it is empty.</div>

@@ -60,6 +60,8 @@
   <div class="flex-grow-1" style="min-width:0">
     <!-- Server resources over the alert threshold (sysmon.rs, "res" SSE events): shown on every page. -->
     <div id="alertbar" class="alert alert-danger mx-3 mx-lg-4 mt-3 mb-0" role="alert" hidden></div>
+    <!-- What the admin should know (notices.rs): a PC refused or out of room, an upgrade's change. Until dismissed. -->
+    <div id="noticebar" class="mx-3 mx-lg-4 mt-3" hidden></div>
     <main id="main" class="p-3 p-lg-4"><!-- tab fragment loaded on demand from /ui/<page> --></main>
   </div>
 </div>

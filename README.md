@@ -232,6 +232,14 @@ PC down.
   start the golden's copy runs the server's current version of the script, so a newer Broom reaches every machine
   without a new golden version. A golden set up before that: **Update script** (Diskless page) writes the current
   script into it as its next version, without booting it.
+- **Windows on a disk that starts fresh at every boot:** that script also sets Windows for it. Always: no automatic
+  BitLocker device encryption (Windows 11 turns it on by itself on a PC with a TPM), no hibernation, System Restore,
+  scheduled defrag, search index, SysMain or crash dump, and ping allowed. On the machines, while each builds its
+  base: no Windows Update and no driver search on Windows Update either — they would start over after every wipe
+  (gigabytes written and downloaded at each boot) — and the pagefile set on the Diskless page (*Where things are
+  kept*; default none, or a fixed size for rooms whose games ask for one). On the golden's maintenance machine or
+  VM Windows Update and drivers stay on: that is where they are installed. What a machine set is in the log with
+  its first boot (`… set itself up (g4) …; Windows: bitlocker=prevented … update=off …`).
 - **Games disks on diskless machines:** a diskless Windows machine has no SSD for its writes, so each one gets its own
   copy of every games disk of its group on the server (target `<disk iqn>.m<mac>`: the disk's newest version + the
   machine's own layer in `<writeback>/.games-<disk>/<mac>/`, dropped at its next PXE boot — like the per-PC writeback
@@ -293,7 +301,13 @@ PC down.
   big writer stops and the room goes on. A PC that reaches a limit is refused new room on its disk; Windows on its
   own system disk does not show "disk full" then — it stops and restarts within a minute, onto a fresh session (seen
   on Windows 11 24H2 clients). The server's log names the machine (`… (machine <mac>) — its writes that need new
-  room are refused`). Keep a per-PC limit well above what a session writes. Changes count from each PC's next boot.
+  room are refused`), the Diskless page marks it *out of room*, and its restart is told at the top of the admin
+  pages. Keep a per-PC limit well above what a session writes. Changes count from each PC's next boot.
+- **Notices:** what an admin should not have to find in the log is shown at the top of every page until the owner
+  dismisses it: a PC refused its boot, its key or its "setup done" (asking from another address, a server restart
+  during its first boot), a PC that ran out of room and restarted, the web admin moving to HTTPS on an upgrade.
+- **Set up again** (Diskless page, per machine): its base is dropped at its next start and built anew — the way
+  back when a first boot was cut short or a base went wrong.
 - **A machine's base is built once:** the first boot of a golden version reports its setup done
   (`/api/diskless/client/base-done`) and restarts; the server takes that only on a first boot, within 15 minutes of
   its start, once. No later session — a guest's — can be kept as the base.
@@ -368,7 +382,8 @@ change). Files: `<home>/tls/cert.pem`, `key.pem` (root only, from the moment it 
 talks HTTPS only: it shows the SHA-256 fingerprint of the certificate the server presents and goes on when you
 confirm it is the one on **Settings → HTTPS** (self-signed or your own); nothing about that trust travels over plain
 HTTP, and no request header gets around HTTPS. With HTTPS turned off on the server the tool asks before using plain
-HTTP. A switch on the card serves the admin on plain `http://` too.
+HTTP. A switch on the card serves the admin on plain `http://` too. An installation from before HTTPS is told
+once, in the log and at the top of the admin pages, that its admin moved (its first start after the upgrade).
 
 ## Data, backup
 

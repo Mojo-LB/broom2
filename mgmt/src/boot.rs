@@ -430,6 +430,8 @@ pub async fn diskless(
     st.saw_pxe(&mac, Some(&peer));
     let st2 = st.clone();
     let gw = router(&q);
+    let who = m.hostname.clone().unwrap_or_else(|| mac.clone());
+    let peer2 = peer.clone();
     // Every machine is prepared at once, side by side (a room switched on together). Only a machine's own second
     // request waits — for its first one to end — then it is prepared again: the PC was reset meanwhile.
     let r = match crate::diskless::is_machine(&m, &peer) {
@@ -449,6 +451,13 @@ pub async fn diskless(
         Ok(s) => s,
         Err(e) => {
             warn!("client {mac} - ip {ip}: diskless boot refused: {e}");
+            // Shown to the admin too: a PC that cannot boot (a wrong address on the LAN's DHCP, another device
+            // answering for it) should not have to be found in the log.
+            crate::notices::add(
+                &st,
+                &format!("boot:{mac}"),
+                &format!("{who} ({mac}) was refused its diskless boot, asking from {peer2}: {e}"),
+            );
             back_to_menu(&e)
         }
     })

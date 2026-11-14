@@ -53,6 +53,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/diskless/discard", post(discard))
         .route("/api/diskless/volume", post(set_volume))
         .route("/api/diskless/room", post(set_room))
+        .route("/api/diskless/rebuild", post(rebuild))
         .route("/api/diskless/iso/upload-start", post(iso_start))
         .route(
             "/api/diskless/iso/upload-chunk",
@@ -987,6 +988,22 @@ pub(crate) fn boot_diskless(
             Err(e) => return Err(e),
         }
     };
+    if p.refused {
+        // Why this PC restarted: Windows stops within a minute once its own disk takes no more writes.
+        crate::notices::warn(
+            st,
+            &format!("room:{}", m.mac),
+            &format!(
+                "golden {name}: {} had run out of room for its writes ({}) and restarted — its session starts \
+                 fresh (Diskless page: room for the machines' writes)",
+                who(m),
+                match pc_gb(st) {
+                    0 => "the drive's reserve".to_string(),
+                    n => format!("limit {n} GB a machine, or the drive's reserve"),
+                }
+            ),
+        );
+    }
     // Its own copy of each games disk it gets (Windows): the newest version again, last boot's writes dropped.
     if g.os == "windows" {
         prepare_games(st, m);
@@ -1262,7 +1279,7 @@ async fn client(
         let first = x.base_ver.is_none() || x.base_ver != x.session_ver;
         serde_json::json!({
             "role": "diskless", "golden": g, "ver": x.session_ver, "first": first, "host": m.hostname,
-            "gateway": router_of(&m.mac),
+            "gateway": router_of(&m.mac), "pagefile_gb": pagefile_gb(&st),
         })
     } else {
         let role = if goldens(&st).iter().any(|g| g.maint == Some(m.id)) {
@@ -1312,6 +1329,7 @@ pub(crate) fn client_env(v: &serde_json::Value) -> String {
 async fn base_done(
     State(st): State<SharedState>,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    report: String,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let peer = peer.ip().to_canonical().to_string();
     let st2 = st.clone();
@@ -1329,9 +1347,13 @@ async fn base_done(
         boot_step(&g, &m.mac, Step::Done)
     };
     if let Err(why) = why {
-        tracing::warn!(
-            "golden {g}: {} reported its setup done — refused ({why})",
-            who(&m)
+        crate::notices::warn(
+            &st,
+            &format!("done:{}", m.mac),
+            &format!(
+                "golden {g}: {} reported its setup done and was refused ({why}) — its next boot sets it up again",
+                who(&m)
+            ),
         );
         return Err((
             StatusCode::FORBIDDEN,
@@ -1350,11 +1372,28 @@ async fn base_done(
         },
     );
     tracing::info!(
-        "golden {g}: {} set itself up (g{}) — kept as its base at its next boot",
+        "golden {g}: {} set itself up (g{}) — kept as its base at its next boot{}",
         who(&m),
-        x.session_ver.unwrap_or(0)
+        x.session_ver.unwrap_or(0),
+        prep_report(&report)
     );
     Ok(ok())
+}
+
+/// What the machine says it set in Windows on this first boot (broom-diskless.ps1, the body of its "done"), for the
+/// log: plain printable text, cut short — it comes from a client.
+pub(crate) fn prep_report(body: &str) -> String {
+    let t: String = body
+        .chars()
+        .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .take(300)
+        .collect();
+    let t = t.trim();
+    if t.is_empty() {
+        String::new()
+    } else {
+        format!("; Windows: {t}")
+    }
 }
 
 /// GET /api/diskless/client/agent-key (public) — the asking machine's Remote agent key (hex), for broom-diskless.ps1 to
@@ -1373,7 +1412,15 @@ async fn agent_key(
         .await
         .map_err(ise)??;
     let refuse = |why: &str| {
-        tracing::warn!("diskless: agent key for {} refused ({why})", who(&m));
+        crate::notices::warn(
+            &st,
+            &format!("key:{}", m.mac),
+            &format!(
+                "diskless: {} asked for its Remote agent key and was refused ({why}) — it runs without the agent \
+                 until its next boot sets it up again",
+                who(&m)
+            ),
+        );
         Err((StatusCode::FORBIDDEN, "no key for this machine".to_string()))
     };
     let Some((g, x)) = on else {
@@ -1415,7 +1462,7 @@ async fn status(State(st): State<SharedState>) -> Result<Json<serde_json::Value>
                 .collect();
             let targets: Vec<serde_json::Value> = machines_of(&g, &all)
                 .into_iter()
-                .map(|m| serde_json::json!({"name": who(m), "mac": m.mac, "ip": m.ip, "target": machine_target(&st, &g.name, m)}))
+                .map(|m| serde_json::json!({"id": m.id, "name": who(m), "mac": m.mac, "ip": m.ip, "target": machine_target(&st, &g.name, m)}))
                 .collect();
             serde_json::json!({
                 "golden": g,
@@ -1447,7 +1494,8 @@ async fn status(State(st): State<SharedState>) -> Result<Json<serde_json::Value>
         "goldens": list,
         "isos": isos(&st),
         "places": places,
-        "room": {"pc_gb": pc_gb(&st), "free_pct": free_pct(&st), "fair_gb": crate::iscsid::overlay::FAIR >> 30},
+        "room": {"pc_gb": pc_gb(&st), "free_pct": free_pct(&st), "fair_gb": crate::iscsid::overlay::FAIR >> 30,
+                 "pagefile_gb": pagefile_gb(&st)},
         "machines": machines,
         // The address the machines reach the server at (boot LAN), for the commands shown on the page.
         "server": st.db.get_config("dhcp_server_ip", ""),
@@ -1813,10 +1861,79 @@ pub(crate) fn free_pct(st: &SharedState) -> u8 {
         .unwrap_or(FREE_PCT_DEFAULT)
 }
 
+/// What `rebuild` puts in place of the agent key's fingerprint a base was built with: never a real one, so the
+/// next boot's plan drops that base (base_plan).
+const REBUILD: &str = "rebuild";
+
+#[derive(Deserialize)]
+struct RebuildBody {
+    /// The golden.
+    name: String,
+    /// The machine.
+    id: i64,
+}
+
+/// POST /api/diskless/rebuild {name, id} (maintain) — machine `id` sets itself up again at its next boot on golden
+/// `name`: its base is dropped then (its name, its Remote agent key and files, Windows' own first-boot work are
+/// made anew). The way back when a base went wrong — a first boot cut short, or made by something else that
+/// answered at the machine's address.
+async fn rebuild(
+    State(st): State<SharedState>,
+    Json(b): Json<RebuildBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let g = goldens(&st)
+        .into_iter()
+        .find(|g| g.name == b.name)
+        .ok_or_else(|| bad("no such golden"))?;
+    let all = st.db.machines().map_err(ise)?;
+    let m = machines_of(&g, &all)
+        .into_iter()
+        .find(|m| m.id == b.id)
+        .ok_or_else(|| bad("not a machine of this golden"))?;
+    let bs = base_state(&st, &g.name, &m.mac);
+    set_base_state(
+        &st,
+        &g.name,
+        &m.mac,
+        &BaseState {
+            pending: None,
+            akey: REBUILD.to_string(),
+            ..bs
+        },
+    );
+    tracing::info!(
+        "golden {}: {} sets itself up again at its next boot (asked on the Diskless page)",
+        g.name,
+        who(m)
+    );
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "status": format!("{} sets itself up again at its next boot", who(m)),
+    })))
+}
+
+/// A Windows diskless machine's pagefile in GB: 0 = none (the default — what is paged out would travel to the server
+/// and back), otherwise a fixed one of that size on its own disk, in its session (broom-diskless.ps1 sets it while
+/// the machine builds its base). For rooms whose games ask for a pagefile or whose PCs have little RAM.
+const PAGEFILE_KEY: &str = "diskless_pagefile_gb";
+const PAGEFILE_MAX: u64 = 64;
+
+pub(crate) fn pagefile_gb(st: &SharedState) -> u64 {
+    st.db
+        .get_config(PAGEFILE_KEY, "0")
+        .parse()
+        .ok()
+        .filter(|g| *g <= PAGEFILE_MAX)
+        .unwrap_or(0)
+}
+
 #[derive(Deserialize)]
 struct RoomBody {
     pc_gb: u64,
     free_pct: u8,
+    /// Left as it is when not sent.
+    #[serde(default)]
+    pagefile_gb: Option<u64>,
 }
 
 /// POST /api/diskless/room {pc_gb, free_pct} (owner) — the room for the machines' writes (see above). Machines get a
@@ -1832,6 +1949,14 @@ async fn set_room(
     }
     if b.free_pct > 50 {
         return Err(bad("kept free: 0 (no reserve) to 50 %"));
+    }
+    if let Some(p) = b.pagefile_gb {
+        if p > PAGEFILE_MAX {
+            return Err(bad(format!("pagefile: 0 (none) to {PAGEFILE_MAX} GB")));
+        }
+        st.db
+            .set_config(PAGEFILE_KEY, &p.to_string())
+            .map_err(ise)?;
     }
     st.db
         .set_config(PC_GB_KEY, &b.pc_gb.to_string())

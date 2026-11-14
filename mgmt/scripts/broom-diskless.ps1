@@ -15,6 +15,10 @@
 #    The maintenance VM on the server (Diskless page, Maintain in the browser: vmmaint.rs) also gets its games disks,
 #    writable, under their letters (broom-games.ps1 -LinesFile).
 #  - anything else (the server unreachable): nothing.
+# Windows is also set for a disk that is on the network and starts fresh at every boot (Prep below): always no
+# automatic BitLocker, hibernation, System Restore, defrag, search index, SysMain or crash dump; on the machines (in
+# their base) also no Windows Update, no driver search and the pagefile the server asks for. On the golden's
+# maintenance machine or VM Windows Update and drivers stay on: that is where they are installed.
 # ASCII only. Logs to C:\Windows\Temp\broom-diskless.log (in the session layer: gone at the next boot).
 $ErrorActionPreference = 'Stop'
 $srv = '__SERVER__'
@@ -29,6 +33,81 @@ function step($m) {
 }
 $me = $MyInvocation.MyCommand.Path
 
+# Windows settings for a disk on the network that is wiped at every boot. $pc = a machine building its base: also no
+# Windows Update / driver search (they would start over after every wipe) and its pagefile ($pagefile GB, 0 = none,
+# -1 = left alone). Not $pc = the golden itself (installing, its maintenance machine or VM): updates and drivers
+# stay on. Every step on its own: one that fails is reported, the others still count. Returns what it did.
+function Prep([bool]$pc, [int]$pagefile = -1) {
+  $did = @()
+  function Dw($k, $n, $v) { & reg.exe add $k /v $n /t REG_DWORD /d $v /f | Out-Null; if ($LASTEXITCODE) { throw "reg add $k $n" } }
+  function Off($svc) { Set-Service -Name $svc -StartupType Disabled -ErrorAction Stop; Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue }
+  # No automatic device encryption (Windows 11 turns it on by itself on a PC with a TPM): the disk is the server's.
+  try {
+    Dw 'HKLM\SYSTEM\CurrentControlSet\Control\BitLocker' PreventDeviceEncryption 1
+    $bl = 'prevented'
+    try {
+      $v = Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction Stop
+      if ($v.VolumeStatus -ne 'FullyDecrypted') { & manage-bde.exe -off $env:SystemDrive | Out-Null; $bl = "was $($v.VolumeStatus): decrypting" }
+    } catch { }
+    $did += "bitlocker=$bl"
+  } catch { $did += 'bitlocker=FAILED' }
+  try { & powercfg.exe /hibernate off | Out-Null; $did += 'hibernate=off' } catch { $did += 'hibernate=FAILED' }
+  try { Disable-ComputerRestore -Drive "$env:SystemDrive\" -ErrorAction Stop; $did += 'restore=off' } catch { $did += 'restore=FAILED' }
+  try { Disable-ScheduledTask -TaskPath '\Microsoft\Windows\Defrag\' -TaskName ScheduledDefrag -ErrorAction Stop | Out-Null; $did += 'defrag=off' } catch { $did += 'defrag=FAILED' }
+  try { Off WSearch; $did += 'search=off' } catch { $did += 'search=FAILED' }
+  try { Off SysMain; $did += 'sysmain=off' } catch { $did += 'sysmain=FAILED' }
+  # A crash dump would be written over the network into a session that is wiped anyway.
+  try { Dw 'HKLM\SYSTEM\CurrentControlSet\Control\CrashControl' CrashDumpEnabled 0; $did += 'dump=off' } catch { $did += 'dump=FAILED' }
+  # The server shows a machine without the agent as on when it answers a ping.
+  try {
+    & netsh.exe advfirewall firewall delete rule name="Broom ping" | Out-Null
+    & netsh.exe advfirewall firewall add rule name="Broom ping" protocol=icmpv4:8,any dir=in action=allow profile=any | Out-Null
+    $did += 'ping=allowed'
+  } catch { $did += 'ping=FAILED' }
+  $wu = 'HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
+  $ds = 'HKLM\SOFTWARE\Policies\Microsoft\Windows\DriverSearching'
+  $dm = 'HKLM\SOFTWARE\Policies\Microsoft\Windows\Device Metadata'
+  $ws = 'HKLM\SOFTWARE\Policies\Microsoft\WindowsStore'
+  $cur = 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching'
+  if ($pc) {
+    try {
+      Dw "$wu\AU" NoAutoUpdate 1
+      Dw $ws AutoDownload 2
+      foreach ($svc in 'UsoSvc', 'wuauserv', 'DoSvc') { Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue }
+      $did += 'update=off'
+    } catch { $did += 'update=FAILED' }
+    try {
+      Dw $wu ExcludeWUDriversInQualityUpdate 1
+      Dw $ds SearchOrderConfig 0
+      Dw $cur SearchOrderConfig 0
+      Dw $dm PreventDeviceMetadataFromNetwork 1
+      $did += 'drivers=off'
+    } catch { $did += 'drivers=FAILED' }
+    if ($pagefile -ge 0) {
+      try {
+        # Not Windows' own choice (as large as it likes, on a disk that is the server's): none, or one fixed size.
+        $cs = Get-CimInstance Win32_ComputerSystem
+        if ($cs.AutomaticManagedPagefile) { Set-CimInstance $cs -Property @{AutomaticManagedPagefile = $false} }
+        Get-CimInstance Win32_PageFileSetting | Remove-CimInstance
+        if ($pagefile -eq 0) { $did += 'pagefile=none' } else {
+          $mb = $pagefile * 1024
+          $mm = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management'
+          Set-ItemProperty -Path $mm -Name PagingFiles -Value @("$env:SystemDrive\pagefile.sys $mb $mb") -Type MultiString -ErrorAction Stop
+          $did += "pagefile=${pagefile}GB"
+        }
+      } catch { $did += 'pagefile=FAILED' }
+    }
+  } else {
+    # The golden: whatever kept updates and drivers off (an older copy of this script, a hand) goes.
+    foreach ($x in @(@("$wu\AU", 'NoAutoUpdate'), @($ws, 'AutoDownload'), @($wu, 'ExcludeWUDriversInQualityUpdate'), @($ds, 'SearchOrderConfig'), @($dm, 'PreventDeviceMetadataFromNetwork'))) {
+      Remove-ItemProperty -Path ($x[0] -replace '^HKLM', 'HKLM:') -Name $x[1] -ErrorAction SilentlyContinue
+    }
+    try { Dw $cur SearchOrderConfig 1 } catch { }
+    $did += 'update=on'; $did += 'drivers=on'
+  }
+  $did -join ' '
+}
+
 # 1. Installing (run by hand on the golden): copy + startup task, then stop.
 if ($me -ne $dst -and $me -ne $run) {
   $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -42,8 +121,9 @@ if ($me -ne $dst -and $me -ne $run) {
   $t = New-ScheduledTaskTrigger -AtStartup
   $s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -StartWhenAvailable
   Register-ScheduledTask -TaskName BroomDiskless -Action $a -Trigger $t -Settings $s -User SYSTEM -RunLevel Highest -Force | Out-Null
-  # A diskless machine's disk is on the network: no hibernation / fast startup (resume from a stale session layer).
-  powercfg /hibernate off | Out-Null
+  # A diskless machine's disk is on the network: no hibernation / fast startup (resume from a stale session layer),
+  # and the rest of Prep.
+  Write-Host ("Windows prepared: " + (Prep $false)) -ForegroundColor Green
   # No machine's agent files or key in the golden (an older version of this script on a maintenance boot, a copy).
   if (Test-Path $dir) { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
   Write-Host "Installed: task BroomDiskless runs $dst at every start (server $srv)." -ForegroundColor Green
@@ -100,6 +180,7 @@ function Fetch($f, $to) {
   if ((Get-FileHash -Algorithm SHA256 $to).Hash.ToLower() -ne $sum) { Remove-Item -LiteralPath $to -Force; throw "$f does not match scripts.sha256" }
 }
 if ($info.role -eq 'maintenance') {
+  step ("golden prepared: " + (Prep $false))
   # Its writes go into the golden: no machine's key or agent files may end up there. .NET's Directory.Delete does not
   # follow a folder mount point (it only removes it), so a volume mounted inside is never emptied with it.
   if (Test-Path $dir) {
@@ -148,6 +229,10 @@ function WatchArgs { "-NoProfile -ExecutionPolicy Bypass -File `"$dir\broom-watc
 
 if ($info.first) {
   # First boot of this machine on this golden version: its own setup, then the restart that keeps it as its base.
+  $pfg = -1
+  if ($null -ne $info.pagefile_gb) { $pfg = [int]$info.pagefile_gb }
+  $prep = Prep $true $pfg
+  step "prepared: $prep"
   if ($info.host -and ($info.host -ne $env:COMPUTERNAME)) {
     step "machine name $env:COMPUTERNAME -> $($info.host)"
     try { Rename-Computer -NewName $info.host -Force -ErrorAction Stop } catch { step "rename FAILED: $_" }
@@ -163,7 +248,7 @@ if ($info.first) {
     step 'agent files, key and build ready'
   } catch { step "agent setup FAILED: $_ (the machine works without it; set up again with its next base)" }
   try {
-    Invoke-RestMethod -UseBasicParsing -TimeoutSec 10 -Method Post "http://$srv/api/diskless/client/base-done" | Out-Null
+    Invoke-RestMethod -UseBasicParsing -TimeoutSec 10 -Method Post -ContentType 'text/plain' -Body $prep "http://$srv/api/diskless/client/base-done" | Out-Null
     step 'base done - restarting to keep it'
   } catch { step "base-done FAILED: $_ (set up again at the next boot)"; exit }
   Restart-Computer -Force

@@ -149,6 +149,11 @@ impl Overlay {
             .swap(true, std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// A write of this layer was refused for room (since it was opened).
+    pub fn refused(&self) -> bool {
+        self.refused.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Neighbouring blocks on the same side (overlay / below) are read in one go: a 1 MB read is one call, not 16.
     pub fn read_at(&self, base: Base, mut off: u64, mut buf: &mut [u8]) -> Result<(), String> {
         let Some(end) = off.checked_add(buf.len() as u64) else {

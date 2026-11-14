@@ -42,6 +42,13 @@ Some properties come with diskless boot on a shared LAN and are documented, not 
   boot; the boot LAN must be segmented from guest Wi-Fi and unknown devices;
 - license keys are handed out once over plain HTTP, to a registered machine identified by its fixed IP + ARP;
 - games disk writes are accepted from the update machine's IP only (iSCSI carries no other proof of identity);
+- a diskless machine (no SSD) is its fixed IP + the MAC the server sees for it (ARP), nothing more: its own disk — the
+  golden, its base, its session — its Remote agent key and its first-boot "setup done" are served to whatever answers
+  at that address. Diskless rooms are taken to be a controlled network (the server, the PCs, a managed switch). A
+  device that takes a PC's IP and MAC while it is off can read that PC's base and, after a new golden version, do
+  its first boot in its place; nothing of the golden or of other machines is touched, every refused attempt is in
+  the log and at the top of the admin pages, and **Set up again** (Diskless page) rebuilds that machine's base.
+  Port isolation or ARP inspection on the boot LAN's switch closes it;
 - the guest account is a local administrator on Windows clients (games need it): a determined guest can interfere
   with the machine they sit at until its next reset.
 

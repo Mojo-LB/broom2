@@ -474,3 +474,48 @@ fn first_boot_steps() {
     assert!(first_boot_step(Some(&mut b), 1001 + FIRST_BOOT_S, Step::Key).is_err());
     assert!(!b.done && !b.key_given);
 }
+
+/// "Set up again" (the owner's way back from a base that went wrong): the base is dropped at the machine's next boot,
+/// whatever it was built with; a machine without a base is simply on its first boot.
+#[test]
+fn rebuild_drops_the_base_at_the_next_boot() {
+    let built = BaseState {
+        pending: None,
+        host: Some("PC01".into()),
+        lic: 3,
+        akey: "abcd".into(),
+    };
+    assert_eq!(
+        base_plan(&built, Some(7), true, Some("PC01"), 3, "abcd"),
+        (false, false)
+    );
+    let asked = BaseState {
+        akey: REBUILD.into(),
+        ..built
+    };
+    assert_eq!(
+        base_plan(&asked, Some(7), true, Some("PC01"), 3, "abcd"),
+        (false, true)
+    );
+    assert_eq!(
+        base_plan(&asked, Some(7), false, Some("PC01"), 3, "abcd"),
+        (false, false)
+    );
+}
+
+/// What a machine reports it set in Windows goes into the log as plain, short text (it comes from a client).
+#[test]
+fn windows_report_is_plain_and_short() {
+    assert_eq!(prep_report(""), "");
+    assert_eq!(prep_report("  \r\n"), "");
+    assert_eq!(
+        prep_report("bitlocker=prevented update=off\r\n"),
+        "; Windows: bitlocker=prevented update=off"
+    );
+    let odd = prep_report("ok\u{1b}[31m \u{e9}\n<b>");
+    assert_eq!(odd, "; Windows: ok[31m <b>");
+    assert_eq!(
+        prep_report(&"x".repeat(5000)).len(),
+        "; Windows: ".len() + 300
+    );
+}

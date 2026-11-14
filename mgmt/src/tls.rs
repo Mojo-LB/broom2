@@ -92,6 +92,34 @@ pub(crate) fn enabled(st: &SharedState) -> bool {
     st.db.get_config(ON_KEY, "on") != "off"
 }
 
+/// What an installation from before HTTPS finds at its first start with it: the admin pages moved. Whether the first
+/// start of an existing installation (it has accounts and never chose) or a new one (nothing to tell).
+pub(crate) fn upgraded(choice: &str, accounts: usize) -> bool {
+    choice.is_empty() && accounts > 0
+}
+
+/// HTTPS is listening for the first time on this installation: the choice is written down (on), and an existing
+/// installation is told — in the log and at the top of the admin pages — that http:// now leads to https:// with a
+/// certificate of its own, and where to allow plain HTTP again. Once: the next start finds the choice.
+pub(crate) fn note_upgrade(st: &SharedState) {
+    let choice = st.db.get_config(ON_KEY, "");
+    if !choice.is_empty() {
+        return;
+    }
+    let told = upgraded(&choice, crate::auth::users(st).len());
+    let _ = st.db.set_config(ON_KEY, "on");
+    if told {
+        crate::notices::warn(
+            st,
+            "https",
+            "After this upgrade the web admin is on https:// only: http:// pages lead there and scripts using the \
+             admin API over plain HTTP are refused. The certificate is this server's own (self-signed): check its \
+             fingerprint on Settings → HTTPS, where plain HTTP can be allowed again or your own certificate put in. \
+             Booting PCs and agents are not affected; the capture tool asks to confirm that fingerprint.",
+        );
+    }
+}
+
 /// The certificate in use, swapped in place by an upload.
 struct Resolver(RwLock<Arc<rustls::sign::CertifiedKey>>);
 

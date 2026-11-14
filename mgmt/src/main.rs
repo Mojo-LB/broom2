@@ -40,6 +40,7 @@ mod logbuf;
 mod machines;
 mod metrics;
 mod monitor;
+mod notices;
 mod ntfsread;
 mod onboard;
 mod overlay;
@@ -593,6 +594,7 @@ async fn main() {
         .merge(games::routes()) // games disks (Windows)
         .merge(diskless::routes()) // diskless goldens, their machines, the ISO library
         .merge(onboard::routes()) // Add hardware: a new PC's network card installed into a Windows golden
+        .merge(notices::routes()) // what the admin should know: shown at the top of every page
         .merge(groups::routes()) // Groups page
         .merge(machines::routes()) // Machines table
         .merge(license::routes()) // Windows license keys + boot reports
@@ -645,6 +647,7 @@ async fn main() {
     if https_port != 0 {
         match tls::listen(&state, https_port).await {
             Ok(l) => {
+                tls::note_upgrade(&state);
                 let https = app
                     .clone()
                     .layer(axum::middleware::from_fn(tls::secure_cookies));
