@@ -69,6 +69,10 @@ pub static IN_FLIGHT_MAX: LazyLock<usize> =
 static IN_FLIGHT: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(*IN_FLIGHT_MAX));
 /// A data segment bigger than this ends the connection (login/text are small; Data-Out ≤ MRDSL).
 const MAX_IN: usize = 1 << 20;
+/// All of one login request's key text, which may come in several PDUs (the C bit): a real initiator's keys are a
+/// few hundred bytes. More ends the connection — the port is open to every host on the boot LAN before any check,
+/// and text gathered without end would take the memory of the daemon every machine's disk comes from.
+pub(crate) const LOGIN_TEXT_MAX: usize = 64 << 10;
 
 fn get32(b: &[u8], at: usize) -> u32 {
     u32::from_be_bytes(b[at..at + 4].try_into().unwrap())
@@ -264,6 +268,13 @@ async fn login(
         rsp[0] = 0x23;
         rsp[8..14].copy_from_slice(&p.bhs[8..14]); // ISID
         rsp[16..20].copy_from_slice(&p.bhs[16..20]); // ITT
+        if pending.len() + p.data.len() > LOGIN_TEXT_MAX {
+            tracing::warn!(
+                "iscsid: {peer} sent more than {} KB of login text — connection closed",
+                LOGIN_TEXT_MAX >> 10
+            );
+            return Ok(None);
+        }
         pending.extend_from_slice(&p.data);
         if cont {
             rsp[1] = csg << 2; // more key text follows: acknowledge, answer once it's complete
