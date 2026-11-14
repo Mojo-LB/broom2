@@ -58,6 +58,9 @@ function Prep([bool]$pc, [int]$pagefile = -1) {
   try { Off SysMain; $did += 'sysmain=off' } catch { $did += 'sysmain=FAILED' }
   # A crash dump would be written over the network into a session that is wiped anyway.
   try { Dw 'HKLM\SYSTEM\CurrentControlSet\Control\CrashControl' CrashDumpEnabled 0; $did += 'dump=off' } catch { $did += 'dump=FAILED' }
+  # Reading a file does not write its "last access" time: on a disk of 128 GB or less Windows keeps that on, and every
+  # file read at a boot then costs a write into the machine's session.
+  try { Dw 'HKLM\SYSTEM\CurrentControlSet\Control\FileSystem' NtfsDisableLastAccessUpdate 2147483649; $did += 'lastaccess=off' } catch { $did += 'lastaccess=FAILED' }
   # The server shows a machine without the agent as on when it answers a ping.
   try {
     & netsh.exe advfirewall firewall delete rule name="Broom ping" | Out-Null
@@ -73,7 +76,11 @@ function Prep([bool]$pc, [int]$pagefile = -1) {
     try {
       Dw "$wu\AU" NoAutoUpdate 1
       Dw $ws AutoDownload 2
-      foreach ($svc in 'UsoSvc', 'wuauserv', 'DoSvc') { Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue }
+      # The services too, not only the policy: an update the golden was saved with half installed is taken up again by
+      # the update orchestrator at every boot whatever the policy says (seen: 2.7 GB written by its installer in a
+      # boot's first minutes, every boot, never finished: the session is dropped at the reset).
+      foreach ($svc in 'UsoSvc', 'wuauserv') { Off $svc }
+      Stop-Service -Name DoSvc -Force -ErrorAction SilentlyContinue
       $did += 'update=off'
     } catch { $did += 'update=FAILED' }
     try {
@@ -103,6 +110,10 @@ function Prep([bool]$pc, [int]$pagefile = -1) {
       Remove-ItemProperty -Path ($x[0] -replace '^HKLM', 'HKLM:') -Name $x[1] -ErrorAction SilentlyContinue
     }
     try { Dw $cur SearchOrderConfig 1 } catch { }
+    # And the update services as Windows sets them, should a golden ever have been saved with them off.
+    foreach ($svc in 'UsoSvc', 'wuauserv') {
+      if ((Get-Service -Name $svc -ErrorAction SilentlyContinue).StartType -eq 'Disabled') { & sc.exe config $svc start= demand | Out-Null }
+    }
     $did += 'update=on'; $did += 'drivers=on'
   }
   $did -join ' '
