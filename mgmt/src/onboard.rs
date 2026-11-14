@@ -710,6 +710,12 @@ pub(crate) fn qemu_version() -> Option<(u32, u32)> {
     parse_qemu_version(&String::from_utf8_lossy(&o.stdout))
 }
 
+/// A file's path inside a QEMU option (`-drive file=…,format=…`): QEMU splits options at commas, a comma that is
+/// part of the path is written twice. The folders are the owner's choice (Diskless page: where things are kept).
+pub(crate) fn qpath(path: impl std::fmt::Display) -> String {
+    path.to_string().replace(',', ",,")
+}
+
 /// The arguments that confine QEMU (see above), for QEMU `version`: the option that drops the user is `-runas`
 /// up to 9.0 and `-run-with user=` from 9.1 on (which deprecated `-runas`). The filter must allow the one change
 /// of user at start (elevateprivileges=allow); as nobody there is nothing left to elevate to.
@@ -780,11 +786,14 @@ pub(crate) fn qemu_args(disk: &str, code: &str, vars: &str, qmp: &str) -> Vec<St
         "-m",
         "4096",
         "-drive",
-        &format!("if=pflash,format=raw,readonly=on,file={code}"),
+        &format!("if=pflash,format=raw,readonly=on,file={}", qpath(code)),
         "-drive",
-        &format!("if=pflash,format=raw,file={vars}"),
+        &format!("if=pflash,format=raw,file={}", qpath(vars)),
         "-drive",
-        &format!("file={disk},format=raw,if=none,id=d0,cache=none,aio=threads"),
+        &format!(
+            "file={},format=raw,if=none,id=d0,cache=none,aio=threads",
+            qpath(disk)
+        ),
         "-device",
         "ahci,id=sata",
         "-device",

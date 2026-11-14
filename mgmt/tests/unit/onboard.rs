@@ -675,3 +675,16 @@ fn committed_boot_binaries_are_the_pinned_releases() {
     }
     assert_eq!(seen, 2, "snponly-shim.efi and snponly.efi");
 }
+
+/// A comma in a folder's name does not split a QEMU option in two.
+#[test]
+fn qemu_paths_keep_their_commas() {
+    assert_eq!(
+        super::qpath("/data/write,back/vars.fd"),
+        "/data/write,,back/vars.fd"
+    );
+    assert_eq!(
+        super::qpath(std::path::Path::new("/plain/vars.fd").display()),
+        "/plain/vars.fd"
+    );
+}

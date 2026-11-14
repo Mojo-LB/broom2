@@ -219,15 +219,21 @@ pub(crate) fn qemu_args(
         "-rtc",
         "base=localtime",
         "-drive",
-        &format!("if=pflash,format=raw,readonly=on,file={code}"),
+        &format!(
+            "if=pflash,format=raw,readonly=on,file={}",
+            crate::onboard::qpath(code)
+        ),
         "-drive",
-        &format!("if=pflash,format=raw,file={vars}"),
+        &format!("if=pflash,format=raw,file={}", crate::onboard::qpath(vars)),
         // AHCI, not virtio: the golden has Windows' inbox storahci as a boot driver, no virtio driver (the same disk
         // boots real PCs over iSCSI); it stays the golden the PCs boot, with nothing VM-specific installed into it.
         "-device",
         "ahci,id=sata",
         "-drive",
-        &format!("file={disk},format=raw,if=none,id=d0,cache=none,aio=threads"),
+        &format!(
+            "file={},format=raw,if=none,id=d0,cache=none,aio=threads",
+            crate::onboard::qpath(disk)
+        ),
         "-device",
         "ide-hd,drive=d0,bus=sata.0,bootindex=1",
     ]
@@ -237,7 +243,10 @@ pub(crate) fn qemu_args(
     for (i, (dev, serial)) in games.iter().enumerate() {
         a.extend([
             "-drive".into(),
-            format!("file={dev},format=raw,if=none,id=g{i},cache=none,aio=threads"),
+            format!(
+                "file={},format=raw,if=none,id=g{i},cache=none,aio=threads",
+                crate::onboard::qpath(dev)
+            ),
             "-device".into(),
             format!("ide-hd,drive=g{i},bus=sata.{},serial={serial}", i + 1),
         ]);
