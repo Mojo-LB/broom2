@@ -388,6 +388,37 @@ fn busy(mac: &str) -> bool {
         .is_some_and(|v| !v.thumb)
 }
 
+/// What someone watching a machine may send to its agent: the stream's settings and their own mouse, keys and
+/// clipboard.
+const VIEWER_OPS: [&str; 8] = [
+    "start", "stop", "ack", "mouse", "wheel", "key", "sas", "clip",
+];
+
+/// A viewer's message as it is passed to the agent, or None (dropped). The server signs whatever it passes on, and
+/// the agent also takes commands that are not a viewer's — restart / shut down (the Power permission, power.rs),
+/// the display mode (the owner, display.rs): through here they would need the Remote permission only. So only the
+/// viewer's own commands pass, and written anew with "op" first: the agent reads fields by name from the text, and
+/// neither a second "op" nor a string that looks like one can stand in for it.
+pub(crate) fn viewer_command(text: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let o = v.as_object()?;
+    let op = o.get("op")?.as_str()?;
+    if !VIEWER_OPS.contains(&op) {
+        return None;
+    }
+    let mut out = format!("{{\"op\":\"{op}\"");
+    for (k, val) in o {
+        if k != "op" {
+            out.push(',');
+            out += &serde_json::to_string(k).ok()?;
+            out.push(':');
+            out += &val.to_string();
+        }
+    }
+    out.push('}');
+    Some(out)
+}
+
 fn start_msg(q: u8, w: u16, h264: bool) -> Message {
     let codec = if h264 { "h264" } else { "jpeg" };
     Message::Text(format!("{{\"op\":\"start\",\"q\":{q},\"w\":{w},\"codec\":\"{codec}\"}}").into())
@@ -425,7 +456,11 @@ async fn run_view(ws: WebSocket, v: ViewSession, gone: impl std::future::Future<
         while let Some(Ok(m)) = rx.next().await {
             match m {
                 Message::Text(t) if t.len() <= MAX_INPUT => {
-                    if to_agent.send(Message::Text(t)).await.is_err() {
+                    // Only a viewer's own commands go on (viewer_command): anything else is dropped.
+                    let Some(cmd) = viewer_command(t.as_str()) else {
+                        continue;
+                    };
+                    if to_agent.send(Message::Text(cmd.into())).await.is_err() {
                         break;
                     }
                 }
