@@ -73,6 +73,8 @@ const MAX_IN: usize = 1 << 20;
 /// few hundred bytes. More ends the connection — the port is open to every host on the boot LAN before any check,
 /// and text gathered without end would take the memory of the daemon every machine's disk comes from.
 pub(crate) const LOGIN_TEXT_MAX: usize = 64 << 10;
+/// Ping data (NOP-Out) echoed at most: initiators send none, or a few bytes.
+pub(crate) const PING_MAX: usize = 4 << 10;
 
 fn get32(b: &[u8], at: usize) -> u32 {
     u32::from_be_bytes(b[at..at + 4].try_into().unwrap())
@@ -549,7 +551,15 @@ async fn full_feature(
         rsp[16..20].copy_from_slice(&p.bhs[16..20]);
         match op {
             0x00 if itt != 0xffff_ffff => {
-                // NOP-Out ping → NOP-In echo.
+                // NOP-Out ping → NOP-In echo. A ping carries a few bytes at most; the echo of a large one, queued for
+                // a client that does not read, would hold megabytes for every ping it sends.
+                if p.data.len() > PING_MAX {
+                    tracing::warn!(
+                        "iscsid: {peer} sent a ping with {} KB of data — connection closed",
+                        p.data.len() >> 10
+                    );
+                    return reject(tx, &p.bhs, 0x04).await;
+                }
                 rsp[0] = 0x20;
                 rsp[1] = 0x80;
                 rsp[8..16].copy_from_slice(&p.bhs[8..16]);
@@ -562,6 +572,10 @@ async fn full_feature(
                     return reject(tx, &p.bhs, 0x05).await;
                 };
                 if is_write(&p.bhs, &disk) {
+                    // The window we advertise is WINDOW commands: an initiator never has more waiting.
+                    if waiting.len() >= 4 * WINDOW as usize {
+                        return reject(tx, &p.bhs, 0x04).await;
+                    }
                     waiting.push_back(p.bhs);
                     continue;
                 }
