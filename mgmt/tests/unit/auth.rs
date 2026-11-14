@@ -346,3 +346,32 @@ fn roles_and_permissions() {
         "\"maintain\""
     );
 }
+
+/// An open screen (a machine's Remote view, the maintenance VM's console) is checked again while it is open: it ends
+/// when the session is gone, and also when the role lost the permission it was opened with.
+#[test]
+fn an_open_screen_ends_with_its_permission() {
+    let remote = Need::Perm(&[Perm::Remote]);
+    let keeps = Need::Perm(&[Perm::Maintain]);
+    let tech = |perms: &[Perm]| Who {
+        name: "t".into(),
+        role: Role::Custom("tech".into()),
+        perms: perms.iter().copied().collect(),
+    };
+    assert!(still_allowed(Some(&tech(&[Perm::Remote])), &remote));
+    assert!(
+        !still_allowed(Some(&tech(&[Perm::Wake])), &remote),
+        "the role no longer has Remote"
+    );
+    assert!(!still_allowed(None, &remote), "the session is gone");
+    // The VM that keeps Windows changes: Vm alone was never enough, and Maintain taken away ends it.
+    assert!(still_allowed(Some(&tech(&[Perm::Maintain])), &keeps));
+    assert!(!still_allowed(Some(&tech(&[Perm::Vm])), &keeps));
+    // The owner always; the events stream of any account as long as its session lives.
+    let owner = Who {
+        name: "o".into(),
+        role: Role::Owner,
+        perms: Perms::new(),
+    };
+    assert!(still_allowed(Some(&owner), &keeps) && still_allowed(Some(&tech(&[])), &Need::Any));
+}

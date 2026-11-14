@@ -240,7 +240,7 @@ async fn events(
     use tokio::sync::broadcast::error::RecvError;
     // The guard checked the session when the stream opened; it stays open for hours, so it checks again every 30 s
     // and ends with a "logout" event once the session is gone (expired, or the password changed elsewhere).
-    let gone = auth::until_invalid(st.clone(), auth::session_token(&headers));
+    let gone = auth::until_invalid(st.clone(), auth::session_token(&headers), auth::Need::Any);
     let ping = || Event::default().event("ping").data(VERSION);
     let jobs = stream::unfold(st.job_tx.subscribe(), |mut rx| async move {
         loop {

@@ -543,6 +543,7 @@ pub(crate) fn begin(
         ));
     }
     crate::onboard::preflight()?;
+    crate::sysmon::room_for_vm(MEM_MB as u64, crate::sysmon::meminfo("MemAvailable:"))?;
     let mut s = plan(st, golden, games, keep, by)?;
     // Written down before anything is attached or started: a VM this server does not know about could not be
     // stopped, saved or discarded from the page, and would hold the golden.
@@ -943,7 +944,11 @@ async fn console(
         Ok(w) => w.join("vnc.sock"),
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
-    let gone = crate::auth::until_invalid(st, crate::auth::session_token(&headers));
+    let gone = crate::auth::until_invalid(
+        st,
+        crate::auth::session_token(&headers),
+        crate::auth::Need::Perm(needed_for(s.keep)),
+    );
     ws.protocols(["binary"])
         .max_message_size(1 << 20)
         .on_upgrade(move |w| pump(w, sock, gone))

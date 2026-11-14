@@ -321,7 +321,7 @@ async fn login(
                 Some(Err(e)) => {
                     tracing::info!(
                         "iscsid: login of {peer} to {} refused: {e}",
-                        target.as_deref().unwrap_or_default()
+                        super::games::split_key(target.as_deref().unwrap_or_default()).0
                     );
                     fail = Some((0x03, 0x01)); // service unavailable: the initiator retries
                 }

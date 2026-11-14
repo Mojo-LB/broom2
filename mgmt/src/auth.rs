@@ -448,14 +448,21 @@ pub(crate) fn end_sessions(st: &SharedState, user: &str) {
 /// How often an open stream (SSE, Remote WebSocket) re-checks its session — the guard only checked when it opened.
 pub(crate) const RECHECK: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Resolves once the session `tok` is no longer valid (checked every RECHECK): ends an SSE stream / WebSocket.
-pub(crate) async fn until_invalid(st: SharedState, tok: Option<String>) {
+/// Resolves once the session `tok` is no longer valid, or its account no longer has what `need` asks (checked every
+/// RECHECK): ends an SSE stream / WebSocket. A screen opened with a right — a machine's (Remote), the maintenance
+/// VM's — closes when the owner takes that right from the role, not only when the session ends.
+pub(crate) async fn until_invalid(st: SharedState, tok: Option<String>, need: Need) {
     loop {
         tokio::time::sleep(RECHECK).await;
-        if !tok.as_deref().is_some_and(|t| who(&st, t).is_some()) {
+        if !still_allowed(tok.as_deref().and_then(|t| who(&st, t)).as_ref(), &need) {
             return;
         }
     }
+}
+
+/// Whether the account behind a session (None: the session is gone) still has what `need` asks.
+pub(crate) fn still_allowed(w: Option<&Who>, need: &Need) -> bool {
+    w.is_some_and(|w| allowed(&w.role, &w.perms, need))
 }
 
 /// Paths reachable without a session: boot/client endpoints + the login API + the static shell (HTML only, no data).

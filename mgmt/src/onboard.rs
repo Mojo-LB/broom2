@@ -710,6 +710,9 @@ pub(crate) fn qemu_version() -> Option<(u32, u32)> {
     parse_qemu_version(&String::from_utf8_lossy(&o.stdout))
 }
 
+/// Memory of the Add hardware VM, MB.
+const VM_MB: u64 = 4096;
+
 /// A file's path inside a QEMU option (`-drive file=…,format=…`): QEMU splits options at commas, a comma that is
 /// part of the path is written twice. The folders are the owner's choice (Diskless page: where things are kept).
 pub(crate) fn qpath(path: impl std::fmt::Display) -> String {
@@ -784,7 +787,7 @@ pub(crate) fn qemu_args(disk: &str, code: &str, vars: &str, qmp: &str) -> Vec<St
         "-smp",
         "4",
         "-m",
-        "4096",
+        &VM_MB.to_string(),
         "-drive",
         &format!("if=pflash,format=raw,readonly=on,file={}", qpath(code)),
         "-drive",
@@ -856,6 +859,19 @@ const PORTAL: &str = "127.0.0.1:3260";
 
 /// The golden's writable target attached to this server: its block device.
 pub(crate) fn login(target: &str) -> Result<PathBuf, String> {
+    login_as_named(target).map_err(|e| hide_key(&e, target))
+}
+
+/// `text` without the write key of `target` ("<iqn>.g<k>.u<key>", local_target): what a failed login says ends up in
+/// the job's messages and the log, which every account reads.
+pub(crate) fn hide_key(text: &str, target: &str) -> String {
+    match crate::iscsid::games::split_key(target).1 {
+        Some(key) => text.replace(key, "(key)"),
+        None => text.to_string(),
+    }
+}
+
+fn login_as_named(target: &str) -> Result<PathBuf, String> {
     let t = Duration::from_secs(30);
     let _ = sh(
         "iscsiadm",
@@ -976,7 +992,11 @@ pub(crate) fn g_child(dir: &FsPath, name: &str) -> Result<PathBuf, String> {
     Ok(p)
 }
 
-/// A file of a mounted golden, read without following a link at its name.
+/// The largest file of a golden read into memory (scripts, driver .inf / .cat files: kilobytes to a few megabytes).
+const G_READ_MAX: u64 = 64 << 20;
+
+/// A file of a mounted golden, read without following a link at its name: what is inside a golden is whatever its
+/// Windows wrote there.
 pub(crate) fn g_read(p: &FsPath) -> Result<Vec<u8>, String> {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
@@ -985,8 +1005,15 @@ pub(crate) fn g_read(p: &FsPath) -> Result<Vec<u8>, String> {
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
         .open(p)
-        .and_then(|mut f| f.read_to_end(&mut v))
+        .and_then(|f| f.take(G_READ_MAX + 1).read_to_end(&mut v))
         .map_err(|e| format!("{}: {e}", p.display()))?;
+    if v.len() as u64 > G_READ_MAX {
+        return Err(format!(
+            "{}: larger than {} MB — not a file this server reads whole",
+            p.display(),
+            G_READ_MAX >> 20
+        ));
+    }
     Ok(v)
 }
 
@@ -1079,6 +1106,7 @@ fn work_dir(st: &SharedState) -> Result<PathBuf, String> {
 
 /// Boot the golden in the VM once; Ok(()) when QEMU ended by itself (the guest powered off or restarted).
 fn run_vm(st: &SharedState, token: &str, disk: &FsPath, work: &FsPath) -> Result<(), String> {
+    crate::sysmon::room_for_vm(VM_MB, crate::sysmon::meminfo("MemAvailable:"))?;
     let (code, vars_t) = ovmf().ok_or("no OVMF")?;
     let vars = work.join("vars.fd");
     std::fs::copy(&vars_t, &vars).map_err(|e| format!("OVMF vars: {e}"))?;

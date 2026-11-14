@@ -15,6 +15,24 @@ pub fn mem_total() -> u64 {
     meminfo("MemTotal:")
 }
 
+/// Whether a VM with `vm_mb` MB of memory can be started with `available` bytes of RAM free for use (MemAvailable):
+/// the VM's memory and SPARE next to it, for the server and the disks it serves. A VM started into a full server
+/// would have the kernel end a process to make room — and the one every machine's disk comes from is among them.
+/// `available` 0 (unreadable) is not held against it.
+pub(crate) fn room_for_vm(vm_mb: u64, available: u64) -> Result<(), String> {
+    const SPARE: u64 = 1 << 30;
+    let need = (vm_mb << 20) + SPARE;
+    if available > 0 && available < need {
+        return Err(format!(
+            "not enough free memory on the server for the VM: {:.1} GB free, it needs {:.1} GB (its {} GB and 1 GB to spare)",
+            available as f64 / (1u64 << 30) as f64,
+            need as f64 / (1u64 << 30) as f64,
+            vm_mb >> 10
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn meminfo(key: &str) -> u64 {
     std::fs::read_to_string("/proc/meminfo")
         .unwrap_or_default()
