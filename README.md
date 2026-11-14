@@ -262,7 +262,7 @@ PC down.
   `qemu-system-x86`, `ovmf`, `open-iscsi` and KVM, as Add hardware. In the VM, Steam and other sign-ins are lost with
   the Windows changes unless they are kept.
 - **Remote on diskless machines:** the first boot of each golden version also gets the machine its Remote agent key
-  (a new key for each base, handed out once, on that boot, within 15 minutes of its start) and the agent's files (`C:\ProgramData\Broom`, SYSTEM and Administrators only), kept
+  (a new key for each base, handed out once, on that boot, within 30 minutes of its start) and the agent's files (`C:\ProgramData\Broom`, SYSTEM and Administrators only), kept
   in its base; every later boot starts the agent (`broom-watch.ps1 -Dir`, its own task), so remote screen, Wake and
   health work as on SSD machines. A new key (Re-issue on Devices) builds the base again. The maintenance machine gets
   no key: what it writes goes into the golden.
@@ -309,7 +309,7 @@ PC down.
 - **Set up again** (Diskless page, per machine): its base is dropped at its next start and built anew — the way
   back when a first boot was cut short or a base went wrong.
 - **A machine's base is built once:** the first boot of a golden version reports its setup done
-  (`/api/diskless/client/base-done`) and restarts; the server takes that only on a first boot, within 15 minutes of
+  (`/api/diskless/client/base-done`) and restarts; the server takes that only on a first boot, within 30 minutes of
   its start, once. No later session — a guest's — can be kept as the base.
 - **Behind a router's DHCP** (Broom's DHCP server off): the router's boot file `sb/snponly-shim.efi` (the
   Microsoft-signed iPXE shim) works for every PC, Secure Boot on or off; each diskless PC needs a **fixed lease** on the

@@ -800,9 +800,10 @@ pub(crate) enum Step {
 }
 
 /// How long after a first boot was prepared its setup may ask for the key and report itself done: Windows over
-/// iSCSI, the rename, the agent's files and build take a few minutes; a session that has been used for an hour is
-/// never taken as a base.
-pub(crate) const FIRST_BOOT_S: u64 = 15 * 60;
+/// iSCSI, the rename, the agent's files and build take a few minutes on a fast PC and much longer on a small one
+/// busy with its first start (a 2-core / 4 GB client needed more than 15 minutes); a session that has been used for
+/// an hour is never taken as a base. The length the Remote agent's key has for SSD machines too.
+pub(crate) const FIRST_BOOT_S: u64 = 30 * 60;
 
 /// Whether `step` is allowed on boot `b` at `now` — and noted on it. Only a first boot, only within FIRST_BOOT_S of
 /// its start, each step once, the key before "done": otherwise any program in a guest's session (a guest is an
