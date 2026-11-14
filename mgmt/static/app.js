@@ -30,7 +30,7 @@ const loaders={machines:loadStatus,remote:loadRemote,server:loadServer,devices:l
 const fragCache={};
 let curPage=null;
 async function showPage(p){
-  if(iscsiES&&p!=='server'){iscsiES.close();iscsiES=null;}
+  if(iscsiES&&p!=='server'){iscsiES();iscsiES=null;}
   if(p!=='remote'){if(rmWs){rmWs.onclose=null;rmWs.close();rmWs=null;rmCtx=null;}rmCloseDec();closeWall();}
   document.querySelectorAll('nav a').forEach(x=>x.classList.toggle('active',x.dataset.page===p));
   const grp=document.querySelector(`nav a[data-page="${CSS.escape(p)}"]`)?.closest('details');if(grp)grp.open=true; // its group shows
@@ -851,7 +851,13 @@ async function loadVm(){
   gs.innerHTML=r.goldens.map(g=>`<option value="${esc(g.name)}"${g.name===keepG?' selected':''}>${esc(g.name)}</option>`).join('');
   const was=new Set([...document.querySelectorAll('#vm_games input:checked')].map(i=>i.value));
   document.getElementById('vm_games').innerHTML=r.games.filter(d=>d.served).map(d=>`<label class="form-check mb-0"><input class="form-check-input" type="checkbox" value="${esc(d.name)}"${was.has(d.name)?' checked':''}> ${esc(d.name)} <span class="mono">(${esc(d.letter)}:)</span></label>`).join('')||'<span class="text-body-secondary">none</span>';
-  document.getElementById('vm_form').style.display=run?'none':'';
+  // Shown only once the server has said no VM is running (hidden in the page until then: a second start is refused).
+  document.getElementById('vm_form').style.setProperty('display',run?'none':'flex','important');
+  const vc=document.getElementById('vm_cpus'),vg=document.getElementById('vm_gb');
+  if(vc&&document.activeElement!==vc&&document.activeElement!==vg){vc.value=r.cpus;vc.max=r.max_cpus;vg.value=r.mem_gb;vg.max=r.max_gb;}
+  const tx=(id,t)=>{const e=document.getElementById(id);if(e)e.textContent=t;};
+  tx('vm_size_txt',`${r.cpus} CPU threads and ${r.mem_gb} GB of memory`);
+  tx('vm_size_max',`at most ${r.max_cpus} threads and ${r.max_gb} GB here: 4 threads and 4 GB always stay with the server. Used from the VM's next start.`);
   document.getElementById('vm_problem').textContent=r.problem?'Not possible on this server yet: '+r.problem:'';
   if(!s){box.innerHTML='';return;}
   const cls={running:'text-success',failed:'text-danger',stopped:'text-body-secondary'}[s.state]||'text-primary';
@@ -870,6 +876,7 @@ async function loadVm(){
   clearTimeout(vmTimer);
   if(run&&pageFromPath()==='diskless')vmTimer=setTimeout(()=>loadVm().catch(()=>{}),5000);
 }
+function vmSize(){post('/api/vm/size',{cpus:+v('vm_cpus'),mem_gb:+v('vm_gb')},'vm_msg',()=>'saved — used from the VM\'s next start',loadVm);}
 function vmStart(){const games=[...document.querySelectorAll('#vm_games input:checked')].map(i=>i.value),keep=!!document.getElementById('vm_keep')?.checked;
   post('/api/vm/start',{golden:v('vm_golden'),games,keep},'vm_msg',()=>'started — Open the screen',loadVm);}
 const vmStop=force=>sure(force?'Turn the VM off at once, like pulling the plug? Unsaved work in Windows is lost; use it only if Windows hangs.':'Press the VM\'s power button? Windows shuts down (close what you are doing first).').then(ok=>ok&&post('/api/vm/stop',{force},'vm_msg',r=>r.msg,loadVm));
@@ -919,7 +926,8 @@ async function uploadIso(){const f=document.getElementById('dl_isofile').files[0
 // ---- groups (Groups page) ----
 let grData=null,grCur=null;
 const grIn=(x,n)=>x.groups.some(y=>y.toLowerCase()===n.toLowerCase());
-const grNames=l=>l.length?l.map(x=>esc(x.name)+(x.letter?' ('+esc(x.letter)+':)':'')).join(', '):'—';
+// One name a line when there are several: a long list in one line pushed the table (and its buttons) off the page.
+const grNames=l=>l.length?(l.length>2?'<div class="small" style="white-space:normal;min-width:12rem;max-height:6.5em;overflow:auto">':'<div>')+l.map(x=>esc(x.name)+(x.letter?' ('+esc(x.letter)+':)':'')).join(l.length>2?'<br>':', ')+'</div>':'—';
 async function loadGroups(){const g=grData=await j('/api/groups');const tb=document.querySelector('#groups tbody');if(!tb)return;
   const cnt=n=>g.machines.filter(m=>(m.grp||'').toLowerCase()===n.toLowerCase()).length;
   const nm=(g.new_machines||'').toLowerCase(),nmEl=document.getElementById('gr_newm');
@@ -1373,13 +1381,12 @@ async function loadBenchHist(){
     ||'<tr><td colspan=5 class="mono">no results yet</td></tr>';
 }
 // iSCSI now: pushed every second over SSE while the Server page is open (showPage closes it on leaving).
+// One stream for every tab showing that page (sharedStream).
 function loadIscsi(){
   if(iscsiES)return;
-  iscsiES=new EventSource('/api/bench/iscsi/live');
-  iscsiES.addEventListener('iscsi',e=>showIscsi(JSON.parse(e.data)));
-  iscsiES.onerror=()=>{const el=document.getElementById('b_iscsi');
-    if(el)el.innerHTML=iscsiES&&iscsiES.readyState===EventSource.CLOSED?`disconnected — ${ic('refresh','')} to reconnect`:'reconnecting...';
-    if(iscsiES&&iscsiES.readyState===EventSource.CLOSED)iscsiES=null;};
+  iscsiES=sharedStream('broom-iscsi','/api/bench/iscsi/live',['iscsi'],(t,d)=>{
+    if(t==='iscsi')showIscsi(JSON.parse(d));
+    else if(t==='down'){const el=document.getElementById('b_iscsi');if(el)el.textContent='reconnecting...';}},0);
 }
 function showIscsi(d){
   const el=document.getElementById('b_iscsi');if(!el)return;
@@ -1493,7 +1500,7 @@ const ACTIONS={
   loadImages,addImage,setDefault,toggleCache,toggleSsd,togglePreload,editImgGroups,republish,showVersions,exportImage,editBoot,delImage,
   snapshotImage,dedupImage,rollbackImage,versionToImage,deleteVersion,
   loadGames,saveGames,setGamesUpdate,toggleGamesRam,saveGamesUpdate,discardGamesUpdate,editGames,delGames,
-  loadDiskless,dlOsChanged,mPower,mSelOne,mSelAll,hwToggle,hwDisplay,mDisplay,startOnboard,cancelOnboard,retryOnboard,verToggle,verPin,verDrop,verKeepFree,setRoom,noticeDismiss,dlRebuild,roleSave,roleAdd,roleDel,vmStart,vmStop,vmGamesSave,vmGamesDiscard,saveGolden,setMaint,saveMaint,discardMaint,refreshGolden,delGolden,editGolden,isoOs,delIso,setPlace,uploadIso,
+  loadDiskless,dlOsChanged,mPower,mSelOne,mSelAll,hwToggle,hwDisplay,mDisplay,startOnboard,cancelOnboard,retryOnboard,verToggle,verPin,verDrop,verKeepFree,setRoom,noticeDismiss,vmSize,dlRebuild,roleSave,roleAdd,roleDel,vmStart,vmStop,vmGamesSave,vmGamesDiscard,saveGolden,setMaint,saveMaint,discardMaint,refreshGolden,delGolden,editGolden,isoOs,delIso,setPlace,uploadIso,
   loadDrivers,uploadDriver,saveDrvTargets,delDriver,
   loadGroups,editGroup,closeGroup,saveGroup,createGroup,renameGroup,deleteGroup,saveNewMachines,
   loadServer,loadBench,loadBenchHist,logsReload,logsFollow,logsSearch,benchServer,benchRequest:()=>benchAsk(false),benchCancel:()=>benchAsk(true),bSelAll,
@@ -1501,19 +1508,50 @@ const ACTIONS={
   remoteTo,rmGo,rmConnect,rmClose,rmBack,rmWallSize,rmWallFilter,rmWallPrev,rmWallNext,rmQuality,rmFull,rmSas,rmWin,rmAltTab,rmPaste,loadRemote,
 };
 
+// A stream of server events, for every tab of this browser through ONE connection. A browser gives a site six
+// connections, and a stream of its own in each tab left none for anything else once six tabs were open — every
+// page then waited forever. The tab holding the Web Lock `name` keeps the stream and passes each event on
+// (BroadcastChannel); when it closes or lets go, the next tab takes over. `quiet` ms without any event (the tab
+// holding it was put to sleep by the browser) → this tab opens its own; 0 = never. A browser without these two
+// opens a stream per tab, as before. `on(type, data)`: the stream's events, plus 'up' / 'down' (connected / lost).
+// Returns what ends this tab's part.
+function sharedStream(name,url,types,on,quiet){
+  const shared=typeof BroadcastChannel==='function'&&navigator.locks&&navigator.locks.request;
+  const ch=shared?new BroadcastChannel(name):null,ac=shared?new AbortController():null;
+  let es=null,letGo=null,ended=false,last=Date.now();
+  const got=(type,data)=>{last=Date.now();on(type,data);};
+  if(ch)ch.onmessage=e=>got(e.data.type,e.data.data);
+  const pass=(type,data)=>{got(type,data);if(ch)ch.postMessage({type,data});};
+  const open=()=>new Promise(res=>{ // settles only when this tab lets go: the stream and the lock are its until then
+    if(es||ended){res();return;}
+    letGo=res;es=new EventSource(url);
+    for(const t of types)es.addEventListener(t,e=>pass(t,e.data));
+    es.addEventListener('logout',()=>{es.close();pass('logout','');});
+    es.onerror=()=>pass('down','');
+    es.onopen=()=>pass('up','');
+  });
+  if(shared)navigator.locks.request(name,{signal:ac.signal},open).catch(()=>{});else open();
+  const timer=shared&&quiet?setInterval(()=>{if(!es&&Date.now()-last>quiet)open();},5000):0;
+  return ()=>{ended=true;clearInterval(timer);if(ac)ac.abort();if(es){es.close();es=null;}if(letGo)letGo();if(ch)ch.close();};
+}
+// The server's own events: alive, job status, the server's load.
+function onServerEvent(type,data){
+  if(type==='ping')alive();
+  else if(type==='job'){alive();const d=JSON.parse(data);showJob(d.name,d.status);}
+  else if(type==='res'){alive();const d=JSON.parse(data);showRes(d);resSample(d);drawCharts();}
+  // The server ended the stream because the session is gone (expired / password changed elsewhere) → sign in again.
+  else if(type==='logout')location.replace('/login');
+  else if(type==='down')setServer(false);
+  // (Re)connected: job events sent while the link was down are lost → ask for the status of every followed job.
+  else if(type==='up'){for(const n in jobWatch)j('/api/images/job?name='+encodeURIComponent(n)).then(r=>showJob(n,r.status)).catch(()=>{});}
+}
+const serverEvents=()=>sharedStream('broom-events','/api/events',['ping','job','res'],onServerEvent,20000);
+
 let started=false;
 function startApp(){
   if(started)return; started=true;
   loadMe();
-  const srvEvents=new EventSource('/api/events');
-  srvEvents.addEventListener('ping',alive);
-  srvEvents.addEventListener('job',e=>{alive();const d=JSON.parse(e.data);showJob(d.name,d.status);});
-  srvEvents.addEventListener('res',e=>{alive();const d=JSON.parse(e.data);showRes(d);resSample(d);drawCharts();});
-  // The server ended the stream because the session is gone (expired / password changed elsewhere) → sign in again.
-  srvEvents.addEventListener('logout',()=>{srvEvents.close();location.replace('/login');});
-  srvEvents.onerror=()=>setServer(false);
-  // (Re)connected: job events sent while the link was down are lost → ask for the status of every followed job.
-  srvEvents.onopen=()=>{for(const n in jobWatch)j('/api/images/job?name='+encodeURIComponent(n)).then(r=>showJob(n,r.status)).catch(()=>{});};
+  serverEvents();
   setInterval(()=>{if(lastPing&&Date.now()-lastPing>12000)setServer(false);},3000);
   if(location.pathname!=='/'+pageFromPath())history.replaceState(null,'','/'+pageFromPath());
   showPage(pageFromPath());

@@ -256,7 +256,8 @@ PC down.
   diskless one too) gets the disk itself, writable, as on SSD machines; Save makes the next version, which every
   machine's copy reads from its next boot.
 - **Maintain in the browser (Windows):** the Diskless page runs a golden in a VM on the server (QEMU/KVM, 4 CPU
-  threads, 8 GB, internet through QEMU's NAT) and shows its screen in the browser (**Open the screen**: noVNC,
+  threads and 8 GB unless you set its size on that page — at most the server's threads less 4 and its memory less
+  4 GB; internet through QEMU's NAT) and shows its screen in the browser (**Open the screen**: noVNC,
   through Broom's signed-in WebSocket; QEMU's VNC is only a Unix socket). Tick games disks to attach them **writable**
   under their letters, as for an update machine: install or update games, shut the VM down, then **Save** each disk —
   every machine gets it at its next boot. *Keep Windows changes* (Windows / app updates; the *maintain* permission):
@@ -266,7 +267,9 @@ PC down.
   with that session's own random key (the loopback address alone writes nothing), and runs in its own systemd unit
   `broom-vm-<golden>`, so restarting Broom does not stop it. QEMU is confined: it drops to an unprivileged user once
   started, runs under its seccomp filter, and its unit sees the file system read-only but for its work folder; its
-  network is left open on purpose (internet, and the LANs the server reaches). One VM at a time; the golden needs no maintenance machine. Needs
+  network is left open on purpose (internet, and the LANs the server reaches). One VM at a time on the server —
+  this one or Add hardware's — and it is started only when its memory and 1 GB to spare are free; the golden needs
+  no maintenance machine. Needs
   `qemu-system-x86`, `ovmf`, `open-iscsi` and KVM, as Add hardware. In the VM, Steam and other sign-ins are lost with
   the Windows changes unless they are kept.
 - **Remote on diskless machines:** the first boot of each golden version also gets the machine its Remote agent key
