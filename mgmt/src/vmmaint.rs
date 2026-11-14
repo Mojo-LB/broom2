@@ -44,6 +44,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/vm", get(status))
         .route("/api/vm/start", post(start))
         .route("/api/vm/stop", post(stop))
+        .route("/api/vm/size", post(set_size))
         .route("/api/vm/console", get(console))
         .route("/vm-console", get(page))
         .route("/vm-console.js", get(page_js))
@@ -53,8 +54,50 @@ pub fn routes() -> Router<SharedState> {
 /// The session (config): the one running now, or the last one (its outcome stays shown).
 const KEY: &str = "vm_session";
 /// The VM's size: half of an 8-thread server, enough RAM for Windows Update + a game installer.
-const CPUS: u32 = 4;
-const MEM_MB: u32 = 8192;
+/// The VM's size when none is set (Diskless page), and what is always left to the server itself: the VM gets at
+/// most the server's CPU threads less KEEP_CPUS and its memory less KEEP_GB — the server goes on serving every
+/// machine's disk while the VM runs.
+const DEF_CPUS: u32 = 4;
+const DEF_GB: u32 = 8;
+const KEEP_CPUS: u32 = 4;
+const KEEP_GB: u64 = 4;
+const MIN_GB: u32 = 2;
+const CPUS_KEY: &str = "vm_cpus";
+const GB_KEY: &str = "vm_mem_gb";
+
+/// The most a VM may get on a server with `threads` CPU threads and `ram` bytes of memory: (CPU threads, GB).
+pub(crate) fn most(threads: u32, ram: u64) -> (u32, u32) {
+    let gb = ram.div_ceil(1 << 30); // MemTotal is a little under what is installed
+    (
+        threads.saturating_sub(KEEP_CPUS).max(1),
+        (gb.saturating_sub(KEEP_GB) as u32).max(MIN_GB),
+    )
+}
+
+/// The size the VM gets: what was set (0 = not set: the default), never more than `most`.
+pub(crate) fn sized(set: (u32, u32), most: (u32, u32)) -> (u32, u32) {
+    let pick = |v: u32, def: u32| if v == 0 { def } else { v };
+    (
+        pick(set.0, DEF_CPUS).clamp(1, most.0),
+        pick(set.1, DEF_GB).clamp(MIN_GB.min(most.1), most.1),
+    )
+}
+
+fn most_here() -> (u32, u32) {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
+    most(threads, crate::sysmon::mem_total())
+}
+
+/// (CPU threads, GB of memory) of the next VM on this server.
+pub(crate) fn size(st: &SharedState) -> (u32, u32) {
+    sized(
+        (
+            crate::db::num(&*st.db, CPUS_KEY, 0u32),
+            crate::db::num(&*st.db, GB_KEY, 0u32),
+        ),
+        most_here(),
+    )
+}
 /// Games disks attached at most (AHCI ports 1-5; port 0 is the golden).
 const MAX_GAMES: usize = 5;
 
@@ -129,6 +172,11 @@ static OWNS: parking_lot::Mutex<Option<Owns>> = parking_lot::Mutex::new(None);
 /// Start / finish one at a time.
 static LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
+/// The golden whose VM is starting, running or stopping.
+pub(crate) fn running(st: &SharedState) -> Option<String> {
+    current(st).filter(Session::active).map(|s| s.golden)
+}
+
 pub(crate) fn owns_golden(name: &str) -> bool {
     OWNS.lock().as_ref().is_some_and(|o| o.golden == name)
 }
@@ -201,6 +249,7 @@ pub(crate) fn qemu_args(
     games: &[(String, String)],
     (code, vars): (&str, &str),
     (qmp, vnc): (&str, &str),
+    (cpus, gb): (u32, u32),
 ) -> Vec<String> {
     let mut a: Vec<String> = [
         "-name",
@@ -212,9 +261,9 @@ pub(crate) fn qemu_args(
         "-cpu",
         "host,hv_relaxed,hv_vapic,hv_spinlocks=0x1fff,hv_time",
         "-smp",
-        &CPUS.to_string(),
+        &cpus.to_string(),
         "-m",
-        &MEM_MB.to_string(),
+        &(gb * 1024).to_string(),
         // Windows keeps the hardware clock in local time; a UTC clock would make it start hours off until it syncs.
         "-rtc",
         "base=localtime",
@@ -543,7 +592,14 @@ pub(crate) fn begin(
         ));
     }
     crate::onboard::preflight()?;
-    crate::sysmon::room_for_vm(MEM_MB as u64, crate::sysmon::meminfo("MemAvailable:"))?;
+    // One VM at a time on a server, of either kind.
+    if let Some(g) = crate::onboard::running(st) {
+        return Err(format!(
+            "Add hardware is running for {g} (one VM at a time) — wait for it to finish, or cancel it"
+        ));
+    }
+    let vm = size(st);
+    crate::sysmon::room_for_vm(vm.1 as u64 * 1024, crate::sysmon::meminfo("MemAvailable:"))?;
     let mut s = plan(st, golden, games, keep, by)?;
     // Written down before anything is attached or started: a VM this server does not know about could not be
     // stopped, saved or discarded from the page, and would hold the golden.
@@ -600,6 +656,7 @@ pub(crate) fn begin(
             &gdev,
             (&code.to_string_lossy(), &vars.to_string_lossy()),
             (&qmp_s.to_string_lossy(), &vnc_s.to_string_lossy()),
+            vm,
         );
         args.extend(crate::onboard::confine_args(crate::onboard::qemu_version()));
         let pid = launch(&s.golden, &args, &work.join("qemu.log"))?;
@@ -824,8 +881,10 @@ async fn status(State(st): State<SharedState>) -> Json<serde_json::Value> {
         "session": current(&st).map(Session::public),
         "goldens": goldens,
         "games": games,
-        "cpus": CPUS,
-        "mem_mb": MEM_MB,
+        "cpus": size(&st).0,
+        "mem_gb": size(&st).1,
+        "max_cpus": most_here().0,
+        "max_gb": most_here().1,
         "problem": problem,
     }))
 }
@@ -870,6 +929,42 @@ async fn start(
         .map_err(ise)?
         .map_err(|e| (StatusCode::CONFLICT, e))?;
     Ok(Json(serde_json::json!({"ok": true, "session": s.public()})))
+}
+
+#[derive(Deserialize)]
+struct SizeBody {
+    cpus: u32,
+    mem_gb: u32,
+}
+
+/// POST /api/vm/size {cpus, mem_gb} (owner) — the VM's CPU threads and memory from its next start.
+async fn set_size(
+    State(st): State<SharedState>,
+    Json(b): Json<SizeBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (max_c, max_g) = most_here();
+    if !(1..=max_c).contains(&b.cpus) {
+        return Err(bad(format!(
+            "CPU threads: 1 to {max_c} (this server has {}, {KEEP_CPUS} stay with it)",
+            max_c + KEEP_CPUS
+        )));
+    }
+    if !(MIN_GB.min(max_g)..=max_g).contains(&b.mem_gb) {
+        return Err(bad(format!(
+            "memory: {} to {max_g} GB ({KEEP_GB} GB stay with the server)",
+            MIN_GB.min(max_g)
+        )));
+    }
+    st.db
+        .set_config(CPUS_KEY, &b.cpus.to_string())
+        .and_then(|()| st.db.set_config(GB_KEY, &b.mem_gb.to_string()))
+        .map_err(ise)?;
+    tracing::info!(
+        "vm: {} CPU threads, {} GB from its next start",
+        b.cpus,
+        b.mem_gb
+    );
+    Ok(Json(serde_json::json!({"ok": true})))
 }
 
 #[derive(Deserialize)]

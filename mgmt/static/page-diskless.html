@@ -11,12 +11,18 @@
   </div>
   <div class="card card-body mb-3">
     <h2 class="h6 text-uppercase text-body-secondary mb-3">Maintain in the browser (VM on the server)</h2>
-    <div class="small text-body-secondary mb-2">Runs a Windows golden in a virtual machine on this server — its screen in this browser, internet through the server — so no PC leaves the room. <b>Games</b>: tick the games disks; they are attached writable (as for an update machine) under their letters: install or update games, shut the VM down, then <b>Save</b> each disk — every machine gets it at its next boot. <b>Windows / apps</b> (owner): tick <i>Keep Windows changes</i>, then Save or Discard the golden in the Goldens table; without it the VM's Windows changes are thrown away when it stops. One VM at a time (4 CPU threads, 8 GB RAM). The golden needs broom-diskless.ps1 and no maintenance machine.</div>
-    <div id="vm_form" class="d-flex flex-wrap gap-3 align-items-end">
+    <div class="small text-body-secondary mb-2">Runs a Windows golden in a virtual machine on this server — its screen in this browser, internet through the server — so no PC leaves the room. <b>Games</b>: tick the games disks; they are attached writable (as for an update machine) under their letters: install or update games, shut the VM down, then <b>Save</b> each disk — every machine gets it at its next boot. <b>Windows / apps</b> (owner): tick <i>Keep Windows changes</i>, then Save or Discard the golden in the Goldens table; without it the VM's Windows changes are thrown away when it stops. One VM at a time on the server (this one or Add hardware), with <span id="vm_size_txt">the size below</span>. The golden needs broom-diskless.ps1 and no maintenance machine.</div>
+    <div id="vm_form" class="d-flex flex-wrap gap-3 align-items-end" style="display:none!important">
       <div><label class="form-label small mb-1" for="vm_golden">Golden</label><select class="form-select form-select-sm" id="vm_golden"></select></div>
       <div><span class="form-label small mb-1 d-block">Games disks (writable)</span><div id="vm_games" class="d-flex flex-wrap gap-3 small"></div></div>
       <div class="form-check mb-1" data-perm="maintain"><input class="form-check-input" type="checkbox" id="vm_keep"><label class="form-check-label small" for="vm_keep">Keep Windows changes</label></div>
       <button class="btn btn-sm btn-primary" data-perm="vm" data-click="vmStart">Start VM</button>
+    </div>
+    <div class="d-flex flex-wrap gap-2 align-items-end mt-2" data-owner>
+      <div><label class="form-label small mb-1" for="vm_cpus">VM: CPU threads</label><input class="form-control form-control-sm" id="vm_cpus" type="number" min="1" style="width:6rem"></div>
+      <div><label class="form-label small mb-1" for="vm_gb">Memory, GB</label><input class="form-control form-control-sm" id="vm_gb" type="number" min="2" style="width:6rem"></div>
+      <button class="btn btn-sm btn-outline-secondary" data-click="vmSize">Save</button>
+      <span class="small text-body-secondary" id="vm_size_max"></span>
     </div>
     <span id="vm_msg" class="msg"></span>
     <div id="vm_problem" class="small text-danger"></div>

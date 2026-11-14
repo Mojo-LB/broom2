@@ -7,6 +7,7 @@ fn args() -> Vec<String> {
         &[("/dev/disk/by-path/games".into(), "BROOMG1".into())],
         ("/ovmf/code.fd", "/vm/vars.fd"),
         ("/vm/qmp.sock", "/vm/vnc.sock"),
+        (6, 12),
     )
 }
 
@@ -150,4 +151,26 @@ fn vm_unit_limits() {
             );
         }
     }
+}
+
+/// The VM's size is a setting held under a ceiling: the server keeps 4 CPU threads and 4 GB for itself, whatever is
+/// asked; nothing set = 4 threads and 8 GB where the server has them; the size chosen is what QEMU is started with.
+#[test]
+fn vm_size_is_set_under_a_ceiling() {
+    let gb = 1u64 << 30;
+    // A server like the lab's: 8 threads, 32 GB installed (the kernel reports a little less).
+    let lab = most(8, 32 * gb - 700 * (1 << 20));
+    assert_eq!(lab, (4, 28));
+    assert_eq!(sized((0, 0), lab), (4, 8), "nothing set");
+    assert_eq!(sized((2, 16), lab), (2, 16), "as set");
+    assert_eq!(sized((64, 512), lab), (4, 28), "never past the ceiling");
+    // A large server: 40 threads, 64 GB.
+    assert_eq!(most(40, 64 * gb), (36, 60));
+    assert_eq!(sized((16, 32), most(40, 64 * gb)), (16, 32));
+    // A small one: something is left for the VM, the default shrinks to it.
+    assert_eq!(most(4, 4 * gb), (1, 2));
+    assert_eq!(sized((0, 0), most(4, 6 * gb)), (1, 2));
+    let a = args();
+    assert_eq!(after(&a, "-smp"), ["6"]);
+    assert_eq!(after(&a, "-m"), ["12288"]);
 }

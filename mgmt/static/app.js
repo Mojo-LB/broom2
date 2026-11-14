@@ -851,7 +851,13 @@ async function loadVm(){
   gs.innerHTML=r.goldens.map(g=>`<option value="${esc(g.name)}"${g.name===keepG?' selected':''}>${esc(g.name)}</option>`).join('');
   const was=new Set([...document.querySelectorAll('#vm_games input:checked')].map(i=>i.value));
   document.getElementById('vm_games').innerHTML=r.games.filter(d=>d.served).map(d=>`<label class="form-check mb-0"><input class="form-check-input" type="checkbox" value="${esc(d.name)}"${was.has(d.name)?' checked':''}> ${esc(d.name)} <span class="mono">(${esc(d.letter)}:)</span></label>`).join('')||'<span class="text-body-secondary">none</span>';
-  document.getElementById('vm_form').style.display=run?'none':'';
+  // Shown only once the server has said no VM is running (hidden in the page until then: a second start is refused).
+  document.getElementById('vm_form').style.setProperty('display',run?'none':'flex','important');
+  const vc=document.getElementById('vm_cpus'),vg=document.getElementById('vm_gb');
+  if(vc&&document.activeElement!==vc&&document.activeElement!==vg){vc.value=r.cpus;vc.max=r.max_cpus;vg.value=r.mem_gb;vg.max=r.max_gb;}
+  const tx=(id,t)=>{const e=document.getElementById(id);if(e)e.textContent=t;};
+  tx('vm_size_txt',`${r.cpus} CPU threads and ${r.mem_gb} GB of memory`);
+  tx('vm_size_max',`at most ${r.max_cpus} threads and ${r.max_gb} GB here: 4 threads and 4 GB always stay with the server. Used from the VM's next start.`);
   document.getElementById('vm_problem').textContent=r.problem?'Not possible on this server yet: '+r.problem:'';
   if(!s){box.innerHTML='';return;}
   const cls={running:'text-success',failed:'text-danger',stopped:'text-body-secondary'}[s.state]||'text-primary';
@@ -870,6 +876,7 @@ async function loadVm(){
   clearTimeout(vmTimer);
   if(run&&pageFromPath()==='diskless')vmTimer=setTimeout(()=>loadVm().catch(()=>{}),5000);
 }
+function vmSize(){post('/api/vm/size',{cpus:+v('vm_cpus'),mem_gb:+v('vm_gb')},'vm_msg',()=>'saved — used from the VM\'s next start',loadVm);}
 function vmStart(){const games=[...document.querySelectorAll('#vm_games input:checked')].map(i=>i.value),keep=!!document.getElementById('vm_keep')?.checked;
   post('/api/vm/start',{golden:v('vm_golden'),games,keep},'vm_msg',()=>'started — Open the screen',loadVm);}
 const vmStop=force=>sure(force?'Turn the VM off at once, like pulling the plug? Unsaved work in Windows is lost; use it only if Windows hangs.':'Press the VM\'s power button? Windows shuts down (close what you are doing first).').then(ok=>ok&&post('/api/vm/stop',{force},'vm_msg',r=>r.msg,loadVm));
@@ -1493,7 +1500,7 @@ const ACTIONS={
   loadImages,addImage,setDefault,toggleCache,toggleSsd,togglePreload,editImgGroups,republish,showVersions,exportImage,editBoot,delImage,
   snapshotImage,dedupImage,rollbackImage,versionToImage,deleteVersion,
   loadGames,saveGames,setGamesUpdate,toggleGamesRam,saveGamesUpdate,discardGamesUpdate,editGames,delGames,
-  loadDiskless,dlOsChanged,mPower,mSelOne,mSelAll,hwToggle,hwDisplay,mDisplay,startOnboard,cancelOnboard,retryOnboard,verToggle,verPin,verDrop,verKeepFree,setRoom,noticeDismiss,dlRebuild,roleSave,roleAdd,roleDel,vmStart,vmStop,vmGamesSave,vmGamesDiscard,saveGolden,setMaint,saveMaint,discardMaint,refreshGolden,delGolden,editGolden,isoOs,delIso,setPlace,uploadIso,
+  loadDiskless,dlOsChanged,mPower,mSelOne,mSelAll,hwToggle,hwDisplay,mDisplay,startOnboard,cancelOnboard,retryOnboard,verToggle,verPin,verDrop,verKeepFree,setRoom,noticeDismiss,vmSize,dlRebuild,roleSave,roleAdd,roleDel,vmStart,vmStop,vmGamesSave,vmGamesDiscard,saveGolden,setMaint,saveMaint,discardMaint,refreshGolden,delGolden,editGolden,isoOs,delIso,setPlace,uploadIso,
   loadDrivers,uploadDriver,saveDrvTargets,delDriver,
   loadGroups,editGroup,closeGroup,saveGroup,createGroup,renameGroup,deleteGroup,saveNewMachines,
   loadServer,loadBench,loadBenchHist,logsReload,logsFollow,logsSearch,benchServer,benchRequest:()=>benchAsk(false),benchCancel:()=>benchAsk(true),bSelAll,

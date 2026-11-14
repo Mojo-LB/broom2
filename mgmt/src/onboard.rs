@@ -252,6 +252,11 @@ pub(crate) fn active(j: &Job) -> bool {
     j.state == "waiting" || j.state == "installing"
 }
 
+/// The golden an Add hardware job is waiting or running for (its VM is, or will be, the one VM of this server).
+pub(crate) fn running(st: &SharedState) -> Option<String> {
+    job(st).filter(active).map(|j| j.golden)
+}
+
 /// A job is waiting or running on golden `name` (its maintenance is blocked meanwhile).
 pub(crate) fn busy(st: &SharedState, name: &str) -> bool {
     job(st).is_some_and(|j| active(&j) && j.golden == name)
@@ -1589,6 +1594,13 @@ async fn start(
             return Err((
                 StatusCode::CONFLICT,
                 format!("{} is running in the VM (Maintain in the browser) — shut it down first", b.golden),
+            ));
+        }
+        // One VM at a time on a server, of either kind: Add hardware ends in a VM of its own.
+        if let Some(g) = crate::vmmaint::running(&st) {
+            return Err((
+                StatusCode::CONFLICT,
+                format!("the VM of {g} is running (Maintain in the browser; one VM at a time) — shut it down first"),
             ));
         }
         preflight().map_err(|e| (StatusCode::CONFLICT, e))?;
