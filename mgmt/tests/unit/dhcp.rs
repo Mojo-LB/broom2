@@ -444,3 +444,27 @@ fn router_boot_file_follows_secure_boot_clients() {
     assert_eq!(router_boot_file(true), "sb/snponly-shim.efi");
     assert_eq!(router_boot_file(false), "snponly.efi");
 }
+
+/// A socket that asks for any free port (a TFTP transfer's own) never shares its port with another one: with
+/// SO_REUSEPORT the kernel hands out ports such sockets already hold, and two transfers running at once then get
+/// each other's packets ("unknown transfer ID" on a PC of a room switched on together). 600 at once: with shared
+/// ports allowed this would find one practically every time.
+#[tokio::test]
+async fn any_free_port_is_never_shared() {
+    let lo = std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 0);
+    let socks: Vec<_> = (0..600).map(|_| udp(lo, "", false).unwrap()).collect();
+    let mut ports: Vec<u16> = socks
+        .iter()
+        .map(|s| s.local_addr().unwrap().port())
+        .collect();
+    ports.sort_unstable();
+    let n = ports.len();
+    ports.dedup();
+    assert_eq!(ports.len(), n, "two sockets were given the same port");
+    // The named listeners still can be bound twice (an Apply binds the new one before the old one stops).
+    let named = std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, ports[0]);
+    drop(socks);
+    let a = udp(named, "", false).unwrap();
+    let b = udp(named, "", false).unwrap();
+    assert_eq!(a.local_addr().unwrap(), b.local_addr().unwrap());
+}
