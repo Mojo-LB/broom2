@@ -167,6 +167,7 @@ fn staff_rights() {
     }
     for p in [
         "/api/machines/export.csv",
+        "/api/machines/inventory.csv",
         "/api/images/export-file",
         "/api/users",
     ] {
@@ -302,7 +303,12 @@ fn roles_and_permissions() {
         assert!(!may(&every, &all, &post, p), "POST {p}: owner only");
         assert!(may(&Role::Owner, &none, &post, p));
     }
-    for p in ["/api/users", "/api/roles", "/api/machines/export.csv"] {
+    for p in [
+        "/api/users",
+        "/api/roles",
+        "/api/machines/export.csv",
+        "/api/machines/inventory.csv",
+    ] {
         assert!(!may(&every, &all, &get, p), "GET {p}: owner only");
     }
     assert!(!may(

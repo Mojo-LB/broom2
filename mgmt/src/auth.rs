@@ -261,6 +261,7 @@ pub(crate) fn needs(method: &axum::http::Method, path: &str) -> Need {
     use axum::http::Method;
     const OWNER_GET: &[&str] = &[
         "/api/machines/export.csv",
+        "/api/machines/inventory.csv",
         "/api/images/export-file",
         "/api/images/deploy-map",
         "/api/images/deploy-chunk",
