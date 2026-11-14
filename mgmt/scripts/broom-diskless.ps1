@@ -76,11 +76,13 @@ function Prep([bool]$pc, [int]$pagefile = -1) {
     try {
       Dw "$wu\AU" NoAutoUpdate 1
       Dw $ws AutoDownload 2
-      # The services too, not only the policy: an update the golden was saved with half installed is taken up again by
-      # the update orchestrator at every boot whatever the policy says (seen: 2.7 GB written by its installer in a
-      # boot's first minutes, every boot, never finished: the session is dropped at the reset).
-      foreach ($svc in 'UsoSvc', 'wuauserv') { Off $svc }
-      Stop-Service -Name DoSvc -Force -ErrorAction SilentlyContinue
+      # The update orchestrator too, not only the policy: an update the golden was saved with half installed is taken
+      # up again by it at every boot whatever the policy says (seen: 2.7 GB written by its installer in a boot's
+      # first minutes, every boot, never finished: the session is dropped at the reset). The Windows Update service
+      # itself is only stopped and stays on demand: Windows put it back to manual two seconds after it was disabled
+      # here, and had it running again later in the boot (both seen on a lab machine).
+      Off UsoSvc
+      foreach ($svc in 'wuauserv', 'DoSvc') { Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue }
       $did += 'update=off'
     } catch { $did += 'update=FAILED' }
     try {
