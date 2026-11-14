@@ -41,6 +41,11 @@ Some properties come with diskless boot on a shared LAN and are documented, not 
 - the iSCSI portal, TFTP and the goldens over HTTP are readable by any host on the boot LAN — that is how clients
   boot; the boot LAN must be segmented from guest Wi-Fi and unknown devices;
 - license keys are handed out once over plain HTTP, to a registered machine identified by its fixed IP + ARP;
+- HTTPS covers the web admin only. What the PCs fetch stays plain HTTP on the boot LAN: boot files, scripts, and a
+  machine's Remote agent key (once, on a first boot — an SSD machine's first start after it was registered or its key
+  re-issued, a diskless machine's each time it builds its base). Someone listening on that LAN at that moment can read
+  the key; commands to the agent are signed with it. No HSTS header is sent (browsers ignore it for a certificate they
+  do not trust, and the admin can be put back on plain HTTP);
 - games disk writes are accepted from the update machine's IP only (iSCSI carries no other proof of identity);
 - a diskless machine (no SSD) is its fixed IP + the MAC the server sees for it (ARP), nothing more: its own disk — the
   golden, its base, its session — its Remote agent key and its first-boot "setup done" are served to whatever answers

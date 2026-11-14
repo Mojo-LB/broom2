@@ -159,11 +159,15 @@ pub(crate) fn current(st: &SharedState) -> Option<Session> {
     serde_json::from_str(&st.db.get_config(KEY, "")).ok()
 }
 
+/// The session written down, or why not.
+fn keep(st: &SharedState, s: &Session) -> Result<(), String> {
+    let json = serde_json::to_string(s).map_err(|e| e.to_string())?;
+    st.db.set_config(KEY, &json).map_err(|e| e.to_string())
+}
+
+/// A later state of a session already written down: a failure is logged (the stored one still says it runs).
 fn put(st: &SharedState, s: &Session) {
-    if let Err(e) = st
-        .db
-        .set_config(KEY, &serde_json::to_string(s).unwrap_or_default())
-    {
+    if let Err(e) = keep(st, s) {
         tracing::warn!("vm: state not kept: {e}");
     }
 }
@@ -531,7 +535,10 @@ pub(crate) fn begin(
     }
     crate::onboard::preflight()?;
     let mut s = plan(st, golden, games, keep, by)?;
-    put(st, &s);
+    // Written down before anything is attached or started: a VM this server does not know about could not be
+    // stopped, saved or discarded from the page, and would hold the golden.
+    self::keep(st, &s)
+        .map_err(|e| format!("the VM's state cannot be written down ({e}) — not started"))?;
     *OWNS.lock() = Some(Owns {
         golden: s.golden.clone(),
         games: s.games.iter().map(|g| g.name.clone()).collect(),

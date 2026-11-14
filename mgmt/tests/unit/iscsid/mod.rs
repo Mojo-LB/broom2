@@ -1235,3 +1235,76 @@ async fn diskless_machine_out_of_room() {
     TEST_ARP.lock().remove("127.0.0.1");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Login text that never ends (continuation PDUs, the C bit) is cut off: the connection closes once more than
+/// LOGIN_TEXT_MAX has come, instead of the daemon gathering it without limit; a login in several small parts still
+/// works.
+#[tokio::test]
+async fn login_text_is_capped() {
+    use tokio::io::AsyncReadExt;
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = l.accept().await {
+            tokio::spawn(conn::serve(s, "127.0.0.1".into()));
+        }
+    });
+    // In parts, under the limit: acknowledged, then answered as one request (an unknown target: refused as such).
+    let mut ok = tokio::net::TcpStream::connect(addr).await.unwrap();
+    ok.write_all(&pdu(
+        0x43,
+        0x40 | 1 << 2,
+        1,
+        0,
+        b"InitiatorName=iqn.test:parts\0",
+    ))
+    .await
+    .unwrap();
+    let ack = conn::read_pdu(&mut ok).await.unwrap();
+    assert_eq!(
+        (ack.bhs[0], ack.bhs[36]),
+        (0x23, 0),
+        "the first part is acknowledged"
+    );
+    ok.write_all(&pdu(
+        0x43,
+        0x80 | 1 << 2 | 3,
+        1,
+        0,
+        b"TargetName=iqn.test:nope-capped\0SessionType=Normal\0",
+    ))
+    .await
+    .unwrap();
+    let r = conn::read_pdu(&mut ok).await.unwrap();
+    assert_eq!(
+        (r.bhs[36], r.bhs[37]),
+        (0x02, 0x03),
+        "both parts were read as one"
+    );
+
+    // Without end: 48 KB a part. The second one passes the limit.
+    let mut flood = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let part = vec![b'x'; 48 << 10];
+    assert!(2 * part.len() > conn::LOGIN_TEXT_MAX && part.len() < conn::LOGIN_TEXT_MAX);
+    flood
+        .write_all(&pdu(0x43, 0x40 | 1 << 2, 2, 0, &part))
+        .await
+        .unwrap();
+    let ack = conn::read_pdu(&mut flood).await.unwrap();
+    assert_eq!(ack.bhs[0], 0x23);
+    flood
+        .write_all(&pdu(0x43, 0x40 | 1 << 2, 2, 0, &part))
+        .await
+        .unwrap();
+    let mut rest = Vec::new();
+    let closed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        flood.read_to_end(&mut rest),
+    )
+    .await
+    .expect("the connection is closed at once, not at the login timeout");
+    assert!(
+        closed.is_ok() && rest.is_empty(),
+        "closed without an answer"
+    );
+}
