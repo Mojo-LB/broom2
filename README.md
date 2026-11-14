@@ -265,7 +265,9 @@ PC down.
   network is left open on purpose (internet, and the LANs the server reaches). One VM at a time on the server —
   this one or Add hardware's — and it is started only when its memory and 1 GB to spare are free; the golden needs
   no maintenance machine. Needs
-  `qemu-system-x86`, `ovmf`, `open-iscsi` and KVM, as Add hardware. In the VM, Steam and other sign-ins are lost with
+  `qemu-system-x86`, `ovmf`, `open-iscsi` and KVM, as Add hardware — so the server is either a physical machine
+  with virtualization (Intel VT-x / AMD-V) turned on in its BIOS, or a VM on a host that hands virtualization down
+  to it (nested virtualization on, CPU type *host*); without `/dev/kvm` the page says so and no VM starts. In the VM, Steam and other sign-ins are lost with
   the Windows changes unless they are kept.
 - **Remote on diskless machines:** the first boot of each golden version also gets the machine its Remote agent key
   (a new key for each base, handed out once, on that boot, within 30 minutes of its start) and the agent's files (`C:\ProgramData\Broom`, SYSTEM and Administrators only), kept
@@ -283,8 +285,9 @@ PC down.
   `broom-onboard.ps1`, run by the golden's own startup task, creates each card's device with that instance ID and lets
   Windows install the best driver from its driver store, marked as a network-boot driver; then Broom saves the golden's
   next version and the PC restarts into it. Identical PCs need it once; a PC whose cards are all known finishes at
-  once. Needs on the server: `qemu-system-x86_64`, OVMF, `iscsiadm` (open-iscsi), `ntfs-3g` and `/dev/kvm` (nested
-  KVM, CPU type host, when Broom itself runs in a VM). The card needs a driver in Windows PE (to report) and in the
+  once. Needs on the server: `qemu-system-x86_64`, OVMF, `iscsiadm` (open-iscsi), `ntfs-3g` and `/dev/kvm`: a
+  physical server with virtualization (Intel VT-x / AMD-V) turned on in its BIOS, or — when Broom itself runs in a
+  VM — a host with nested virtualization on and CPU type *host* for that VM. The card needs a driver in Windows PE (to report) and in the
   golden (to install). **Network-card drivers from the library** (Drivers page; packages whose .inf is Class=Net are
   marked *network card*): every one of them goes to Windows PE along with the reporter, which loads them (`drvload`)
   before it looks for the network, and the package matching the card is copied into the golden and added to its driver
