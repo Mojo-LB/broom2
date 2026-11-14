@@ -9,6 +9,7 @@ mod auth;
 mod bench;
 mod boot;
 mod capture;
+mod conncap;
 mod db;
 mod dedup;
 mod devices;
@@ -307,6 +308,11 @@ async fn ui_page(axum::extract::Path(p): axum::extract::Path<String>) -> Html<&'
         _ => "",
     })
 }
+
+/// Web connections (HTTP, and HTTPS on its own count) one address may hold open, and all addresses together
+/// (conncap.rs). A PC's boot and its Windows use a handful, an admin's browser a dozen, a golden download its streams.
+pub(crate) const WEB_PER_IP: usize = 256;
+pub(crate) const WEB_TOTAL: usize = 4096;
 
 /// Shared state.
 pub struct AppState {
@@ -659,7 +665,7 @@ async fn main() {
                     use axum::serve::ListenerExt;
                     // tap_io: axum's ConnectInfo<SocketAddr> for a listener of its own kind (the peer IP: login throttle).
                     let l = l.tap_io(|io| {
-                        let _ = io.get_ref().0.set_nodelay(true);
+                        let _ = io.io.get_ref().0.set_nodelay(true);
                     });
                     if let Err(e) = axum::serve(
                         l,
@@ -678,6 +684,12 @@ async fn main() {
 
     info!("bootrom-mgmt {VERSION} serving on http://{addr}");
     // ConnectInfo: /api/license and /api/booted identify the machine by the peer IP (license.rs).
+    // Counted (conncap.rs): one address cannot hold every connection. tap_io: ConnectInfo for a listener of its own kind.
+    let listener = {
+        use axum::serve::ListenerExt;
+        conncap::Capped::new(listener, conncap::Caps::new("web", WEB_PER_IP, WEB_TOTAL))
+            .tap_io(|_| {})
+    };
     if let Err(e) = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
