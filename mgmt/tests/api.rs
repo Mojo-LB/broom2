@@ -661,3 +661,85 @@ fn https_admin() {
         assert!(sc.contains("; Secure") && sc.contains("HttpOnly"), "{sc}");
     });
 }
+
+/// What needs no sign-in is open to every host on the boot LAN, so what the server holds for it is bounded: a
+/// request body past 256 KB is refused (declared or not), and one address cannot hold more than its share of
+/// connections — the next one is closed at once, and a place is free again when one ends.
+#[test]
+fn open_requests_are_bounded() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+    sandbox("open_requests_are_bounded", || {
+        let home = Home::new("open");
+        let _srv = Server::start(&home);
+        let raw = |head: &str, body: &[u8]| -> String {
+            let mut s = TcpStream::connect((SRV, 80)).unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+            s.write_all(head.as_bytes()).unwrap();
+            let _ = s.write_all(body); // the server may answer and close before all of it is sent
+            let mut out = Vec::new();
+            let _ = s.read_to_end(&mut out);
+            String::from_utf8_lossy(&out).into_owned()
+        };
+        let path = "/api/drivers/for?mac=02:00:00:00:00:09";
+        // A machine's real request (its hardware IDs: a few kilobytes) is answered.
+        let ids = "PCI\\VEN_10EC&DEV_8126\r\n".repeat(200);
+        let ok = raw(
+            &format!(
+                "POST {path} HTTP/1.1\r\nHost: {SRV}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+                ids.len()
+            ),
+            ids.as_bytes(),
+        );
+        assert!(ok.starts_with("HTTP/1.1 200"), "{ok}");
+        // Declared too large: refused before any of it is read.
+        let big = raw(
+            &format!(
+                "POST {path} HTTP/1.1\r\nHost: {SRV}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+                300 << 10
+            ),
+            b"",
+        );
+        assert!(big.starts_with("HTTP/1.1 413"), "{big}");
+        // Not declared (chunked): refused once it passes the limit.
+        let chunk = format!("{:x}\r\n{}\r\n", 60 << 10, "x".repeat(60 << 10));
+        let chunked = raw(
+            &format!(
+                "POST {path} HTTP/1.1\r\nHost: {SRV}\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n"
+            ),
+            format!("{}0\r\n\r\n", chunk.repeat(5)).as_bytes(),
+        );
+        assert!(
+            chunked.starts_with("HTTP/1.1 413"),
+            "{}",
+            &chunked[..chunked.len().min(200)]
+        );
+
+        // One address: 256 connections held open, the next is closed as it arrives.
+        let held: Vec<TcpStream> = (0..256)
+            .map(|_| TcpStream::connect((SRV, 80)).unwrap())
+            .collect();
+        std::thread::sleep(Duration::from_millis(500));
+        let closed = |s: &mut TcpStream| {
+            s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let _ = s
+                .write_all(format!("GET /api/tls/port HTTP/1.1\r\nHost: {SRV}\r\n\r\n").as_bytes());
+            let mut b = [0u8; 16];
+            !matches!(s.read(&mut b), Ok(n) if n > 0)
+        };
+        let mut over = TcpStream::connect((SRV, 80)).unwrap();
+        assert!(
+            closed(&mut over),
+            "the 257th connection of one address is not served"
+        );
+        assert!(
+            home.log().contains("at most 256 per address"),
+            "and the log says why"
+        );
+        drop(held);
+        std::thread::sleep(Duration::from_millis(500));
+        let mut again = TcpStream::connect((SRV, 80)).unwrap();
+        assert!(!closed(&mut again), "places are free again");
+    });
+}

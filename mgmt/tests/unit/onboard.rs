@@ -688,3 +688,40 @@ fn qemu_paths_keep_their_commas() {
         "/plain/vars.fd"
     );
 }
+
+/// What a failed login says never carries the job's write key; a name without a key is left as it is.
+#[test]
+fn a_failed_login_does_not_show_the_write_key() {
+    let key = "0123456789abcdef0123456789abcdef";
+    let t = super::local_target("iqn.2026-01.local.broom-1:golden-w11.g7", key);
+    let e = format!("iscsiadm -m node -T {t} -p 127.0.0.1 --login: Could not log into {t}");
+    let shown = super::hide_key(&e, &t);
+    assert!(
+        !shown.contains(key) && shown.contains("golden-w11.g7.u(key)"),
+        "{shown}"
+    );
+    let plain = "iqn.2026-01.local.broom-1:golden-ubuntu.g1";
+    assert_eq!(
+        super::hide_key("x golden-ubuntu.g1 y", plain),
+        "x golden-ubuntu.g1 y"
+    );
+}
+
+/// A file inside a golden is read whole only up to a size: a huge one is refused, not loaded.
+#[test]
+fn a_goldens_file_is_read_up_to_a_size() {
+    let d = std::env::temp_dir().join(format!("broom-gread-{}", std::process::id()));
+    std::fs::create_dir_all(&d).unwrap();
+    let small = d.join("small.inf");
+    std::fs::write(&small, b"[Version]").unwrap();
+    assert_eq!(super::g_read(&small).unwrap(), b"[Version]");
+    // Sparse: as large as it claims, nothing on disk.
+    let big = d.join("big.bin");
+    std::fs::File::create(&big)
+        .unwrap()
+        .set_len((64 << 20) + 1)
+        .unwrap();
+    let e = super::g_read(&big).unwrap_err();
+    assert!(e.contains("larger than 64 MB"), "{e}");
+    std::fs::remove_dir_all(&d).unwrap();
+}

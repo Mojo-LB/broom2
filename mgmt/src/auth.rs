@@ -448,14 +448,21 @@ pub(crate) fn end_sessions(st: &SharedState, user: &str) {
 /// How often an open stream (SSE, Remote WebSocket) re-checks its session — the guard only checked when it opened.
 pub(crate) const RECHECK: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Resolves once the session `tok` is no longer valid (checked every RECHECK): ends an SSE stream / WebSocket.
-pub(crate) async fn until_invalid(st: SharedState, tok: Option<String>) {
+/// Resolves once the session `tok` is no longer valid, or its account no longer has what `need` asks (checked every
+/// RECHECK): ends an SSE stream / WebSocket. A screen opened with a right — a machine's (Remote), the maintenance
+/// VM's — closes when the owner takes that right from the role, not only when the session ends.
+pub(crate) async fn until_invalid(st: SharedState, tok: Option<String>, need: Need) {
     loop {
         tokio::time::sleep(RECHECK).await;
-        if !tok.as_deref().is_some_and(|t| who(&st, t).is_some()) {
+        if !still_allowed(tok.as_deref().and_then(|t| who(&st, t)).as_ref(), &need) {
             return;
         }
     }
+}
+
+/// Whether the account behind a session (None: the session is gone) still has what `need` asks.
+pub(crate) fn still_allowed(w: Option<&Who>, need: &Need) -> bool {
+    w.is_some_and(|w| allowed(&w.role, &w.perms, need))
 }
 
 /// Paths reachable without a session: boot/client endpoints + the login API + the static shell (HTML only, no data).
@@ -554,13 +561,44 @@ fn host_allowed(host: &str, own: &str) -> bool {
 /// Guard middleware on the whole router: Host check, then a session for everything that is not public, then the
 /// role's rights (needs / allowed). Who it is goes into the request (handlers that show secrets ask), and every change is
 /// logged with their name (Logs page).
+/// The body of a request that needs no sign-in, at most: what machines send (their hardware IDs, a disk list, a
+/// report of a few lines, the sign-in handshake) is far smaller. Signed-in requests keep the framework's 2 MB.
+pub(crate) const OPEN_BODY_MAX: usize = 256 << 10;
+/// And how long such a request may take to arrive and be answered.
+pub(crate) const OPEN_WRITE_S: u64 = 60;
+
+/// A POST that needs no sign-in: any host on the boot LAN can send one, so what the server holds for it is bounded
+/// in size and in time — an unfinished body would otherwise sit in memory for as long as its sender likes, and many
+/// of them take the server's memory.
+async fn open_write(req: Request<Body>, next: Next) -> Response {
+    let declared = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    if declared.is_some_and(|n| n > OPEN_BODY_MAX as u64) {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "too large").into_response();
+    }
+    let req = req.map(|b| Body::new(http_body_util::Limited::new(b, OPEN_BODY_MAX)));
+    match tokio::time::timeout(std::time::Duration::from_secs(OPEN_WRITE_S), next.run(req)).await {
+        Ok(r) => r,
+        Err(_) => (StatusCode::REQUEST_TIMEOUT, "too slow").into_response(),
+    }
+}
+
 pub async fn guard(State(st): State<SharedState>, mut req: Request<Body>, next: Next) -> Response {
     if !host_ok(&req) {
         return (StatusCode::MISDIRECTED_REQUEST, "bad Host").into_response();
     }
     let path = req.uri().path().to_string();
     if is_public(req.method(), &path) {
-        return next.run(req).await;
+        return if req.method() == axum::http::Method::GET
+            || req.method() == axum::http::Method::HEAD
+        {
+            next.run(req).await
+        } else {
+            open_write(req, next).await
+        };
     }
     if let Some(w) = session_token(req.headers()).and_then(|t| who(&st, &t)) {
         let m = req.method().clone();

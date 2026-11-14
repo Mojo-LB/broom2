@@ -441,15 +441,15 @@ pub(crate) fn der_not_after(cert: &[u8]) -> Option<u64> {
 
 /// HTTPS connections, their TLS handshakes done concurrently (a slow client never holds the others up).
 pub struct Listener {
-    rx: tokio::sync::mpsc::Receiver<(
-        tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
-        SocketAddr,
-    )>,
+    rx: tokio::sync::mpsc::Receiver<(TlsConn, SocketAddr)>,
     local: SocketAddr,
 }
 
+/// An HTTPS connection, counted from before its handshake (conncap.rs).
+type TlsConn = crate::conncap::Conn<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>;
+
 impl axum::serve::Listener for Listener {
-    type Io = tokio_rustls::server::TlsStream<tokio::net::TcpStream>;
+    type Io = TlsConn;
     type Addr = SocketAddr;
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
         match self.rx.recv().await {
@@ -496,10 +496,15 @@ pub async fn listen(st: &SharedState, port: u16) -> Result<Listener, String> {
         .map_err(|e| format!("bind https :{port}: {e}"))?;
     let local = tcp.local_addr().map_err(|e| e.to_string())?;
     let (tx, rx) = tokio::sync::mpsc::channel(64);
+    let caps = crate::conncap::Caps::new("web (https)", crate::WEB_PER_IP, crate::WEB_TOTAL);
     tokio::spawn(async move {
         loop {
             let Ok((sock, peer)) = tcp.accept().await else {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                continue;
+            };
+            // Counted before the handshake: handshakes in progress hold memory too.
+            let Some(held) = caps.admit(peer.ip()) else {
                 continue;
             };
             let (acceptor, tx) = (acceptor.clone(), tx.clone());
@@ -508,7 +513,7 @@ pub async fn listen(st: &SharedState, port: u16) -> Result<Listener, String> {
                     tokio::time::timeout(std::time::Duration::from_secs(10), acceptor.accept(sock))
                         .await
                 {
-                    let _ = tx.send((s, peer)).await;
+                    let _ = tx.send((crate::conncap::Conn::new(s, held), peer)).await;
                 }
             });
         }

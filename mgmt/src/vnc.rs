@@ -364,9 +364,15 @@ async fn view(
         thumb,
         peer,
     };
-    // Watching can go on for hours: the session is checked again every 30 s (auth::until_invalid).
-    let gone = crate::auth::until_invalid(st, crate::auth::session_token(&headers));
-    ws.on_upgrade(move |s| run_view(s, v, gone))
+    // Watching can go on for hours: the session and its Remote permission are checked again every 30 s
+    // (auth::until_invalid). A viewer sends input events and pasted text: nothing near the framework's 64 MB.
+    let gone = crate::auth::until_invalid(
+        st,
+        crate::auth::session_token(&headers),
+        crate::auth::Need::Perm(&[crate::auth::Perm::Remote]),
+    );
+    ws.max_message_size(2 * MAX_INPUT)
+        .on_upgrade(move |s| run_view(s, v, gone))
 }
 
 /// One viewer's side of a session.

@@ -1308,3 +1308,48 @@ async fn login_text_is_capped() {
         "closed without an answer"
     );
 }
+
+/// A ping (NOP-Out) is echoed with its few bytes; one carrying more than PING_MAX ends the connection instead of
+/// being queued for a client that may never read it — in a discovery session, which any host on the LAN gets.
+#[tokio::test]
+async fn ping_data_is_capped() {
+    use tokio::io::AsyncReadExt;
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = l.accept().await {
+            tokio::spawn(conn::serve(s, "127.0.0.1".into()));
+        }
+    });
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    s.write_all(&pdu(
+        0x43,
+        0x80 | 1 << 2 | 3,
+        1,
+        0,
+        b"InitiatorName=iqn.test:ping\0SessionType=Discovery\0",
+    ))
+    .await
+    .unwrap();
+    let r = conn::read_pdu(&mut s).await.unwrap();
+    assert_eq!((r.bhs[0], r.bhs[36]), (0x23, 0), "discovery login");
+
+    s.write_all(&pdu(0x40, 0x80, 7, 1, b"are you there"))
+        .await
+        .unwrap();
+    let echo = conn::read_pdu(&mut s).await.unwrap();
+    assert_eq!(
+        (echo.bhs[0], echo.data.as_slice()),
+        (0x20, &b"are you there"[..])
+    );
+
+    let big = vec![0x5au8; conn::PING_MAX + 1];
+    s.write_all(&pdu(0x40, 0x80, 8, 1, &big)).await.unwrap();
+    let rej = conn::read_pdu(&mut s).await.unwrap();
+    assert_eq!(rej.bhs[0], 0x3f, "rejected, not echoed");
+    let mut rest = Vec::new();
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(5), s.read_to_end(&mut rest))
+        .await
+        .expect("and the connection is closed");
+    assert!(closed.is_ok() && rest.is_empty());
+}

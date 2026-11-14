@@ -69,3 +69,17 @@ fn ata_smart_attributes() {
     // A healthy drive: no 5/197/194 entries.
     assert_eq!(parse_ata_smart(&[0u8; 512]), (None, None, None));
 }
+
+/// A VM is started only with its memory and a spare gigabyte free; an unreadable figure is not held against it.
+#[test]
+fn a_vm_needs_its_memory_free() {
+    let gb = 1u64 << 30;
+    assert!(room_for_vm(8192, 9 * gb).is_ok());
+    assert!(room_for_vm(8192, 0).is_ok(), "unknown");
+    let e = room_for_vm(8192, 6 * gb).unwrap_err();
+    assert!(
+        e.contains("6.0 GB free") && e.contains("needs 9.0 GB"),
+        "{e}"
+    );
+    assert!(room_for_vm(4096, 5 * gb).is_ok() && room_for_vm(4096, 5 * gb - 1).is_err());
+}

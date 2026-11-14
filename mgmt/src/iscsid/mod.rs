@@ -24,6 +24,10 @@ pub const SOCK: &str = "/run/broom-iscsid.sock";
 const PORT: u16 = 3260;
 /// Open connections at most: each holds a socket (file descriptor) + a few buffers (~256 KB at worst) → what the open
 /// file limit allows (minus a few for targets / control), and at most 5% of RAM.
+/// Connections one address may hold open: a machine has one per disk it uses (its own, its games disks, a
+/// discovery now and then).
+const PER_IP: usize = 64;
+
 fn max_conns() -> usize {
     let fds = crate::sysmon::fd_limit().saturating_sub(64) as usize;
     fds.min(crate::sysmon::ram_share(5, 256 << 10, 64)).max(64)
@@ -582,12 +586,17 @@ pub async fn run(args: &[String]) -> ! {
         *conn::IN_FLIGHT_MAX
     );
     let slots = Arc::new(tokio::sync::Semaphore::new(max));
+    let caps = crate::conncap::Caps::new("iscsid", PER_IP, max);
     loop {
         let Ok((s, peer)) = tcp.accept().await else {
             continue;
         };
         let Ok(permit) = slots.clone().try_acquire_owned() else {
             tracing::warn!("iscsid: {max} connections open, refusing {peer}");
+            continue;
+        };
+        // One address cannot take them all (conncap.rs): a machine has a session per disk, not hundreds.
+        let Some(held) = caps.admit(peer.ip()) else {
             continue;
         };
         // A client that died without closing (power cut, shutdown) is noticed in ~1 min and its session freed: keepalive
@@ -604,7 +613,7 @@ pub async fn run(args: &[String]) -> ! {
         let _ = s.set_nodelay(true);
         tokio::spawn(async move {
             conn::serve(s, peer.ip().to_canonical().to_string()).await;
-            drop(permit);
+            drop((permit, held));
         });
     }
 }

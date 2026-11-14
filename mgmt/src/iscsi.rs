@@ -319,6 +319,10 @@ fn start_daemon() -> Result<(), String> {
             "Restart=on-failure",
             "-p",
             "RestartSec=2",
+            // Every machine's disk comes from it: when the server runs out of memory, it is the last process the
+            // kernel ends, not the first (it is often the largest: goldens held in RAM).
+            "-p",
+            "OOMScoreAdjust=-900",
         ])
         .arg(&exe)
         .args(&args);
