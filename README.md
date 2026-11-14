@@ -242,12 +242,14 @@ PC down.
   script into it as its next version, without booting it.
 - **Windows on a disk that starts fresh at every boot:** that script also sets Windows for it. Always: no automatic
   BitLocker device encryption (Windows 11 turns it on by itself on a PC with a TPM), no hibernation, System Restore,
-  scheduled defrag, search index, SysMain or crash dump, and ping allowed. On the machines, while each builds its
-  base: no Windows Update and no driver search on Windows Update either — they would start over after every wipe
-  (gigabytes written and downloaded at each boot) — and the pagefile set on the Diskless page (*Where things are
-  kept*; default none, or a fixed size for rooms whose games ask for one). On the golden's maintenance machine or
-  VM Windows Update and drivers stay on: that is where they are installed. What a machine set is in the log with
-  its first boot (`… set itself up (g4) …; Windows: bitlocker=prevented … update=off …`).
+  scheduled defrag, search index, SysMain or crash dump, no "last access" time written for every file read, and ping
+  allowed. On the machines, while each builds its base: no Windows Update (its policy, and the update orchestrator's
+  service off) and no driver search on Windows Update either — they would start over after every wipe (gigabytes written
+  and downloaded at each boot) — and the pagefile set on the Diskless page (*Where things are kept*; default none, or a
+  fixed size for rooms whose games ask for one). On the golden's maintenance machine or VM Windows Update and drivers
+  stay on: that is where they are installed. **Let an update finish there — its restarts too — before Save:** a golden
+  saved with an update half installed has every machine take it up again at every boot. What a machine set is in the log
+  with its first boot (`… set itself up (g4) …; Windows: bitlocker=prevented … update=off …`).
 - **Games disks on diskless machines:** a diskless Windows machine has no SSD for its writes, so each one gets its own
   copy of every games disk of its group on the server (target `<disk iqn>.m<mac>`: the disk's newest version + the
   machine's own layer in `<writeback>/.games-<disk>/<mac>/`, dropped at its next PXE boot — like the per-PC writeback
@@ -270,7 +272,9 @@ PC down.
   network is left open on purpose (internet, and the LANs the server reaches). One VM at a time on the server —
   this one or Add hardware's — and it is started only when its memory and 1 GB to spare are free; the golden needs
   no maintenance machine. Needs
-  `qemu-system-x86`, `ovmf`, `open-iscsi` and KVM, as Add hardware. In the VM, Steam and other sign-ins are lost with
+  `qemu-system-x86`, `ovmf`, `open-iscsi` and KVM, as Add hardware — so the server is either a physical machine
+  with virtualization (Intel VT-x / AMD-V) turned on in its BIOS, or a VM on a host that hands virtualization down
+  to it (nested virtualization on, CPU type *host*); without `/dev/kvm` the page says so and no VM starts. In the VM, Steam and other sign-ins are lost with
   the Windows changes unless they are kept.
 - **Remote on diskless machines:** the first boot of each golden version also gets the machine its Remote agent key
   (a new key for each base, handed out once, on that boot, within 30 minutes of its start) and the agent's files (`C:\ProgramData\Broom`, SYSTEM and Administrators only), kept
@@ -288,8 +292,9 @@ PC down.
   `broom-onboard.ps1`, run by the golden's own startup task, creates each card's device with that instance ID and lets
   Windows install the best driver from its driver store, marked as a network-boot driver; then Broom saves the golden's
   next version and the PC restarts into it. Identical PCs need it once; a PC whose cards are all known finishes at
-  once. Needs on the server: `qemu-system-x86_64`, OVMF, `iscsiadm` (open-iscsi), `ntfs-3g` and `/dev/kvm` (nested
-  KVM, CPU type host, when Broom itself runs in a VM). The card needs a driver in Windows PE (to report) and in the
+  once. Needs on the server: `qemu-system-x86_64`, OVMF, `iscsiadm` (open-iscsi), `ntfs-3g` and `/dev/kvm`: a
+  physical server with virtualization (Intel VT-x / AMD-V) turned on in its BIOS, or — when Broom itself runs in a
+  VM — a host with nested virtualization on and CPU type *host* for that VM. The card needs a driver in Windows PE (to report) and in the
   golden (to install). **Network-card drivers from the library** (Drivers page; packages whose .inf is Class=Net are
   marked *network card*): every one of them goes to Windows PE along with the reporter, which loads them (`drvload`)
   before it looks for the network, and the package matching the card is copied into the golden and added to its driver
