@@ -289,6 +289,7 @@ pub(crate) fn needs(method: &axum::http::Method, path: &str) -> Need {
             | "/api/diskless/save"
             | "/api/diskless/discard"
             | "/api/diskless/refresh"
+            | "/api/diskless/rebuild"
             | "/api/onboard/start"
             | "/api/onboard/cancel"
             | "/api/onboard/retry" => Need::Perm(&[Perm::Maintain]),

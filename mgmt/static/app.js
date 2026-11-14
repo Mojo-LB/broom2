@@ -778,7 +778,7 @@ async function loadDiskless(){
     ||'<tr><td colspan="10" class="mono">no golden yet — create one below</td></tr>';
   const vp=document.getElementById('ver_pct');if(vp&&verData&&document.activeElement!==vp)vp.value=verData.min_free_pct;
   const rm=dlData&&dlData.room;
-  if(rm){for(const [id,val] of [['room_gb',rm.pc_gb],['room_pct',rm.free_pct]]){const e=document.getElementById(id);if(e&&document.activeElement!==e)e.value=val;}
+  if(rm){for(const [id,val] of [['room_gb',rm.pc_gb],['room_pct',rm.free_pct],['room_pf',rm.pagefile_gb]]){const e=document.getElementById(id);if(e&&document.activeElement!==e)e.value=val;}
     const rn=document.getElementById('room_note');
     if(rn)rn.textContent=rm.free_pct?`Below ${rm.free_pct}% free, only machines holding less than ${rm.fair_gb} GB still get new room: the big writer is stopped (its writes fail until it restarts), the others go on.`:'No reserve: one machine can fill the drive for all.';}
   const vk=document.getElementById('ver_keep');if(vk&&verData&&document.activeElement!==vk)vk.checked=!!verData.keep;
@@ -788,9 +788,10 @@ async function loadDiskless(){
     return `<tr><td>${esc(x.golden.name)}</td><td>${esc(m.name)}</td><td class="mono">${esc(m.mac)}</td><td class="mono">${esc(m.ip)}</td>
       <td class="mono">${st&&st.session_ver!=null?gbs(st.session_bytes)+' on g'+esc(st.session_ver):'—'}</td>
       <td class="mono">${st&&st.base_ver!=null?gbs(st.base_bytes)+' (g'+esc(st.base_ver)+')':'—'}</td>
-      <td>${st&&st.connected?'<span class="text-success">'+ic('dot','')+' on</span>':'—'}</td>
-      <td class="mono small">${esc(m.target)}</td></tr>`;})).join('');
-  mb.innerHTML=rows||'<tr><td colspan="8" class="mono">no machine yet: put registered machines with a fixed IP in a golden\'s group</td></tr>';
+      <td>${st&&st.connected?'<span class="text-success">'+ic('dot','')+' on</span>':'—'}${st&&st.refused?' <span class="text-danger" title="its session takes no more writes (its limit, or the drive\'s reserve): Windows restarts by itself">out of room</span>':''}</td>
+      <td class="mono small">${esc(m.target)}</td>
+      <td><button class="btn btn-sm btn-outline-secondary" data-perm="maintain" title="its base is dropped at its next start: name, Remote agent key and first-boot setup made anew" ${act('dlRebuild',x.golden.name,m.id,m.name)}>Set up again</button></td></tr>`;})).join('');
+  mb.innerHTML=rows||'<tr><td colspan="9" class="mono">no machine yet: put registered machines with a fixed IP in a golden\'s group</td></tr>';
   const noip=d.goldens.filter(x=>x.machines_without_fixed_ip.length).map(x=>x.golden.name+': '+x.machines_without_fixed_ip.join(', ')+' (no fixed IP — not served)');
   document.getElementById('dl_noip').textContent=noip.join(' · ');
   const groups=[...new Set([...d.machines.map(m=>m.group).filter(Boolean),...d.goldens.flatMap(x=>x.golden.groups)])];
@@ -893,7 +894,7 @@ const refreshGolden=name=>dlCall('/api/diskless/refresh',{name},'Write Broom\'s 
 const delGolden=name=>dlCall('/api/diskless/golden/delete',{name},'Delete golden '+name+', all its versions and every machine\'s layers of it?');
 const isoOs=(name,el)=>dlCall('/api/diskless/iso/os',{name,os:el.value});
 const delIso=name=>dlCall('/api/diskless/iso/delete',{name},'Delete '+name+' from the ISO library?');
-const setRoom=()=>post('/api/diskless/room',{pc_gb:+v('room_gb'),free_pct:+v('room_pct')},'room_msg',()=>'saved - machines get it at their next start',loadDiskless);
+const setRoom=()=>post('/api/diskless/room',{pc_gb:+v('room_gb'),free_pct:+v('room_pct'),pagefile_gb:+v('room_pf')},'room_msg',()=>'saved - machines get it at their next start',loadDiskless);
 const setPlace=k=>dlCall('/api/diskless/volume',{kind:k,id:document.getElementById('dl_place_'+k).value},null,'dl_pmsg');
 function editGolden(name){const g=dlData.goldens.find(x=>x.golden.name===name).golden;
   for(const [k,val] of [['dl_name',g.name],['dl_os',g.os],['dl_size',g.size_gb],['dl_groups',g.groups.join(', ')]])document.getElementById(k).value=val;
@@ -1436,6 +1437,19 @@ function mk(body){return {method:'POST',headers:{'content-type':'application/jso
 async function post(url,body,msg,ok,reload){const m=document.getElementById(msg);
   try{const r=await j(url,mk(body));say(m,' ✓ '+(typeof ok==='function'?ok(r):ok));}catch(e){say(m,' ✗ '+e.message);}
   if(reload)reload();}
+// What the admin should know (notices.rs), on every page until dismissed (the owner): redrawn only when it changed.
+let noticeIds=null;
+async function loadNotices(){const b=document.getElementById('noticebar');if(!b)return;
+  let l;try{l=await j('/api/notices');}catch(e){return;}
+  const key=l.map(x=>x.id).join(',');if(key===noticeIds)return;noticeIds=key;b.hidden=!l.length;
+  b.innerHTML=l.slice().reverse().map(x=>`<div class="alert alert-warning d-flex gap-2 align-items-start py-2 mb-2" role="alert">
+    <div class="flex-grow-1"><span class="small text-body-secondary">${esc(new Date(x.at*1000).toLocaleString())}${x.n>1?' · seen '+esc(x.n)+' times':''}</span><br>${esc(x.text)}</div>
+    <button class="btn btn-sm btn-outline-secondary" data-owner ${act('noticeDismiss',x.id)}>Dismiss</button></div>`).join('')
+    +(l.length>1?`<div class="text-end mb-2"><button class="btn btn-sm btn-link" data-owner ${act('noticeDismiss',null)}>Dismiss all</button></div>`:'');}
+async function noticeDismiss(id){try{await j('/api/notices/dismiss',mk(id==null?{}:{id}));}catch(e){toast(e.message,true);}noticeIds=null;loadNotices();}
+async function dlRebuild(golden,id,name){
+  if(!await sure(`Set ${name} up again? At its next start its base is dropped: its name, Remote agent key and first-boot setup are made anew.`))return;
+  try{const r=await j('/api/diskless/rebuild',mk({name:golden,id}));toast(r.status);}catch(e){toast(e.message,true);}}
 // Non-blocking notification (Bootstrap toast, bottom right); errors stay longer and in red.
 function toast(msg,err){const t=document.getElementById('toast');
   document.getElementById('toast_text').textContent=msg;
@@ -1479,7 +1493,7 @@ const ACTIONS={
   loadImages,addImage,setDefault,toggleCache,toggleSsd,togglePreload,editImgGroups,republish,showVersions,exportImage,editBoot,delImage,
   snapshotImage,dedupImage,rollbackImage,versionToImage,deleteVersion,
   loadGames,saveGames,setGamesUpdate,toggleGamesRam,saveGamesUpdate,discardGamesUpdate,editGames,delGames,
-  loadDiskless,dlOsChanged,mPower,mSelOne,mSelAll,hwToggle,hwDisplay,mDisplay,startOnboard,cancelOnboard,retryOnboard,verToggle,verPin,verDrop,verKeepFree,setRoom,roleSave,roleAdd,roleDel,vmStart,vmStop,vmGamesSave,vmGamesDiscard,saveGolden,setMaint,saveMaint,discardMaint,refreshGolden,delGolden,editGolden,isoOs,delIso,setPlace,uploadIso,
+  loadDiskless,dlOsChanged,mPower,mSelOne,mSelAll,hwToggle,hwDisplay,mDisplay,startOnboard,cancelOnboard,retryOnboard,verToggle,verPin,verDrop,verKeepFree,setRoom,noticeDismiss,dlRebuild,roleSave,roleAdd,roleDel,vmStart,vmStop,vmGamesSave,vmGamesDiscard,saveGolden,setMaint,saveMaint,discardMaint,refreshGolden,delGolden,editGolden,isoOs,delIso,setPlace,uploadIso,
   loadDrivers,uploadDriver,saveDrvTargets,delDriver,
   loadGroups,editGroup,closeGroup,saveGroup,createGroup,renameGroup,deleteGroup,saveNewMachines,
   loadServer,loadBench,loadBenchHist,logsReload,logsFollow,logsSearch,benchServer,benchRequest:()=>benchAsk(false),benchCancel:()=>benchAsk(true),bSelAll,
@@ -1506,5 +1520,6 @@ function startApp(){
   // Every page shows the online count in the sidebar: keep it fresh everywhere (the Machines table redraws too).
   if(pageFromPath()!=='machines')loadStatus().catch(()=>{});
   setInterval(()=>{if(!document.hidden)loadStatus().catch(()=>{});},15000);
+  loadNotices();setInterval(()=>{if(!document.hidden)loadNotices();},20000);
 }
 startApp();

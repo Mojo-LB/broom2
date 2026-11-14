@@ -645,3 +645,33 @@ fn disk_under_multipath_is_refused() {
     assert_eq!(super::taken(&sys, &d.join("dev/sdz")), None);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// The boot files kept in the repository as binaries (they are signed, so they cannot be rebuilt here) are exactly
+/// the pinned releases: wimboot = the SHA-256 in ipxe/fetch-signed.sh, the signed iPXE and its shim = the ones
+/// fetch-signed.sh wrote into ipxe/signed/VERSION. A changed file fails here, not on a PC.
+#[test]
+fn committed_boot_binaries_are_the_pinned_releases() {
+    use sha2::{Digest, Sha256};
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ipxe");
+    let sum = |f: &str| {
+        let b = std::fs::read(dir.join(f)).unwrap_or_else(|e| panic!("{f}: {e}"));
+        Sha256::digest(&b)
+            .iter()
+            .map(|x| format!("{x:02x}"))
+            .collect::<String>()
+    };
+    let script = std::fs::read_to_string(dir.join("fetch-signed.sh")).unwrap();
+    let pinned = script
+        .lines()
+        .find_map(|l| l.strip_prefix("WIMBOOT_SHA256="))
+        .expect("WIMBOOT_SHA256 in fetch-signed.sh");
+    assert_eq!(sum("wimboot"), pinned.trim(), "ipxe/wimboot");
+    let version = std::fs::read_to_string(dir.join("signed/VERSION")).unwrap();
+    let mut seen = 0;
+    for l in version.lines().skip(1) {
+        let (want, file) = l.split_once("  ").expect("sha256  file");
+        assert_eq!(sum(&format!("signed/{file}")), want, "ipxe/signed/{file}");
+        seen += 1;
+    }
+    assert_eq!(seen, 2, "snponly-shim.efi and snponly.efi");
+}

@@ -39,7 +39,6 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::{Path as FsPath, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -313,18 +312,7 @@ pub(crate) fn forget_golden(st: &SharedState, name: &str) {
 }
 
 fn token() -> String {
-    let mut b = [0u8; 16];
-    if std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut b))
-        .is_err()
-    {
-        // No urandom (never on Linux): time + pid, still unguessable enough for a LAN-only, short-lived job.
-        let t = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        b[..16].copy_from_slice(&(t ^ ((std::process::id() as u128) << 64)).to_le_bytes());
-    }
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    crate::auth::random_token()
 }
 
 // ---------- the boot menu + Windows PE ----------

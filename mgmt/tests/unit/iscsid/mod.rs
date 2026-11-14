@@ -1197,7 +1197,40 @@ async fn diskless_machine_out_of_room() {
             .iter()
             .all(|&b| b == 0x22)
     );
+    // The admin can see it (Diskless page), and the machine's next boot says why it restarted — once: the new session
+    // starts clean.
+    let seen = |name: &str| {
+        golden::info()
+            .into_iter()
+            .find(|i| i.disk.name == name)
+            .and_then(|i| i.machines.into_iter().next())
+            .unwrap()
+            .refused
+    };
+    assert!(seen("w11room"), "marked out of room while it runs");
     drop(s);
+    let mut gone = false;
+    for _ in 0..50 {
+        match golden::prepare("w11room", mac, false, false, false, None) {
+            Ok(p) => {
+                assert!(p.refused, "the boot after it is told");
+                gone = true;
+                break;
+            }
+            Err(e) if e.contains("still connected") => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await
+            }
+            Err(e) => panic!("{e}"),
+        }
+    }
+    assert!(gone, "its session closed");
+    assert!(!seen("w11room"));
+    assert!(
+        !golden::prepare("w11room", mac, false, false, false, None)
+            .unwrap()
+            .refused,
+        "only that one boot"
+    );
     golden::set(Vec::new()).unwrap();
     TEST_ARP.lock().remove("127.0.0.1");
     let _ = std::fs::remove_dir_all(&d);

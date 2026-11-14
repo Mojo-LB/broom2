@@ -114,7 +114,8 @@ fn machine_layers_lifecycle() {
         p,
         Prepared {
             ver: 0,
-            first: true
+            first: true,
+            refused: false
         }
     );
     assert!(attach(&t, "10.9.0.12").is_err(), "other IP");
@@ -135,7 +136,8 @@ fn machine_layers_lifecycle() {
         p,
         Prepared {
             ver: 0,
-            first: false
+            first: false,
+            refused: false
         }
     );
     let v = attach(&t, pc).unwrap();
@@ -178,7 +180,8 @@ fn machine_layers_lifecycle() {
         prepare("w11", mac, false, false, false, Some(0)).unwrap(),
         Prepared {
             ver: 0,
-            first: false
+            first: false,
+            refused: false
         }
     );
     let v = attach(&t, pc).unwrap();
@@ -203,7 +206,8 @@ fn machine_layers_lifecycle() {
         p,
         Prepared {
             ver: 1,
-            first: true
+            first: true,
+            refused: false
         }
     );
     let v = attach(&t, pc).unwrap();
@@ -293,7 +297,8 @@ fn games_disk_copy_per_machine() {
         prepare("g1", mac, true, false, true, None).unwrap(),
         Prepared {
             ver: 0,
-            first: true
+            first: true,
+            refused: false
         }
     );
     let lun = lun(&t).unwrap();

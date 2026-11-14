@@ -339,3 +339,12 @@ fn fingerprint_pinned_client() {
         None
     );
 }
+
+/// Only an existing installation that never chose is told about the move to HTTPS — not a new one, and not again.
+#[test]
+fn upgrade_notice_once_for_existing_installations() {
+    assert!(super::upgraded("", 1));
+    assert!(!super::upgraded("", 0), "a new installation");
+    assert!(!super::upgraded("on", 3), "already chosen (or told)");
+    assert!(!super::upgraded("off", 3));
+}

@@ -72,6 +72,9 @@ pub struct Prepared {
     pub ver: u64,
     /// No base layer: this boot is the machine's first on this version (its setup runs, then `promote`).
     pub first: bool,
+    /// The session this boot drops had run out of room (its limit, or the drive's reserve): why the machine restarted.
+    #[serde(default)]
+    pub refused: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -85,6 +88,9 @@ pub struct MachineInfo {
     pub session_ver: Option<u64>,
     pub session_bytes: u64,
     pub connected: bool,
+    /// Its session is out of room: new writes are refused (Windows then restarts by itself).
+    #[serde(default)]
+    pub refused: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -406,7 +412,9 @@ pub fn prepare(
         }
         all.remove(&key)
     };
+    let mut refused = false;
     if let Some(s) = old.as_ref().and_then(|m| m.session.as_ref()) {
+        refused = s.refused();
         s.flush()?;
     }
     drop(old);
@@ -446,6 +454,7 @@ pub fn prepare(
     Ok(Prepared {
         ver,
         first: !b_ovl.exists(),
+        refused,
     })
 }
 
@@ -505,6 +514,9 @@ pub fn info() -> Vec<Info> {
                             .and_then(|s| s.session.as_ref())
                             .map_or_else(|| listed_bytes(&s_list), |o| o.used()),
                         connected: st.is_some_and(|s| s.users > 0),
+                        refused: st
+                            .and_then(|s| s.session.as_ref())
+                            .is_some_and(|o| o.refused()),
                         mac,
                     })
                 })
