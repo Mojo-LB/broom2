@@ -19,7 +19,7 @@ async fn agents_and_viewers() {
     assert!(connected("AA:BB:CC:00:00:01"));
     let (fmac, host, to_agent) = find("pc-01").expect("found by hostname, any case");
     assert_eq!((fmac.as_str(), host.as_str()), (mac, "PC-01"));
-    assert!(find("pc-02").is_none());
+    assert!(find("pc-nobody").is_none());
     assert!(
         !to_viewer(mac, a1, Message::Binary(vec![1].into())),
         "nobody watching"
