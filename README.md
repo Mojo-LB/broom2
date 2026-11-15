@@ -249,12 +249,13 @@ PC down.
   BitLocker device encryption (Windows 11 turns it on by itself on a PC with a TPM), no hibernation, System Restore,
   scheduled defrag, search index, SysMain or crash dump, no "last access" time written for every file read, and ping
   allowed. On the machines, while each builds its base: no Windows Update (its policy, and the update orchestrator's
-  service off) and no driver search on Windows Update either — they would start over after every wipe (gigabytes written
-  and downloaded at each boot) — and the pagefile set on the Diskless page (*Where things are kept*; default none, or a
-  fixed size for rooms whose games ask for one). On the golden's maintenance machine or VM Windows Update and drivers
-  stay on: that is where they are installed. **Let an update finish there — its restarts too — before Save:** a golden
-  saved with an update half installed has every machine take it up again at every boot. What a machine set is in the log
-  with its first boot (`… set itself up (g4) …; Windows: bitlocker=prevented … update=off …`).
+  service off), no browser updating itself (the updater services and tasks of Edge and Chrome off) and no driver search
+  on Windows Update either — they would start over after every wipe (gigabytes written and downloaded at each boot) —
+  and the pagefile set on the Diskless page (*Where things are kept*; default none, or a fixed size for rooms whose
+  games ask for one). On the golden's maintenance machine or VM Windows Update, the browsers and drivers stay on: that
+  is where they are installed. **Let an update finish there — its restarts too — before Save:** a golden saved with an
+  update half installed has every machine take it up again at every boot. What a machine set is in the log with its
+  first boot (`… set itself up (g4) …; Windows: bitlocker=prevented … update=off …`).
 - **Games disks on diskless machines:** a diskless Windows machine has no SSD for its writes, so each one gets its own
   copy of every games disk of its group on the server (target `<disk iqn>.m<mac>`: the disk's newest version + the
   machine's own layer in `<writeback>/.games-<disk>/<mac>/`, dropped at its next PXE boot — like the per-PC writeback

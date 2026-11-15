@@ -34,9 +34,9 @@ function step($m) {
 $me = $MyInvocation.MyCommand.Path
 
 # Windows settings for a disk on the network that is wiped at every boot. $pc = a machine building its base: also no
-# Windows Update / driver search (they would start over after every wipe) and its pagefile ($pagefile GB, 0 = none,
-# -1 = left alone). Not $pc = the golden itself (installing, its maintenance machine or VM): updates and drivers
-# stay on. Every step on its own: one that fails is reported, the others still count. Returns what it did.
+# Windows Update / browser update / driver search (they would start over after every wipe) and its pagefile ($pagefile
+# GB, 0 = none, -1 = left alone). Not $pc = the golden itself (installing, its maintenance machine or VM): updates and
+# drivers stay on. Every step on its own: one that fails is reported, the others still count. Returns what it did.
 function Prep([bool]$pc, [int]$pagefile = -1) {
   $did = @()
   function Dw($k, $n, $v) { & reg.exe add $k /v $n /t REG_DWORD /d $v /f | Out-Null; if ($LASTEXITCODE) { throw "reg add $k $n" } }
@@ -85,6 +85,18 @@ function Prep([bool]$pc, [int]$pagefile = -1) {
       foreach ($svc in 'wuauserv', 'DoSvc') { Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue }
       $did += 'update=off'
     } catch { $did += 'update=FAILED' }
+    # The browsers update themselves (Edge, Chrome and whatever else comes with Google's updater), and that too starts
+    # over after every wipe: seen on a lab machine, Edge fetched and installed its next version 22 minutes into a
+    # boot, 1.4 GB into a session that is dropped. Their updater services and tasks are off on the machines; the
+    # golden keeps them, so the browsers are updated where Windows is: in a maintenance session.
+    try {
+      $n = 0
+      $svcs = Get-Service | Where-Object { $_.Name -match '^(edgeupdate|edgeupdatem|gupdate|gupdatem|GoogleUpdater(Internal)?Service.*)$' }
+      foreach ($s in $svcs) { Off $s.Name; $n++ }
+      $tasks = Get-ScheduledTask | Where-Object { $_.TaskName -match '^(MicrosoftEdgeUpdateTask|GoogleUpdateTask|GoogleUpdaterTask)' }
+      foreach ($t in $tasks) { $t | Disable-ScheduledTask -ErrorAction Stop | Out-Null; $n++ }
+      $did += $(if ($n) { 'browserupdate=off' } else { 'browserupdate=none' })
+    } catch { $did += 'browserupdate=FAILED' }
     try {
       Dw $wu ExcludeWUDriversInQualityUpdate 1
       Dw $ds SearchOrderConfig 0
