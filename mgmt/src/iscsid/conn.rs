@@ -69,6 +69,12 @@ pub static IN_FLIGHT_MAX: LazyLock<usize> =
 static IN_FLIGHT: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(*IN_FLIGHT_MAX));
 /// A data segment bigger than this ends the connection (login/text are small; Data-Out ≤ MRDSL).
 const MAX_IN: usize = 1 << 20;
+/// All of one login request's key text, which may come in several PDUs (the C bit): a real initiator's keys are a
+/// few hundred bytes. More ends the connection — the port is open to every host on the boot LAN before any check,
+/// and text gathered without end would take the memory of the daemon every machine's disk comes from.
+pub(crate) const LOGIN_TEXT_MAX: usize = 64 << 10;
+/// Ping data (NOP-Out) echoed at most: initiators send none, or a few bytes.
+pub(crate) const PING_MAX: usize = 4 << 10;
 
 fn get32(b: &[u8], at: usize) -> u32 {
     u32::from_be_bytes(b[at..at + 4].try_into().unwrap())
@@ -168,9 +174,9 @@ pub async fn writer(w: impl AsyncWrite + Unpin, mut rx: mpsc::Receiver<Out>, exp
 }
 
 type Sessions = HashMap<(String, [u8; 6]), (Arc<Notify>, String)>;
-/// Logged-in sessions by (initiator name, ISID), with the client's IP: a new login with the same ones replaces the old
-/// session (the initiator lost it, e.g. a network blip) — the old connection is told to close instead of waiting for
-/// TCP to time out.
+/// Logged-in sessions by (initiator name + target name, ISID), with the client's IP: a new login with the same ones
+/// replaces the old session (the initiator lost it, e.g. a network blip) — the old connection is told to close instead
+/// of waiting for TCP to time out.
 static ACTIVE: LazyLock<Mutex<Sessions>> = LazyLock::new(Default::default);
 
 /// Close every session of client `ip` (mgmt knows that machine is off: Windows powers off without logging out, and
@@ -190,7 +196,7 @@ static TSIH: AtomicU16 = AtomicU16::new(1);
 
 struct Login {
     disk: Option<Disk>, // None = discovery session
-    /// A games disk session (attached, to detach when it ends).
+    /// A session of a layered disk — games disk, golden, diskless machine (attached, to detach when it ends).
     games: Option<super::games::View>,
     their_mrdsl: usize,
     /// MaxBurstLength: data asked for per R2T.
@@ -264,6 +270,13 @@ async fn login(
         rsp[0] = 0x23;
         rsp[8..14].copy_from_slice(&p.bhs[8..14]); // ISID
         rsp[16..20].copy_from_slice(&p.bhs[16..20]); // ITT
+        if pending.len() + p.data.len() > LOGIN_TEXT_MAX {
+            tracing::warn!(
+                "iscsid: {peer} sent more than {} KB of login text — connection closed",
+                LOGIN_TEXT_MAX >> 10
+            );
+            return Ok(None);
+        }
         pending.extend_from_slice(&p.data);
         if cont {
             rsp[1] = csg << 2; // more key text follows: acknowledge, answer once it's complete
@@ -303,11 +316,15 @@ async fn login(
         }
         let done = transit && nsg == 3;
         let mut games = None;
-        if done && fail.is_none() && target.as_deref().is_some_and(super::games::owns) {
-            match super::games::attach(target.as_deref().unwrap_or_default(), peer) {
-                Ok(v) => games = Some(v),
-                Err(e) => {
-                    tracing::info!("iscsid: iSCSI disk login of {peer} refused: {e}");
+        if done && fail.is_none() {
+            match target.as_deref().and_then(|t| super::attach(t, peer)) {
+                None => {} // a plain target
+                Some(Ok(v)) => games = Some(v),
+                Some(Err(e)) => {
+                    tracing::info!(
+                        "iscsid: login of {peer} to {} refused: {e}",
+                        super::games::split_key(target.as_deref().unwrap_or_default()).0
+                    );
                     fail = Some((0x03, 0x01)); // service unavailable: the initiator retries
                 }
             }
@@ -353,7 +370,10 @@ async fn login(
                 games,
                 their_mrdsl,
                 burst,
-                key: (name, isid),
+                // The I_T nexus: the same initiator + ISID on ANOTHER target is another session. A Windows machine
+                // booted from iSCSI (iBFT) logs in to its games disks with the boot session's initiator name and ISID:
+                // keyed on those alone, each login replaced the other's session, over and over.
+                key: (format!("{name}\n{}", target.as_deref().unwrap_or("")), isid),
             }));
         }
     }
@@ -367,11 +387,11 @@ impl Drop for Counted {
     }
 }
 
-/// A games disk session, detached when the connection ends.
+/// A layered disk's session, detached when the connection ends.
 struct Attached(super::games::View);
 impl Drop for Attached {
     fn drop(&mut self) {
-        super::games::detach(&self.0);
+        super::detach(&self.0);
     }
 }
 
@@ -405,7 +425,7 @@ pub async fn serve(sock: tokio::net::TcpStream, peer: String) {
         }
         Counted(d.lun.clone())
     });
-    full_feature(&mut r, &tx, &exp, &l, &kick, &local).await;
+    full_feature(&mut r, &tx, &exp, &l, &kick, &local, &peer).await;
     if l.disk.is_some() {
         let mut a = ACTIVE.lock();
         if a.get(&l.key).is_some_and(|(k, _)| Arc::ptr_eq(k, &kick)) {
@@ -481,6 +501,7 @@ async fn full_feature(
     l: &Login,
     kick: &Notify,
     local: &str,
+    peer: &str,
 ) {
     let slots = Arc::new(Semaphore::new(WINDOW as usize));
     // Writes: one receives its data at a time, the others wait their turn here (without a slot: the reader must never
@@ -530,7 +551,15 @@ async fn full_feature(
         rsp[16..20].copy_from_slice(&p.bhs[16..20]);
         match op {
             0x00 if itt != 0xffff_ffff => {
-                // NOP-Out ping → NOP-In echo.
+                // NOP-Out ping → NOP-In echo. A ping carries a few bytes at most; the echo of a large one, queued for
+                // a client that does not read, would hold megabytes for every ping it sends.
+                if p.data.len() > PING_MAX {
+                    tracing::warn!(
+                        "iscsid: {peer} sent a ping with {} KB of data — connection closed",
+                        p.data.len() >> 10
+                    );
+                    return reject(tx, &p.bhs, 0x04).await;
+                }
                 rsp[0] = 0x20;
                 rsp[1] = 0x80;
                 rsp[8..16].copy_from_slice(&p.bhs[8..16]);
@@ -543,6 +572,10 @@ async fn full_feature(
                     return reject(tx, &p.bhs, 0x05).await;
                 };
                 if is_write(&p.bhs, &disk) {
+                    // The window we advertise is WINDOW commands: an initiator never has more waiting.
+                    if waiting.len() >= 4 * WINDOW as usize {
+                        return reject(tx, &p.bhs, 0x04).await;
+                    }
                     waiting.push_back(p.bhs);
                     continue;
                 }
@@ -603,13 +636,17 @@ async fn full_feature(
                 tx.send(Out::new(rsp, Vec::new(), true)).await.ok();
             }
             0x04 => {
-                // Text: SendTargets (discovery) → every target at this portal.
+                // Text: SendTargets (discovery) → every target at this portal, plus the asking diskless machine's own
+                // copies of its games disks (Windows connects only to a target its discovery listed).
                 rsp[0] = 0x24;
                 rsp[1] = 0x80;
                 put32(&mut rsp, 20, 0xffff_ffff);
                 let mut text = Vec::new();
                 if keys(&p.data).iter().any(|(k, _)| k == "SendTargets") {
-                    for iqn in super::iqns() {
+                    for iqn in super::iqns()
+                        .into_iter()
+                        .chain(super::golden::games_iqns_for(peer))
+                    {
                         text.extend(
                             format!("TargetName={iqn}\0TargetAddress={local}:3260,1\0").bytes(),
                         );
@@ -637,7 +674,7 @@ fn is_write(bhs: &[u8; 48], disk: &Disk) -> bool {
         && bhs[1] & 0x20 != 0
         && edtl > 0
         && bhs[8..16] == [0u8; 8]
-        && matches!(scsi::handle(&cdb, disk.lun.size, &disk.lun.iqn, true), scsi::Cmd::Write { blocks, .. } if blocks as u64 * scsi::BLOCK == edtl)
+        && matches!(disk.lun.handle(&cdb, true), scsi::Cmd::Write { blocks, .. } if blocks as u64 * disk.lun.block() == edtl)
 }
 
 async fn reject(tx: &mpsc::Sender<Out>, bhs: &[u8; 48], reason: u8) {
@@ -660,17 +697,17 @@ pub async fn command(bhs: &[u8; 48], disk: Disk, mrdsl: usize, data: Vec<u8>) ->
         // Only LUN 0 exists.
         match cdb[0] {
             0x12 => scsi::Cmd::Data(vec![0x7f, 0, 0x06, 0x02, 0, 0, 0, 0]), // peripheral qualifier: no LUN here
-            0xa0 => scsi::handle(&cdb, lun.size, &lun.iqn, writable),
+            0xa0 => lun.handle(&cdb, writable),
             _ => scsi::Cmd::Check(0x05, 0x25, 0x00),
         }
     } else {
-        scsi::handle(&cdb, lun.size, &lun.iqn, writable)
+        lun.handle(&cdb, writable)
     };
     let moved = data.len();
     let plain = disk.ov.is_none() && disk.layers.is_empty();
     let cmd = match (cmd, disk.ov.clone()) {
         (scsi::Cmd::Read { lba, blocks }, ov) => {
-            let (off, len) = (lba * scsi::BLOCK, blocks as usize * scsi::BLOCK as usize);
+            let (off, len) = (lba * lun.block(), blocks as usize * lun.block() as usize);
             let r = match plain.then(|| lun.read_now(off, len)).flatten() {
                 Some(buf) => Ok(Ok(buf)),
                 None => {
@@ -700,16 +737,36 @@ pub async fn command(bhs: &[u8; 48], disk: Disk, mrdsl: usize, data: Vec<u8>) ->
             }
         }
         (scsi::Cmd::Write { lba, blocks }, Some(ov))
-            if blocks as usize * scsi::BLOCK as usize == moved =>
+            if blocks as usize * lun.block() as usize == moved =>
         {
             let d = disk.clone();
-            let off = lba * scsi::BLOCK;
-            match tokio::task::spawn_blocking(move || {
-                ov.write_at(&|o, b| d.read_at(o, b), off, &data)
+            let off = lba * lun.block();
+            let r = tokio::task::spawn_blocking(move || {
+                let r = ov.write_at(&|o, b| d.read_at(o, b), off, &data);
+                let first = r
+                    .as_ref()
+                    .is_err_and(|e| e.starts_with(super::overlay::NO_ROOM))
+                    && ov.first_refusal();
+                (r, first.then(|| ov.folder()))
             })
-            .await
-            {
+            .await;
+            let refused_first = r.as_ref().ok().and_then(|(_, f)| f.clone());
+            match r.map(|(r, _)| r) {
                 Ok(Ok(())) => scsi::Cmd::Ok,
+                // A diskless machine over its room (overlay::Limit): "space allocation failed" as a thin-provisioned
+                // disk answers it — the write fails at once, the disk is not taken for broken. Logged once per layer.
+                Ok(Err(e)) if e.starts_with(super::overlay::NO_ROOM) => {
+                    if let Some(whose) = refused_first {
+                        // Windows on a system disk that takes no more writes stops and restarts within a minute:
+                        // the machine comes back on a fresh session. Named here so the restart can be explained.
+                        tracing::warn!(
+                            "iscsid: {} (machine {whose}) — its writes that need new room are refused: {}",
+                            lun.iqn,
+                            e.trim_start_matches(super::overlay::NO_ROOM)
+                        );
+                    }
+                    scsi::Cmd::Check(0x07, 0x27, 0x07) // data protect, space allocation failed write protect
+                }
                 Ok(Err(e)) => {
                     tracing::warn!("iscsid: write {} @{off}+{moved}: {e}", lun.iqn);
                     scsi::Cmd::Check(0x03, 0x0c, 0x00) // medium error, write error

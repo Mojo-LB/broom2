@@ -40,6 +40,7 @@ async fn serves_pipelined_reads() {
         ram: false,
         reserve: 0,
         stamp: String::new(),
+        cd: false,
     })
     .unwrap();
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -174,6 +175,8 @@ async fn wait_games(f: impl Fn(&games::Info) -> bool) {
 /// g0 is no longer served.
 #[tokio::test]
 async fn games_disk_versions() {
+    // The games list is the daemon's (one per process): not while golden.rs's games-copy test sets it.
+    let _one = crate::iscsid::golden::TEST_LOCK.lock().await;
     let d = std::env::temp_dir().join("broom_test_games");
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
@@ -358,6 +361,7 @@ fn requests_roundtrip() {
         ram: true,
         reserve: 2 << 30,
         stamp: String::new(),
+        cd: false,
     };
     let s = serde_json::to_string(&Req::Export(e.clone())).unwrap();
     assert!(s.contains("\"op\":\"export\""));
@@ -425,6 +429,7 @@ async fn fuzz_sessions() {
         ram: false,
         reserve: 0,
         stamp: String::new(),
+        cd: false,
     })
     .unwrap();
     let keys = format!(
@@ -469,4 +474,882 @@ async fn fuzz_sessions() {
     }
     TARGETS.lock().remove(iqn);
     let _ = std::fs::remove_file(p);
+}
+
+/// A diskless machine over the wire: it logs in to its own target, its WRITE lands in its session layer and reads
+/// back; the golden is untouched; another IP or a machine that was not prepared is refused.
+#[tokio::test]
+async fn diskless_machine_session() {
+    let _one = golden::TEST_LOCK.lock().await;
+    let d = std::env::temp_dir().join("broom_test_diskless_tcp");
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("img")).unwrap();
+    let img = d.join("img/golden.img");
+    std::fs::write(&img, vec![0x22u8; 1 << 20]).unwrap();
+    let mac = "02:00:00:00:00:31";
+    TEST_ARP.lock().insert("127.0.0.1".into(), mac.into());
+    let cfg = golden::Config {
+        disk: games::Config {
+            name: "w11tcp".into(),
+            iqn: "iqn.test:golden-w11tcp".into(),
+            path: img.to_string_lossy().into(),
+            ..Default::default()
+        },
+        dir: d.join("wb").to_string_lossy().into(),
+        machines: vec![
+            golden::Machine {
+                mac: mac.into(),
+                ip: "127.0.0.1".into(),
+            },
+            golden::Machine {
+                mac: "02:00:00:00:00:32".into(),
+                ip: "127.0.0.2".into(),
+            },
+        ],
+        games: false,
+        ..Default::default()
+    };
+    golden::set(vec![cfg]).unwrap();
+    let mine = golden::machine_iqn("iqn.test:golden-w11tcp", mac).unwrap();
+    let other = golden::machine_iqn("iqn.test:golden-w11tcp", "02:00:00:00:00:32").unwrap();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = l.accept().await {
+            tokio::spawn(conn::serve(s, "127.0.0.1".into()));
+        }
+    });
+
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    assert_eq!(
+        login(&mut s, &mine).await.bhs[36],
+        0x03,
+        "not prepared for a boot: refused"
+    );
+    golden::prepare("w11tcp", mac, false, false, false, None).unwrap();
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    assert_eq!(login(&mut s, &mine).await.bhs[36], 0, "its own disk");
+    let data: Vec<u8> = (0..64 << 10).map(|i: u32| (i % 251) as u8).collect();
+    s.write_all(&scsi_cmd(40, 1, 0xa0, 0x2a, 16, 128))
+        .await
+        .unwrap();
+    let r = conn::read_pdu(&mut s).await.unwrap();
+    assert_eq!(r.bhs[0], 0x31, "R2T");
+    for (i, chunk) in data.chunks(32768).enumerate() {
+        let mut p = pdu(0x05, if i == 1 { 0x80 } else { 0 }, 40, 0, chunk);
+        p[8..16].fill(0);
+        p[20..24].copy_from_slice(&r.bhs[20..24]);
+        p[36..40].copy_from_slice(&(i as u32).to_be_bytes());
+        p[40..44].copy_from_slice(&(i as u32 * 32768).to_be_bytes());
+        s.write_all(&p).await.unwrap();
+    }
+    let r = conn::read_pdu(&mut s).await.unwrap();
+    assert_eq!((r.bhs[0], r.bhs[3]), (0x21, 0), "GOOD");
+    assert!(
+        read_blocks(&mut s, 41, 2, 16, 128).await == data,
+        "reads its own write"
+    );
+    assert!(
+        read_blocks(&mut s, 42, 3, 0, 8)
+            .await
+            .iter()
+            .all(|&b| b == 0x22),
+        "rest from the golden"
+    );
+    assert!(
+        std::fs::read(&img).unwrap().iter().all(|&b| b == 0x22),
+        "golden file untouched"
+    );
+    // The other machine's disk, from this IP: refused.
+    golden::prepare("w11tcp", "02:00:00:00:00:32", false, false, false, None).unwrap();
+    let mut x = tokio::net::TcpStream::connect(addr).await.unwrap();
+    assert_eq!(
+        login(&mut x, &other).await.bhs[36],
+        0x03,
+        "not that machine"
+    );
+    drop(s);
+    for _ in 0..100 {
+        if golden::prepare("w11tcp", mac, false, false, false, None).is_ok() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let i = golden::info();
+    assert_eq!(
+        i[0].machines[0].session_bytes, 0,
+        "next boot: session dropped"
+    );
+    golden::set(Vec::new()).unwrap();
+    TEST_ARP.lock().remove("127.0.0.1");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// One initiator (same name, same ISID) logged in to two targets at once — a Windows machine booted from iSCSI that
+/// also mounts a games disk: two sessions side by side. Only a new login to the SAME target replaces the old session.
+#[tokio::test]
+async fn same_initiator_two_targets() {
+    let dir = std::env::temp_dir().join("broom_test_twin");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (ta, tb) = ("iqn.test:twin-a.g1", "iqn.test:twin-b.g1");
+    for (t, b) in [(ta, 0x0au8), (tb, 0x0bu8)] {
+        let p = dir.join(format!("{b}.img"));
+        std::fs::write(&p, vec![b; 1 << 20]).unwrap();
+        export(Entry {
+            iqn: t.into(),
+            path: p.to_string_lossy().into(),
+            ram: false,
+            reserve: 0,
+            stamp: String::new(),
+            cd: false,
+        })
+        .unwrap();
+    }
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = l.accept().await {
+            tokio::spawn(conn::serve(s, "127.0.0.1".into()));
+        }
+    });
+    async fn login_as(s: &mut tokio::net::TcpStream, target: &str) -> conn::Pdu {
+        let keys = format!(
+            "InitiatorName=iqn.test:pc-boot\0TargetName={target}\0SessionType=Normal\0MaxRecvDataSegmentLength=4096\0MaxBurstLength=65536\0"
+        );
+        s.write_all(&pdu(0x43, 0x80 | 1 << 2 | 3, 1, 0, keys.as_bytes()))
+            .await
+            .unwrap();
+        conn::read_pdu(s).await.unwrap()
+    }
+    let mut a = tokio::net::TcpStream::connect(addr).await.unwrap();
+    assert_eq!(login_as(&mut a, ta).await.bhs[36], 0);
+    let mut b = tokio::net::TcpStream::connect(addr).await.unwrap();
+    assert_eq!(login_as(&mut b, tb).await.bhs[36], 0);
+    // The first session is still there (it was closed at once when sessions were keyed without the target).
+    assert!(
+        read_blocks(&mut a, 10, 1, 0, 8)
+            .await
+            .iter()
+            .all(|&x| x == 0x0a)
+    );
+    assert!(
+        read_blocks(&mut b, 10, 1, 0, 8)
+            .await
+            .iter()
+            .all(|&x| x == 0x0b)
+    );
+    // A second login to target a with the same initiator + ISID replaces the first session there.
+    let mut a2 = tokio::net::TcpStream::connect(addr).await.unwrap();
+    assert_eq!(login_as(&mut a2, ta).await.bhs[36], 0);
+    assert!(
+        read_blocks(&mut a2, 11, 1, 0, 8)
+            .await
+            .iter()
+            .all(|&x| x == 0x0a)
+    );
+    let mut buf = [0u8; 48];
+    let gone = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::io::AsyncReadExt::read(&mut a, &mut buf),
+    )
+    .await;
+    assert!(
+        matches!(gone, Ok(Ok(0)) | Ok(Err(_))),
+        "the replaced session is closed"
+    );
+    TARGETS.lock().remove(ta);
+    TARGETS.lock().remove(tb);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// WRITE `data` at `lba` on an update session (R2T bursts answered as they come).
+async fn write_blocks(s: &mut tokio::net::TcpStream, itt: u32, cmdsn: u32, lba: u32, data: &[u8]) {
+    s.write_all(&scsi_cmd(
+        itt,
+        cmdsn,
+        0xa0,
+        0x2a,
+        lba,
+        (data.len() / 512) as u16,
+    ))
+    .await
+    .unwrap();
+    let mut sent = 0;
+    while sent < data.len() {
+        let r = conn::read_pdu(s).await.unwrap();
+        assert_eq!(r.bhs[0], 0x31, "R2T");
+        let g = |at: usize| u32::from_be_bytes(r.bhs[at..at + 4].try_into().unwrap()) as usize;
+        let (off, len) = (g(40), g(44));
+        let chunks: Vec<&[u8]> = data[off..off + len].chunks(32768).collect();
+        for (i, chunk) in chunks.iter().enumerate() {
+            let mut p = pdu(
+                0x05,
+                if i + 1 == chunks.len() { 0x80 } else { 0 },
+                itt,
+                0,
+                chunk,
+            );
+            p[8..16].fill(0);
+            p[20..24].copy_from_slice(&r.bhs[20..24]); // TTT
+            p[36..40].copy_from_slice(&(i as u32).to_be_bytes());
+            p[40..44].copy_from_slice(&((off + i * 32768) as u32).to_be_bytes());
+            s.write_all(&p).await.unwrap();
+        }
+        sent += len;
+    }
+    let r = conn::read_pdu(s).await.unwrap();
+    assert_eq!((r.bhs[0], r.bhs[3]), (0x21, 0), "write GOOD");
+}
+
+/// Keeping versions (Config.retain): saved versions stay served (nothing merged while space is fine), each reads its
+/// own bytes; dropping the oldest merges only its next layer, so every newer version reads as before; a version a
+/// group is held on (keep_from) or a machine uses is never dropped, nor the last one; a drop cut off by a restart is
+/// finished up to its target only.
+#[tokio::test]
+async fn games_disk_keeps_versions() {
+    let _one = crate::iscsid::golden::TEST_LOCK.lock().await;
+    let d = std::env::temp_dir().join("broom_test_keep");
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("k")).unwrap();
+    let img = d.join("k/games.img");
+    std::fs::write(&img, vec![0x11u8; 1 << 20]).unwrap();
+    let iqn = "iqn.test:keep";
+    let cfg = |keep_from: Option<u64>| games::Config {
+        name: "k".into(),
+        iqn: iqn.into(),
+        path: img.to_string_lossy().into(),
+        update_ip: Some("127.0.0.1".into()),
+        retain: true,
+        min_free_pct: 0, // never short of space here
+        keep_from,
+        ..Default::default()
+    };
+    games::set(vec![cfg(None)]).unwrap();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = l.accept().await {
+            tokio::spawn(conn::serve(s, "127.0.0.1".into()));
+        }
+    });
+    let info = || games::info().into_iter().find(|i| i.name == "k").unwrap();
+    let wait_off = || async {
+        for _ in 0..100 {
+            if !info().update_connected {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("update still connected");
+    };
+    // g1 writes 0xA1 at blocks 8..16 and 64..72; g2 writes 0xB2 at 8..16 (over g1) and 128..136.
+    let fill = |b: u8| vec![b; 8 * 512];
+    for (ver, b, at) in [(0u64, 0xa1u8, [8u32, 64]), (1, 0xb2, [8, 128])] {
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        assert_eq!(login(&mut s, &format!("{iqn}.g{ver}")).await.bhs[36], 0);
+        write_blocks(&mut s, 10, 1, at[0], &fill(b)).await;
+        write_blocks(&mut s, 11, 2, at[1], &fill(b)).await;
+        drop(s);
+        wait_off().await;
+        games::save("k").unwrap();
+    }
+    games::tick();
+    let i = info();
+    assert_eq!(i.ver, 2);
+    assert_eq!(
+        i.versions.iter().map(|v| v.ver).collect::<Vec<_>>(),
+        [0, 1, 2],
+        "every version kept"
+    );
+    assert!(i.versions[1].bytes > 0 && i.versions[1].saved > 0);
+    let read = |ver: u64, lba: u32| async move {
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let ok = login(&mut s, &format!("{iqn}.g{ver}")).await.bhs[36] == 0;
+        if !ok {
+            return None;
+        }
+        Some(read_blocks(&mut s, 20, 1, lba, 8).await[0])
+    };
+    assert_eq!(read(0, 8).await, Some(0x11), "g0 still served as it was");
+    assert_eq!(
+        (read(1, 8).await, read(1, 64).await, read(1, 128).await),
+        (Some(0xa1), Some(0xa1), Some(0x11))
+    );
+    assert_eq!(
+        (read(2, 8).await, read(2, 64).await, read(2, 128).await),
+        (Some(0xb2), Some(0xa1), Some(0xb2))
+    );
+
+    // A machine still on g0: not dropped.
+    let mut on0 = tokio::net::TcpStream::connect(addr).await.unwrap();
+    login(&mut on0, &format!("{iqn}.g0")).await;
+    assert!(games::drop_oldest("k").unwrap_err().contains("in use"));
+    drop(on0);
+    for _ in 0..100 {
+        if info().versions[0].sessions == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    // g0 dropped: g1 is now inside the file; g1 and g2 read exactly as before.
+    assert_eq!(games::drop_oldest("k").unwrap(), 0);
+    let i = info();
+    assert_eq!(i.versions.iter().map(|v| v.ver).collect::<Vec<_>>(), [1, 2]);
+    assert_eq!(read(0, 8).await, None, "g0 no longer served");
+    assert_eq!(
+        (read(1, 8).await, read(1, 64).await, read(1, 128).await),
+        (Some(0xa1), Some(0xa1), Some(0x11))
+    );
+    assert_eq!(
+        (read(2, 8).await, read(2, 64).await, read(2, 128).await),
+        (Some(0xb2), Some(0xa1), Some(0xb2))
+    );
+    // A group held on g1: g1 stays.
+    games::set(vec![cfg(Some(1))]).unwrap();
+    assert!(games::drop_oldest("k").unwrap_err().contains("held"));
+    games::set(vec![cfg(None)]).unwrap();
+
+    // A drop of g1 cut off by a restart (marker written, nothing merged yet): finished up to its target at the next
+    // start — g2 kept and right.
+    games::set(Vec::new()).unwrap();
+    std::fs::write(d.join("k/merging"), "2").unwrap();
+    games::set(vec![cfg(None)]).unwrap();
+    let i = info();
+    assert_eq!(
+        i.versions.iter().map(|v| v.ver).collect::<Vec<_>>(),
+        [2],
+        "finished up to g2"
+    );
+    assert!(!d.join("k/merging").exists());
+    assert_eq!(
+        (read(2, 8).await, read(2, 64).await, read(2, 128).await),
+        (Some(0xb2), Some(0xa1), Some(0xb2))
+    );
+    assert!(
+        games::drop_oldest("k")
+            .unwrap_err()
+            .contains("only one version")
+    );
+    games::set(Vec::new()).unwrap();
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// This server's own update session (a VM of its own) is not trusted for coming from the loopback address: with a
+/// job key on the disk, only a login to "<iqn>.g<k>.u<key>" writes; the plain target or another key reads only, from
+/// the very same address. A LAN update machine (no key on the disk) is unaffected: see games_disk_versions.
+#[tokio::test]
+async fn local_update_needs_job_key() {
+    let _one = crate::iscsid::golden::TEST_LOCK.lock().await;
+    let d = std::env::temp_dir().join("broom_test_games_key");
+    let _ = std::fs::remove_dir_all(&d);
+    let img = d.join("k/games.img");
+    std::fs::create_dir_all(img.parent().unwrap()).unwrap();
+    std::fs::write(&img, vec![0x11u8; 1 << 20]).unwrap();
+    let key = "0123456789abcdef0123456789abcdef";
+    games::set(vec![games::Config {
+        name: "k".into(),
+        iqn: "iqn.test:keyed".into(),
+        path: img.to_string_lossy().into(),
+        update_ip: Some("127.0.0.1".into()),
+        update_key: Some(key.into()),
+        ..Default::default()
+    }])
+    .unwrap();
+    assert_eq!(
+        games::iqns(),
+        ["iqn.test:keyed.g0"],
+        "the keyed name is never listed"
+    );
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = l.accept().await {
+            tokio::spawn(conn::serve(s, "127.0.0.1".into()));
+        }
+    });
+    let write_status = |target: String| async move {
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        assert_eq!(
+            login(&mut s, &target).await.bhs[36],
+            0,
+            "{target}: logged in"
+        );
+        s.write_all(&scsi_cmd(31, 1, 0xa0, 0x2a, 8, 1))
+            .await
+            .unwrap();
+        let r = conn::read_pdu(&mut s).await.unwrap();
+        (r.bhs[0], r.bhs[3])
+    };
+    // From 127.0.0.1, the update machine's address — but without the job's key: read-only.
+    assert_eq!(
+        write_status("iqn.test:keyed.g0".into()).await,
+        (0x21, 0x02),
+        "plain target: write refused"
+    );
+    assert_eq!(
+        write_status(format!("iqn.test:keyed.g0.u{}", "f".repeat(32))).await,
+        (0x21, 0x02),
+        "another key: write refused"
+    );
+    let info = games::info().into_iter().find(|i| i.name == "k").unwrap();
+    assert!(!info.update_connected && info.update_bytes == 0);
+    // With the key: an R2T asks for the data — the session writes.
+    assert_eq!(
+        write_status(format!("iqn.test:keyed.g0.u{key}")).await.0,
+        0x31,
+        "keyed target: write accepted"
+    );
+    games::set(Vec::new()).unwrap();
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Target names with a write key: only "<iqn>.g<digits>.u<16+ hex>" is split; anything else is a plain name.
+#[test]
+fn write_key_in_target_name() {
+    use games::split_key;
+    assert_eq!(split_key("iqn.x:d.g3"), ("iqn.x:d.g3", None));
+    assert_eq!(
+        split_key("iqn.x:d.g3.u0123456789abcdef"),
+        ("iqn.x:d.g3", Some("0123456789abcdef"))
+    );
+    assert_eq!(
+        split_key("iqn.x:d.g3.uabc"),
+        ("iqn.x:d.g3.uabc", None),
+        "too short"
+    );
+    assert_eq!(
+        split_key("iqn.x:d.g3.u0123456789abcdeg"),
+        ("iqn.x:d.g3.u0123456789abcdeg", None),
+        "not hex"
+    );
+    assert_eq!(
+        split_key("iqn.x:d.u0123456789abcdef"),
+        ("iqn.x:d.u0123456789abcdef", None),
+        "no version before it"
+    );
+    let cfg = |k: Option<&str>| games::Config {
+        update_key: k.map(Into::into),
+        ..Default::default()
+    };
+    assert!(
+        games::key_allowed(&cfg(None), None, "t", "p"),
+        "no key asked"
+    );
+    assert!(games::key_allowed(
+        &cfg(Some("abcd")),
+        Some("abcd"),
+        "t",
+        "p"
+    ));
+    assert!(!games::key_allowed(
+        &cfg(Some("abcd")),
+        Some("abce"),
+        "t",
+        "p"
+    ));
+    assert!(!games::key_allowed(&cfg(Some("abcd")), None, "t", "p"));
+    assert!(
+        !games::key_allowed(&cfg(Some("")), Some(""), "t", "p"),
+        "an empty key opens nothing"
+    );
+    assert!(!games::key_allowed(&cfg(Some("")), None, "t", "p"));
+}
+
+/// Versions without keeping (the default, Config.retain off): saved versions are merged away once no machine uses
+/// them — what a games disk always did. A group held on a version (keep_from) keeps that version and every newer
+/// one; only what lies below it goes. The hold lifted: everything merges into the newest again.
+#[tokio::test]
+async fn versions_merge_by_default_held_ones_stay() {
+    let _one = crate::iscsid::golden::TEST_LOCK.lock().await;
+    let d = std::env::temp_dir().join("broom_test_nokeep");
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("n")).unwrap();
+    let img = d.join("n/games.img");
+    std::fs::write(&img, vec![0x11u8; 1 << 20]).unwrap();
+    let iqn = "iqn.test:nokeep";
+    let cfg = |keep_from: Option<u64>| games::Config {
+        name: "n".into(),
+        iqn: iqn.into(),
+        path: img.to_string_lossy().into(),
+        update_ip: Some("127.0.0.1".into()),
+        keep_from,
+        ..Default::default() // retain: false
+    };
+    games::set(vec![cfg(Some(1))]).unwrap();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = l.accept().await {
+            tokio::spawn(conn::serve(s, "127.0.0.1".into()));
+        }
+    });
+    let info = || games::info().into_iter().find(|i| i.name == "n").unwrap();
+    let vers = || info().versions.iter().map(|v| v.ver).collect::<Vec<_>>();
+    let idle = || async {
+        for _ in 0..100 {
+            let i = info();
+            if !i.update_connected && i.versions.iter().all(|v| v.sessions == 0) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("sessions still open: {:?}", info());
+    };
+    // g1, g2, g3: each writes its own byte at blocks 8..16.
+    for (ver, b) in [(0u64, 0xa1u8), (1, 0xb2), (2, 0xc3)] {
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        assert_eq!(login(&mut s, &format!("{iqn}.g{ver}")).await.bhs[36], 0);
+        write_blocks(&mut s, 10, 1, 8, &vec![b; 8 * 512]).await;
+        drop(s);
+        idle().await;
+        games::save("n").unwrap();
+    }
+    assert_eq!(vers(), [0, 1, 2, 3]);
+    let read = |ver: u64| async move {
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        if login(&mut s, &format!("{iqn}.g{ver}")).await.bhs[36] != 0 {
+            return None;
+        }
+        Some(read_blocks(&mut s, 20, 1, 8, 8).await[0])
+    };
+    // A group is held on g1: g0 goes (one tick), g1 and the newer ones stay, tick after tick.
+    games::tick();
+    assert_eq!(
+        vers(),
+        [1, 2, 3],
+        "only what lies below the held version went"
+    );
+    games::tick();
+    games::tick();
+    assert_eq!(
+        vers(),
+        [1, 2, 3],
+        "the held version and the newer ones stay"
+    );
+    assert_eq!(
+        (read(0).await, read(1).await, read(2).await, read(3).await),
+        (None, Some(0xa1), Some(0xb2), Some(0xc3))
+    );
+    idle().await;
+    // The hold lifted: the default again — everything merged into the newest once unused.
+    games::set(vec![cfg(None)]).unwrap();
+    games::merge_if_idle("n", std::time::Duration::ZERO);
+    assert_eq!(vers(), [3], "merged away: only the newest is left");
+    assert_eq!(
+        (read(1).await, read(2).await, read(3).await),
+        (None, None, Some(0xc3))
+    );
+    games::set(Vec::new()).unwrap();
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Discovery (SendTargets) for a client that is no diskless machine — an SSD PC's Windows looking for its games
+/// disks — lists what it always listed: the plain targets and each games disk's newest version. No golden, no other
+/// machine's disk, no keyed name of a job on this server; and a plain target still serves after it.
+#[tokio::test]
+async fn discovery_for_ssd_clients_unchanged() {
+    let _one = crate::iscsid::golden::TEST_LOCK.lock().await;
+    let d = std::env::temp_dir().join("broom_test_discovery");
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("g")).unwrap();
+    let (plain, img) = (d.join("plain.img"), d.join("g/games.img"));
+    std::fs::write(&plain, vec![0x33u8; 1 << 20]).unwrap();
+    std::fs::write(&img, vec![0x11u8; 1 << 20]).unwrap();
+    let plain_iqn = "iqn.test:disc-plain.g1";
+    export(Entry {
+        iqn: plain_iqn.into(),
+        path: plain.to_string_lossy().into(),
+        ram: false,
+        reserve: 0,
+        stamp: String::new(),
+        cd: false,
+    })
+    .unwrap();
+    games::set(vec![games::Config {
+        name: "g".into(),
+        iqn: "iqn.test:disc-games".into(),
+        path: img.to_string_lossy().into(),
+        update_ip: Some("127.0.0.1".into()),
+        update_key: Some("00112233445566778899aabbccddeeff".into()),
+        ..Default::default()
+    }])
+    .unwrap();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = l.accept().await {
+            tokio::spawn(conn::serve(s, "127.0.0.1".into()));
+        }
+    });
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    assert_eq!(login(&mut s, plain_iqn).await.bhs[36], 0);
+    s.write_all(&pdu(0x04, 0x80, 7, 1, b"SendTargets=All\0"))
+        .await
+        .unwrap();
+    let r = conn::read_pdu(&mut s).await.unwrap();
+    assert_eq!(r.bhs[0], 0x24, "Text response");
+    let text = String::from_utf8_lossy(&r.data).into_owned();
+    let mut names: Vec<&str> = text
+        .split('\0')
+        .filter_map(|kv| kv.strip_prefix("TargetName="))
+        .filter(|n| n.contains(":disc-")) // other tests' targets of this process aside
+        .collect();
+    names.sort();
+    assert_eq!(names, ["iqn.test:disc-games.g0", plain_iqn], "{text}");
+    assert!(
+        !text.contains(".u0011"),
+        "a job's keyed name is never listed"
+    );
+    // The plain target reads as ever on that same session.
+    assert!(
+        read_blocks(&mut s, 8, 2, 0, 8)
+            .await
+            .iter()
+            .all(|&b| b == 0x33),
+        "plain target served"
+    );
+    drop(s);
+    TARGETS.lock().remove(plain_iqn);
+    games::set(Vec::new()).unwrap();
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A diskless machine over its room for one session (golden::Config.session_max), over the wire: the write that
+/// needs a new block is answered CHECK CONDITION "space allocation failed" (data protect 27h/07h) — not a medium
+/// error — while what it already wrote stays writable and readable. Another machine's room is its own.
+#[tokio::test]
+async fn diskless_machine_out_of_room() {
+    let _one = golden::TEST_LOCK.lock().await;
+    let d = std::env::temp_dir().join("broom_test_diskless_room");
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("img")).unwrap();
+    let img = d.join("img/golden.img");
+    std::fs::write(&img, vec![0x22u8; 1 << 20]).unwrap();
+    let mac = "02:00:00:00:00:41";
+    TEST_ARP.lock().insert("127.0.0.1".into(), mac.into());
+    golden::set(vec![golden::Config {
+        disk: games::Config {
+            name: "w11room".into(),
+            iqn: "iqn.test:golden-w11room".into(),
+            path: img.to_string_lossy().into(),
+            ..Default::default()
+        },
+        dir: d.join("wb").to_string_lossy().into(),
+        machines: vec![golden::Machine {
+            mac: mac.into(),
+            ip: "127.0.0.1".into(),
+        }],
+        session_max: 2 * overlay::BLOCK, // two 64 KB blocks
+        ..Default::default()
+    }])
+    .unwrap();
+    let mine = golden::machine_iqn("iqn.test:golden-w11room", mac).unwrap();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = l.accept().await {
+            tokio::spawn(conn::serve(s, "127.0.0.1".into()));
+        }
+    });
+    golden::prepare("w11room", mac, false, false, false, None).unwrap();
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    assert_eq!(login(&mut s, &mine).await.bhs[36], 0);
+    // One 4 KB write → (opcode, status, sense key, ASC, ASCQ) of its answer.
+    async fn write4k(
+        s: &mut tokio::net::TcpStream,
+        itt: u32,
+        cmdsn: u32,
+        lba: u32,
+    ) -> (u8, u8, u8, u8, u8) {
+        s.write_all(&scsi_cmd(itt, cmdsn, 0xa0, 0x2a, lba, 8))
+            .await
+            .unwrap();
+        let r = conn::read_pdu(s).await.unwrap();
+        assert_eq!(r.bhs[0], 0x31, "R2T");
+        let mut p = pdu(0x05, 0x80, itt, 0, &[0x77u8; 4096]);
+        p[8..16].fill(0);
+        p[20..24].copy_from_slice(&r.bhs[20..24]);
+        s.write_all(&p).await.unwrap();
+        let r = conn::read_pdu(s).await.unwrap();
+        let sense = |i: usize| r.data.get(2 + i).copied().unwrap_or(0);
+        (r.bhs[0], r.bhs[3], sense(2), sense(12), sense(13))
+    }
+    const GOOD: (u8, u8, u8, u8, u8) = (0x21, 0, 0, 0, 0);
+    // Blocks 0 and 1 (LBA 0.. and 128..): its two blocks.
+    assert_eq!(write4k(&mut s, 50, 1, 0).await, GOOD);
+    assert_eq!(write4k(&mut s, 51, 2, 128).await, GOOD);
+    // A third block: no room — space allocation failed, write protect.
+    assert_eq!(
+        write4k(&mut s, 52, 3, 256).await,
+        (0x21, 0x02, 0x07, 0x27, 0x07)
+    );
+    // What it holds is rewritten and read; the refused place reads the golden.
+    assert_eq!(write4k(&mut s, 53, 4, 8).await, GOOD);
+    assert!(
+        read_blocks(&mut s, 54, 5, 8, 8)
+            .await
+            .iter()
+            .all(|&b| b == 0x77)
+    );
+    assert!(
+        read_blocks(&mut s, 55, 6, 256, 8)
+            .await
+            .iter()
+            .all(|&b| b == 0x22)
+    );
+    // The admin can see it (Diskless page), and the machine's next boot says why it restarted — once: the new session
+    // starts clean.
+    let seen = |name: &str| {
+        golden::info()
+            .into_iter()
+            .find(|i| i.disk.name == name)
+            .and_then(|i| i.machines.into_iter().next())
+            .unwrap()
+            .refused
+    };
+    assert!(seen("w11room"), "marked out of room while it runs");
+    drop(s);
+    let mut gone = false;
+    for _ in 0..50 {
+        match golden::prepare("w11room", mac, false, false, false, None) {
+            Ok(p) => {
+                assert!(p.refused, "the boot after it is told");
+                gone = true;
+                break;
+            }
+            Err(e) if e.contains("still connected") => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await
+            }
+            Err(e) => panic!("{e}"),
+        }
+    }
+    assert!(gone, "its session closed");
+    assert!(!seen("w11room"));
+    assert!(
+        !golden::prepare("w11room", mac, false, false, false, None)
+            .unwrap()
+            .refused,
+        "only that one boot"
+    );
+    golden::set(Vec::new()).unwrap();
+    TEST_ARP.lock().remove("127.0.0.1");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Login text that never ends (continuation PDUs, the C bit) is cut off: the connection closes once more than
+/// LOGIN_TEXT_MAX has come, instead of the daemon gathering it without limit; a login in several small parts still
+/// works.
+#[tokio::test]
+async fn login_text_is_capped() {
+    use tokio::io::AsyncReadExt;
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = l.accept().await {
+            tokio::spawn(conn::serve(s, "127.0.0.1".into()));
+        }
+    });
+    // In parts, under the limit: acknowledged, then answered as one request (an unknown target: refused as such).
+    let mut ok = tokio::net::TcpStream::connect(addr).await.unwrap();
+    ok.write_all(&pdu(
+        0x43,
+        0x40 | 1 << 2,
+        1,
+        0,
+        b"InitiatorName=iqn.test:parts\0",
+    ))
+    .await
+    .unwrap();
+    let ack = conn::read_pdu(&mut ok).await.unwrap();
+    assert_eq!(
+        (ack.bhs[0], ack.bhs[36]),
+        (0x23, 0),
+        "the first part is acknowledged"
+    );
+    ok.write_all(&pdu(
+        0x43,
+        0x80 | 1 << 2 | 3,
+        1,
+        0,
+        b"TargetName=iqn.test:nope-capped\0SessionType=Normal\0",
+    ))
+    .await
+    .unwrap();
+    let r = conn::read_pdu(&mut ok).await.unwrap();
+    assert_eq!(
+        (r.bhs[36], r.bhs[37]),
+        (0x02, 0x03),
+        "both parts were read as one"
+    );
+
+    // Without end: 48 KB a part. The second one passes the limit.
+    let mut flood = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let part = vec![b'x'; 48 << 10];
+    assert!(2 * part.len() > conn::LOGIN_TEXT_MAX && part.len() < conn::LOGIN_TEXT_MAX);
+    flood
+        .write_all(&pdu(0x43, 0x40 | 1 << 2, 2, 0, &part))
+        .await
+        .unwrap();
+    let ack = conn::read_pdu(&mut flood).await.unwrap();
+    assert_eq!(ack.bhs[0], 0x23);
+    flood
+        .write_all(&pdu(0x43, 0x40 | 1 << 2, 2, 0, &part))
+        .await
+        .unwrap();
+    let mut rest = Vec::new();
+    let closed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        flood.read_to_end(&mut rest),
+    )
+    .await
+    .expect("the connection is closed at once, not at the login timeout");
+    assert!(
+        closed.is_ok() && rest.is_empty(),
+        "closed without an answer"
+    );
+}
+
+/// A ping (NOP-Out) is echoed with its few bytes; one carrying more than PING_MAX ends the connection instead of
+/// being queued for a client that may never read it — in a discovery session, which any host on the LAN gets.
+#[tokio::test]
+async fn ping_data_is_capped() {
+    use tokio::io::AsyncReadExt;
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = l.accept().await {
+            tokio::spawn(conn::serve(s, "127.0.0.1".into()));
+        }
+    });
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    s.write_all(&pdu(
+        0x43,
+        0x80 | 1 << 2 | 3,
+        1,
+        0,
+        b"InitiatorName=iqn.test:ping\0SessionType=Discovery\0",
+    ))
+    .await
+    .unwrap();
+    let r = conn::read_pdu(&mut s).await.unwrap();
+    assert_eq!((r.bhs[0], r.bhs[36]), (0x23, 0), "discovery login");
+
+    s.write_all(&pdu(0x40, 0x80, 7, 1, b"are you there"))
+        .await
+        .unwrap();
+    let echo = conn::read_pdu(&mut s).await.unwrap();
+    assert_eq!(
+        (echo.bhs[0], echo.data.as_slice()),
+        (0x20, &b"are you there"[..])
+    );
+
+    let big = vec![0x5au8; conn::PING_MAX + 1];
+    s.write_all(&pdu(0x40, 0x80, 8, 1, &big)).await.unwrap();
+    let rej = conn::read_pdu(&mut s).await.unwrap();
+    assert_eq!(rej.bhs[0], 0x3f, "rejected, not echoed");
+    let mut rest = Vec::new();
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(5), s.read_to_end(&mut rest))
+        .await
+        .expect("and the connection is closed");
+    assert!(closed.is_ok() && rest.is_empty());
 }

@@ -76,3 +76,88 @@ fn survives_reopen_and_merges() {
     );
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Room for a diskless machine's writes (Limit): its own limit; the drive's reserve stops the big writers first and
+/// lets the small ones go on; nobody below the floor; an unknown drive is not held against the machine.
+#[test]
+fn room_rules() {
+    const GB: u64 = 1 << 30;
+    let l = |max_gb: u64, free_pct: u8| Limit {
+        max: max_gb * GB,
+        free_pct,
+        dir: "/".into(),
+    };
+    let drive = |free_gb: u64| Some((free_gb * GB, 1000 * GB));
+    // No limit of its own, plenty of room: a 300 GB game install goes through.
+    assert!(room(&l(0, 5), 300 * GB, drive(500)).is_ok());
+    // Its own limit: up to it, not past it.
+    assert!(room(&l(100, 5), 100 * GB - BLOCK, drive(500)).is_ok());
+    assert!(room(&l(100, 5), 100 * GB, drive(500)).is_err());
+    assert!(
+        room(&l(100, 0), 100 * GB, None).is_err(),
+        "its own limit needs no drive figures"
+    );
+    // Below the reserve (5 % of 1000 GB = 50 GB): the big writer stops, an ordinary session goes on.
+    assert!(room(&l(0, 5), FAIR, drive(49)).is_err());
+    assert!(room(&l(0, 5), 300 * GB, drive(49)).is_err());
+    assert!(room(&l(0, 5), FAIR - BLOCK, drive(49)).is_ok());
+    assert!(room(&l(0, 5), 0, drive(49)).is_ok());
+    assert!(
+        room(&l(0, 5), 300 * GB, drive(50)).is_ok(),
+        "exactly at the reserve: fine"
+    );
+    // No reserve set: only the floor stops it.
+    assert!(room(&l(0, 0), 300 * GB, drive(2)).is_ok());
+    // Under the floor nobody grows, however small.
+    assert!(room(&l(0, 5), 0, Some((FLOOR - 1, 1000 * GB))).is_err());
+    assert!(room(&l(0, 0), 0, Some((FLOOR - 1, 1000 * GB))).is_err());
+    // The drive's figures unknown: not refused for it.
+    assert!(room(&l(0, 5), 300 * GB, None).is_ok());
+}
+
+/// A limited overlay: new blocks only within its limit (refused as "no room", noted once); blocks it already holds
+/// are rewritten freely, reads are untouched, and an overlay without a limit (a games disk update) is as before.
+#[test]
+fn limited_overlay_refuses_new_blocks_only() {
+    let d = std::env::temp_dir().join(format!("broom_test_ovl_limit_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let size = 16 * BLOCK;
+    let base = |_: u64, b: &mut [u8]| -> Result<(), String> {
+        b.fill(0x11);
+        Ok(())
+    };
+    let ov = Overlay::open_limited(
+        &d.join("ovl"),
+        &d.join("blocks"),
+        size,
+        Some(Limit {
+            max: 2 * BLOCK,
+            free_pct: 0,
+            dir: d.clone(),
+        }),
+    )
+    .unwrap();
+    ov.write_at(&base, 0, &[0xaa; 100]).unwrap();
+    ov.write_at(&base, BLOCK + 5, &[0xbb; 100]).unwrap();
+    assert_eq!(ov.used(), 2 * BLOCK);
+    let e = ov.write_at(&base, 5 * BLOCK, &[0xcc; 10]).unwrap_err();
+    assert!(e.starts_with(NO_ROOM), "{e}");
+    assert!(ov.first_refusal(), "the first refusal is the one logged");
+    assert!(!ov.first_refusal());
+    assert_eq!(ov.used(), 2 * BLOCK, "nothing added");
+    // What it holds is rewritten, and reads as written; the refused block reads from below.
+    ov.write_at(&base, 10, &[0xdd; 20]).unwrap();
+    let mut buf = [0u8; 4];
+    ov.read_at(&base, 10, &mut buf).unwrap();
+    assert_eq!(buf, [0xdd; 4]);
+    ov.read_at(&base, 5 * BLOCK, &mut buf).unwrap();
+    assert_eq!(buf, [0x11; 4]);
+    // Without a limit: as ever.
+    let free = Overlay::open(&d.join("ovl2"), &d.join("blocks2"), size).unwrap();
+    for b in 0..16 {
+        free.write_at(&base, b * BLOCK, &[1; 8]).unwrap();
+    }
+    assert_eq!(free.used(), size);
+    let _ = std::fs::remove_dir_all(&d);
+}

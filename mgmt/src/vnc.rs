@@ -163,6 +163,16 @@ pub fn connected(mac: &str) -> bool {
     AGENTS.lock().contains_key(&mac.to_lowercase())
 }
 
+/// A command for machine `mac`'s agent outside any viewer (power.rs); the writer signs it like a viewer's. false = no
+/// agent connected, or its queue is full.
+pub(crate) fn command(mac: &str, json: &str) -> bool {
+    AGENTS.lock().get(&mac.to_lowercase()).is_some_and(|a| {
+        a.to_agent
+            .try_send(Message::Text(json.to_string().into()))
+            .is_ok()
+    })
+}
+
 /// When machine `mac`'s agent connected (unix time), None = not connected.
 pub fn since(mac: &str) -> Option<u64> {
     AGENTS.lock().get(&mac.to_lowercase()).map(|a| a.since)
@@ -220,10 +230,17 @@ async fn agent(
         return (StatusCode::FORBIDDEN, "no agent key yet").into_response();
     };
     ws.max_message_size(16 << 20)
-        .on_upgrade(move |s| run_agent(s, mac, host, grp, key))
+        .on_upgrade(move |s| run_agent(s, st, mac, host, grp, key))
 }
 
-async fn run_agent(ws: WebSocket, mac: String, host: String, grp: Option<String>, key: [u8; 32]) {
+async fn run_agent(
+    ws: WebSocket,
+    st: SharedState,
+    mac: String,
+    host: String,
+    grp: Option<String>,
+    key: [u8; 32],
+) {
     let (mut tx, mut rx) = ws.split();
     // Both sides proven before anything else; every text to the agent from here on is signed.
     let Some(session) = crate::agentauth::handshake(&mut tx, &mut rx, &key, &host).await else {
@@ -232,6 +249,11 @@ async fn run_agent(ws: WebSocket, mac: String, host: String, grp: Option<String>
     let (to_agent, mut queue) = mpsc::channel::<Message>(QUEUE);
     let id = register(&mac, &host, grp, to_agent);
     tracing::info!("remote: agent of {host} connected");
+    // Its screen mode, if one is set (display.rs): a diskless machine starts from its golden at every boot.
+    {
+        let (st, mac) = (st.clone(), mac.clone());
+        tokio::task::spawn_blocking(move || crate::display::on_connect(&st, &mac));
+    }
     let writer = async {
         let mut ping = tokio::time::interval(PING);
         let mut n: u64 = 0;
@@ -260,6 +282,13 @@ async fn run_agent(ws: WebSocket, mac: String, host: String, grp: Option<String>
                 }
                 // The agent also pushes hardware health here (metrics.rs), not for the viewer.
                 Message::Text(t) if t.contains("\"metrics\"") => crate::metrics::store(&mac, &t),
+                // …and its hardware list (inventory.rs), kept in the database.
+                Message::Text(t) if t.starts_with("{\"t\":\"inventory\"") => {
+                    let (st, mac) = (st.clone(), mac.clone());
+                    tokio::task::spawn_blocking(move || {
+                        crate::inventory::store(&st, &mac, t.as_str())
+                    });
+                }
                 Message::Close(_) => break,
                 _ => {} // pong / other text
             }
@@ -289,7 +318,7 @@ struct ViewQuery {
 
 /// The browser's Origin names this server (a WebSocket is not covered by the same-origin policy: a page elsewhere
 /// could open one with the admin's cookie if SameSite let it through). No Origin = not a browser.
-fn same_origin(h: &HeaderMap) -> bool {
+pub(crate) fn same_origin(h: &HeaderMap) -> bool {
     let Some(origin) = h.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else {
         return true;
     };
@@ -335,9 +364,15 @@ async fn view(
         thumb,
         peer,
     };
-    // Watching can go on for hours: the session is checked again every 30 s (auth::until_invalid).
-    let gone = crate::auth::until_invalid(st, crate::auth::session_token(&headers));
-    ws.on_upgrade(move |s| run_view(s, v, gone))
+    // Watching can go on for hours: the session and its Remote permission are checked again every 30 s
+    // (auth::until_invalid). A viewer sends input events and pasted text: nothing near the framework's 64 MB.
+    let gone = crate::auth::until_invalid(
+        st,
+        crate::auth::session_token(&headers),
+        crate::auth::Need::Perm(&[crate::auth::Perm::Remote]),
+    );
+    ws.max_message_size(2 * MAX_INPUT)
+        .on_upgrade(move |s| run_view(s, v, gone))
 }
 
 /// One viewer's side of a session.
@@ -357,6 +392,37 @@ fn busy(mac: &str) -> bool {
         .get(mac)
         .and_then(|a| a.viewer.as_ref())
         .is_some_and(|v| !v.thumb)
+}
+
+/// What someone watching a machine may send to its agent: the stream's settings and their own mouse, keys and
+/// clipboard.
+const VIEWER_OPS: [&str; 8] = [
+    "start", "stop", "ack", "mouse", "wheel", "key", "sas", "clip",
+];
+
+/// A viewer's message as it is passed to the agent, or None (dropped). The server signs whatever it passes on, and
+/// the agent also takes commands that are not a viewer's — restart / shut down (the Power permission, power.rs),
+/// the display mode (the owner, display.rs): through here they would need the Remote permission only. So only the
+/// viewer's own commands pass, and written anew with "op" first: the agent reads fields by name from the text, and
+/// neither a second "op" nor a string that looks like one can stand in for it.
+pub(crate) fn viewer_command(text: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let o = v.as_object()?;
+    let op = o.get("op")?.as_str()?;
+    if !VIEWER_OPS.contains(&op) {
+        return None;
+    }
+    let mut out = format!("{{\"op\":\"{op}\"");
+    for (k, val) in o {
+        if k != "op" {
+            out.push(',');
+            out += &serde_json::to_string(k).ok()?;
+            out.push(':');
+            out += &val.to_string();
+        }
+    }
+    out.push('}');
+    Some(out)
 }
 
 fn start_msg(q: u8, w: u16, h264: bool) -> Message {
@@ -396,7 +462,11 @@ async fn run_view(ws: WebSocket, v: ViewSession, gone: impl std::future::Future<
         while let Some(Ok(m)) = rx.next().await {
             match m {
                 Message::Text(t) if t.len() <= MAX_INPUT => {
-                    if to_agent.send(Message::Text(t)).await.is_err() {
+                    // Only a viewer's own commands go on (viewer_command): anything else is dropped.
+                    let Some(cmd) = viewer_command(t.as_str()) else {
+                        continue;
+                    };
+                    if to_agent.send(Message::Text(cmd.into())).await.is_err() {
                         break;
                     }
                 }

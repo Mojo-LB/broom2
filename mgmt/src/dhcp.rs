@@ -704,7 +704,12 @@ pub(crate) fn udp(
     }
     // REUSEPORT: on an Apply the new listener can bind :67/:69 while the old one still runs, so a bad config
     // fails the bind WITHOUT first killing the working listeners (start() stops the old ones only after this).
-    s.set_reuse_port(true)?;
+    // Only for those named ports: asked for "any free port" (0, a TFTP transfer's own socket), a socket with
+    // REUSEPORT can be given a port another such socket already has, and their packets then land on either of
+    // them — with a room of PCs fetching iPXE at the same moment, one of them got "unknown transfer ID".
+    if addr.port() != 0 {
+        s.set_reuse_port(true)?;
+    }
     if !iface.is_empty() {
         s.bind_device(Some(iface.as_bytes()))?;
     }
@@ -754,6 +759,17 @@ async fn serve(sock: tokio::net::UdpSocket, port: u16, st: SharedState) {
                 tracing::warn!("dhcp send to {to}: {e}");
             }
         }
+    }
+}
+
+/// The boot file the LAN's own DHCP (a router) must hand UEFI PXE clients when Broom's DHCP server is off: with
+/// "Secure Boot clients" on, the Microsoft-signed iPXE shim (with Secure Boot off it starts iPXE without checking, so
+/// one file can serve the whole room); else our own iPXE build.
+pub(crate) fn router_boot_file(secure_boot_clients: bool) -> &'static str {
+    if secure_boot_clients {
+        "sb/snponly-shim.efi"
+    } else {
+        "snponly.efi"
     }
 }
 
@@ -830,8 +846,9 @@ pub async fn start(st: &SharedState) -> Result<String, String> {
         )
     } else {
         format!(
-            "DHCP server off — TFTP :69 on {on}: set the LAN's DHCP to next-server {} + boot file snponly.efi (legacy BIOS clients: undionly.kpxe)",
-            cfg.server
+            "DHCP server off — TFTP :69 on {on}: set the LAN's DHCP to next-server {} + boot file {} (legacy BIOS clients: undionly.kpxe)",
+            cfg.server,
+            router_boot_file(cfg.sb)
         )
     })
 }

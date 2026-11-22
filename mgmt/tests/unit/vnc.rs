@@ -141,3 +141,52 @@ fn origin_check() {
     assert!(!h(Some("http://10.0.0.12:9"), "10.0.0.12"));
     assert!(!h(Some("null"), "10.0.0.12"));
 }
+
+/// Someone watching a machine sends its agent only a viewer's commands: restart / shut down and the display mode
+/// have their own permissions and do not pass through the Remote view, however they are dressed up; what passes is
+/// written anew, "op" first, with the fields the agent reads intact.
+#[test]
+fn viewer_passes_only_viewer_commands() {
+    use super::viewer_command;
+    assert_eq!(
+        viewer_command(r#"{"op":"key","code":"KeyA","down":true}"#).as_deref(),
+        Some(r#"{"op":"key","code":"KeyA","down":true}"#)
+    );
+    assert_eq!(
+        viewer_command(r#"{"x":10,"y":20,"b":1,"op":"mouse"}"#).as_deref(),
+        Some(r#"{"op":"mouse","b":1,"x":10,"y":20}"#)
+    );
+    for op in ["start", "stop", "ack", "wheel", "sas", "clip"] {
+        assert!(
+            viewer_command(&format!(r#"{{"op":"{op}"}}"#)).is_some(),
+            "{op}"
+        );
+    }
+    for bad in [
+        r#"{"op":"power","do":"shutdown","delay":0,"msg":""}"#,
+        r#"{"op":"display","w":640,"h":480,"hz":60}"#,
+        r#"{"op":"mouse","op":"power","do":"restart"}"#, // the last one counts
+        r#"{"op":"power","do":"restart"}"#,              // "op", escaped
+        r#"{"do":"restart"}"#,
+        r#"{"op":5}"#,
+        r#"["op","power"]"#,
+        "not json",
+        "",
+    ] {
+        assert_eq!(viewer_command(bad), None, "{bad}");
+    }
+    // A string that looks like a command stays a string: the agent finds the real "op" first, and inside the text
+    // every quote is escaped.
+    let clip =
+        viewer_command(r#"{"text":"\"op\":\"power\",\"do\":\"restart\"","op":"clip"}"#).unwrap();
+    assert!(clip.starts_with(r#"{"op":"clip","text":"#), "{clip}");
+    assert!(
+        !clip[12..].contains(r#""op":"#) && !clip.contains(r#""do":"#),
+        "{clip}"
+    );
+    // The first one of two is not what the agent would get either.
+    assert_eq!(
+        viewer_command(r#"{"op":"power","op":"mouse","x":1}"#).as_deref(),
+        Some(r#"{"op":"mouse","x":1}"#)
+    );
+}

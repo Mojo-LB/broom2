@@ -7,6 +7,18 @@ use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// A TCP connection to the server's `port` — from this host, or from `from`: the address of one of the PCs of
+/// `super::add_pcs` (the server then sees that PC's IP and, by ARP, its network card).
+pub fn connect(from: Option<Ipv4Addr>, port: u16) -> std::io::Result<TcpStream> {
+    let Some(ip) = from else {
+        return TcpStream::connect((SRV, port));
+    };
+    let s = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)?;
+    s.bind(&SocketAddr::from((ip, 0)).into())?;
+    s.connect(&SocketAddr::from((SRV.parse::<Ipv4Addr>().unwrap(), port)).into())?;
+    Ok(s.into())
+}
+
 // ---------------------------------------------------------------- HTTP/1.1
 
 pub struct Resp {
@@ -34,16 +46,75 @@ impl Resp {
 }
 
 /// One request per connection (Connection: close), session cookie kept by hand.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Http {
     pub cookie: Option<String>,
     /// The session key of the sign-in handshake (new passwords are sealed with it).
     pub sk: Option<[u8; 32]>,
+    /// HTTPS (port 443) trusting exactly these certificates, as a pinned client does.
+    pub tls: Option<std::sync::Arc<tokio_rustls::rustls::ClientConfig>>,
+    /// The PC it asks from (`connect`); None = this host.
+    pub from: Option<Ipv4Addr>,
 }
 
 impl Http {
     pub fn new() -> Http {
         Http::default()
+    }
+
+    /// What the PC at `ip` asks itself (its firmware, iPXE).
+    pub fn pc(ip: Ipv4Addr) -> Http {
+        Http {
+            from: Some(ip),
+            ..Http::default()
+        }
+    }
+
+    /// An HTTPS client that trusts only `cert_pem` (the server's self-signed certificate, or one uploaded).
+    pub fn tls(cert_pem: &str) -> Http {
+        use rustls::pki_types::{CertificateDer, pem::PemObject};
+        use tokio_rustls::rustls;
+        let mut roots = rustls::RootCertStore::empty();
+        for c in CertificateDer::pem_slice_iter(cert_pem.as_bytes()) {
+            roots.add(c.expect("certificate PEM")).unwrap();
+        }
+        let cfg = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        Http {
+            tls: Some(std::sync::Arc::new(cfg)),
+            ..Http::default()
+        }
+    }
+
+    /// The same kind of client (HTTP or HTTPS with the same trust), signed out.
+    pub fn fresh(&self) -> Http {
+        Http {
+            tls: self.tls.clone(),
+            from: self.from,
+            ..Http::default()
+        }
+    }
+
+    /// The HTTPS handshake alone (Err = refused, e.g. a certificate this client does not trust).
+    pub fn handshake(&self) -> Result<(), String> {
+        use tokio_rustls::rustls;
+        // A full handshake: no resumed session (which skips the certificate) from earlier requests.
+        let mut cfg = (*self.tls.clone().expect("an HTTPS client")).clone();
+        cfg.resumption = rustls::client::Resumption::disabled();
+        let cfg = std::sync::Arc::new(cfg);
+        let tcp = TcpStream::connect((SRV, 443)).map_err(|e| e.to_string())?;
+        let name = rustls::pki_types::ServerName::try_from(SRV.to_string()).unwrap();
+        let mut c = rustls::ClientConnection::new(cfg, name).unwrap();
+        let mut t = tcp;
+        while c.is_handshaking() {
+            c.complete_io(&mut t).map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
 
     pub fn get(&self, path: &str) -> Resp {
@@ -75,9 +146,18 @@ impl Http {
     }
 
     pub fn request(&self, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Resp {
-        let mut s =
-            TcpStream::connect((SRV, 80)).unwrap_or_else(|e| panic!("connect {SRV}:80: {e}"));
-        s.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+        let port = if self.tls.is_some() { 443 } else { 80 };
+        let tcp = connect(self.from, port).unwrap_or_else(|e| panic!("connect {SRV}:{port}: {e}"));
+        tcp.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+        let mut s: Box<dyn ReadWrite> = match &self.tls {
+            None => Box::new(tcp),
+            Some(cfg) => {
+                let name =
+                    tokio_rustls::rustls::pki_types::ServerName::try_from(SRV.to_string()).unwrap();
+                let c = tokio_rustls::rustls::ClientConnection::new(cfg.clone(), name).unwrap();
+                Box::new(tokio_rustls::rustls::StreamOwned::new(c, tcp))
+            }
+        };
         let mut req = format!(
             "{method} {path} HTTP/1.1\r\nConnection: close\r\nContent-Length: {}\r\n",
             body.len()
@@ -95,10 +175,18 @@ impl Http {
         s.write_all(req.as_bytes()).unwrap();
         s.write_all(body).unwrap();
         let mut raw = Vec::new();
-        s.read_to_end(&mut raw).unwrap();
+        match s.read_to_end(&mut raw) {
+            Ok(_) => {}
+            // TLS: a peer that closes without close_notify (the whole answer is in already).
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof && !raw.is_empty() => {}
+            Err(e) => panic!("{method} {path}: {e}"),
+        }
         parse_response(&raw)
     }
 }
+
+trait ReadWrite: Read + Write {}
+impl<T: Read + Write> ReadWrite for T {}
 
 fn parse_response(raw: &[u8]) -> Resp {
     let end = raw
@@ -259,7 +347,12 @@ impl Dhcp {
 
 /// Download `file` from the server's TFTP with 1468-byte blocks, as UEFI PXE does. Err = the server's ERROR message.
 pub fn tftp_get(file: &str) -> Result<Vec<u8>, String> {
-    let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    tftp_get_from(Ipv4Addr::UNSPECIFIED, file)
+}
+
+/// The same from local address `from` (a PC of `super::add_pcs`).
+pub fn tftp_get_from(from: Ipv4Addr, file: &str) -> Result<Vec<u8>, String> {
+    let sock = UdpSocket::bind((from, 0)).unwrap();
     sock.set_read_timeout(Some(TIMEOUT)).unwrap();
     let mut rrq = vec![0, 1];
     for s in [file, "octet", "blksize", "1468"] {
@@ -303,7 +396,7 @@ pub fn tftp_get(file: &str) -> Result<Vec<u8>, String> {
     }
 }
 
-// ---------------------------------------------------------------- iSCSI (RFC 7143), read-only initiator
+// ---------------------------------------------------------------- iSCSI (RFC 7143) initiator
 
 pub struct Iscsi {
     s: TcpStream,
@@ -326,6 +419,12 @@ impl Iscsi {
     pub fn login(target: &str) -> Result<Iscsi, (u8, u8)> {
         let s =
             TcpStream::connect((SRV, 3260)).unwrap_or_else(|e| panic!("connect {SRV}:3260: {e}"));
+        Iscsi::login_on(s, target)
+    }
+
+    /// The same from the PC at `from` (`connect`): a diskless machine's own disk answers only that machine.
+    pub fn login_from(from: Ipv4Addr, target: &str) -> Result<Iscsi, (u8, u8)> {
+        let s = connect(Some(from), 3260).unwrap_or_else(|e| panic!("connect {SRV}:3260: {e}"));
         Iscsi::login_on(s, target)
     }
 
@@ -406,6 +505,63 @@ impl Iscsi {
         cdb[2..6].copy_from_slice(&lba.to_be_bytes());
         cdb[7..9].copy_from_slice(&blocks.to_be_bytes());
         self.data_in(&cdb, blocks as u32 * 512)
+    }
+
+    /// WRITE(10) of `data` (whole 512-byte blocks, at most 64 KB) at `lba`: the command, then the data when the target
+    /// asks for it (R2T → Data-Out), status GOOD checked.
+    pub fn write(&mut self, lba: u32, data: &[u8]) {
+        assert!(data.len().is_multiple_of(512) && data.len() <= 65536);
+        self.itt += 1;
+        let mut p = vec![0u8; 48];
+        p[0] = 0x01; // SCSI Command
+        p[1] = 0xa0; // Final + Write
+        p[16..20].copy_from_slice(&self.itt.to_be_bytes());
+        p[20..24].copy_from_slice(&(data.len() as u32).to_be_bytes());
+        p[24..28].copy_from_slice(&self.cmdsn.to_be_bytes());
+        p[32] = 0x2a;
+        p[34..38].copy_from_slice(&lba.to_be_bytes());
+        p[39..41].copy_from_slice(&((data.len() / 512) as u16).to_be_bytes());
+        self.cmdsn += 1;
+        self.s.write_all(&p).unwrap();
+        loop {
+            let (bhs, _) = read_pdu(&mut self.s);
+            match bhs[0] & 0x3f {
+                0x31 => {
+                    // R2T: the part it wants (offset, length) under its transfer tag.
+                    let at = u32::from_be_bytes(bhs[40..44].try_into().unwrap()) as usize;
+                    let len = u32::from_be_bytes(bhs[44..48].try_into().unwrap()) as usize;
+                    let part = &data[at..at + len];
+                    let mut d = vec![0u8; 48];
+                    d[0] = 0x05; // Data-Out
+                    d[1] = 0x80; // Final (of this burst)
+                    d[5..8].copy_from_slice(&(part.len() as u32).to_be_bytes()[1..]);
+                    d[16..20].copy_from_slice(&self.itt.to_be_bytes());
+                    d[20..24].copy_from_slice(&bhs[20..24]);
+                    d[40..44].copy_from_slice(&(at as u32).to_be_bytes());
+                    d.extend(part);
+                    d.resize(d.len().div_ceil(4) * 4, 0);
+                    self.s.write_all(&d).unwrap();
+                }
+                0x21 => {
+                    assert_eq!(bhs[3], 0, "SCSI status GOOD");
+                    return;
+                }
+                op => panic!("unexpected iSCSI opcode {op:#x}"),
+            }
+        }
+    }
+
+    /// The target closed this session (a new boot of the machine took its place): the connection has ended.
+    pub fn closed(&mut self) -> bool {
+        self.s
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        let r = self.s.read(&mut [0u8; 1]);
+        self.s.set_read_timeout(Some(TIMEOUT)).unwrap();
+        match r {
+            Ok(n) => n == 0,
+            Err(e) => e.kind() == std::io::ErrorKind::ConnectionReset,
+        }
     }
 
     /// READ CAPACITY(10) → disk size in bytes.

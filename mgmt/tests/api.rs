@@ -273,6 +273,196 @@ fn api_contract() {
         assert_eq!(s.get("/api/status").status, 401, "account deleted");
         assert_eq!(h.get("/api/status").status, 200);
 
+        // Roles (users.rs / auth.rs): what a role allows is decided by the server for every request — these calls go
+        // straight to the API, no page in between. Built-in staff: none of the VM / golden / version / restart rights.
+        assert_eq!(
+            set(json!({"name": "st", "role": "staff", "cred": cred("st", "staff-pass-9")})),
+            200
+        );
+        let st = as_user("st", "staff-pass-9");
+        assert_eq!(
+            st.get("/api/auth/status").json()["perms"],
+            json!(["remote", "wake", "games"])
+        );
+        for (path, body) in [
+            (
+                "/api/vm/start",
+                json!({"golden": "w11", "games": [], "keep": false}),
+            ),
+            (
+                "/api/vm/start",
+                json!({"golden": "w11", "games": [], "keep": true}),
+            ),
+            ("/api/vm/stop", json!({"force": true})),
+            (
+                "/api/versions/pin",
+                json!({"kind": "golden", "name": "w11", "group": "g", "ver": 1}),
+            ),
+            ("/api/diskless/save", json!({"name": "w11"})),
+            (
+                "/api/diskless/maint",
+                json!({"name": "w11", "machine": null}),
+            ),
+            ("/api/onboard/start", json!({"golden": "w11", "machine": 1})),
+            ("/api/power", json!({"action": "restart", "ids": []})),
+            ("/api/power", json!({"action": "shutdown", "ids": []})),
+            ("/api/roles", json!({"name": "mine", "perms": ["maintain"]})),
+            ("/api/diskless/room", json!({"pc_gb": 0, "free_pct": 0})),
+            ("/api/versions/keep-free", json!({"keep": true})),
+        ] {
+            let r = st.post(path, &body);
+            assert_eq!(r.status, 403, "staff POST {path} {body}: {}", r.text());
+        }
+        assert_eq!(st.get("/api/vm/console").status, 403, "the VM's screen");
+        assert_eq!(st.get("/api/roles").status, 403);
+        // …and what staff always could: turning machines on passes (nothing selected: a plain answer, not 403).
+        assert_ne!(
+            st.post("/api/power", &json!({"action": "on", "ids": []}))
+                .status,
+            403
+        );
+        assert_eq!(st.get("/api/vm").status, 200, "looking at the VM's state");
+
+        // A role the owner makes: its permissions, and nothing else; built-in names and unknown roles refused.
+        let role = |v: serde_json::Value| h.post("/api/roles", &v);
+        assert_eq!(
+            role(json!({"name": "owner", "perms": []})).status,
+            400,
+            "built in"
+        );
+        assert_eq!(
+            role(json!({"name": "staff", "perms": ["power"]})).status,
+            400,
+            "built in"
+        );
+        assert_eq!(
+            role(json!({"name": "night", "perms": ["bogus"]})).status,
+            422,
+            "no such permission"
+        );
+        assert_eq!(
+            set(json!({"name": "nt", "role": "night", "cred": cred("nt", "night-pass-9")})),
+            400,
+            "a role that does not exist yet"
+        );
+        assert_eq!(
+            role(json!({"name": "night", "perms": ["power", "versions"]})).status,
+            200
+        );
+        assert_eq!(
+            set(json!({"name": "nt", "role": "night", "cred": cred("nt", "night-pass-9")})),
+            200
+        );
+        let nt = as_user("nt", "night-pass-9");
+        assert_eq!(
+            nt.get("/api/auth/status").json(),
+            json!({"configured": true, "authed": true, "user": "nt", "role": "night", "perms": ["power", "versions"]})
+        );
+        // Power: restart yes (not 403), turning on no (it has no Wake); versions yes; the rest no.
+        assert_ne!(
+            nt.post("/api/power", &json!({"action": "restart", "ids": []}))
+                .status,
+            403
+        );
+        assert_eq!(
+            nt.post("/api/power", &json!({"action": "on", "ids": []}))
+                .status,
+            403
+        );
+        assert_eq!(
+            nt.post("/api/wake", &json!({"mac": "52:54:00:aa:bb:cc"}))
+                .status,
+            403
+        );
+        assert_ne!(
+            nt.post(
+                "/api/versions/pin",
+                &json!({"kind": "golden", "name": "nope", "group": "g", "ver": null})
+            )
+            .status,
+            403
+        );
+        assert_eq!(nt.get("/api/vnc/view").status, 403, "no Remote");
+        assert_eq!(
+            nt.post("/api/games/save", &json!({"name": "x"})).status,
+            403
+        );
+        assert_eq!(
+            nt.post(
+                "/api/vm/start",
+                &json!({"golden": "w11", "games": [], "keep": false})
+            )
+            .status,
+            403
+        );
+        assert_eq!(
+            nt.post("/api/users", &json!({"name": "x", "role": "owner"}))
+                .status,
+            403
+        );
+        assert_eq!(nt.get("/api/status").status, 200, "looking");
+        // A change of the role counts at the account's next request, with no new sign-in.
+        assert_eq!(role(json!({"name": "night", "perms": ["vm"]})).status, 200);
+        assert_eq!(
+            nt.post("/api/power", &json!({"action": "restart", "ids": []}))
+                .status,
+            403
+        );
+        // The VM for games disks: allowed now (it fails for another reason here, not 403); keeping Windows
+        // changes stays Maintain's.
+        assert_ne!(
+            nt.post(
+                "/api/vm/start",
+                &json!({"golden": "w11", "games": [], "keep": false})
+            )
+            .status,
+            403
+        );
+        assert_eq!(
+            nt.post(
+                "/api/vm/start",
+                &json!({"golden": "w11", "games": [], "keep": true})
+            )
+            .status,
+            403
+        );
+        // The roles as the owner sees them; one in use cannot be deleted.
+        let ro = h.get("/api/roles").json();
+        let names: Vec<&str> = ro["roles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["owner", "staff", "night"]);
+        assert_eq!(ro["roles"][1]["perms"], json!(["remote", "wake", "games"]));
+        assert_eq!(
+            ro["roles"][2],
+            json!({"name": "night", "builtin": false, "perms": ["vm"], "users": 1})
+        );
+        assert_eq!(ro["perms"].as_array().unwrap().len(), 7);
+        assert_eq!(
+            h.post("/api/roles/delete", &json!({"name": "night"}))
+                .status,
+            400,
+            "in use"
+        );
+        assert_eq!(
+            h.post("/api/roles/delete", &json!({"name": "staff"}))
+                .status,
+            400,
+            "built in"
+        );
+        for u in ["nt", "st"] {
+            assert_eq!(h.post("/api/users/delete", &json!({"name": u})).status, 200);
+        }
+        assert_eq!(
+            h.post("/api/roles/delete", &json!({"name": "night"}))
+                .status,
+            200
+        );
+        assert_eq!(nt.get("/api/status").status, 401);
+
         // Login throttle: 5 free wrong proofs, then this IP is locked out (1 s, doubling) → 429.
         let wrong = || pw::sign_in("admin", "wrong-pass").err();
         for _ in 0..4 {
@@ -282,5 +472,274 @@ fn api_contract() {
             (0..4).any(|_| wrong() == Some(429)),
             "locked out after 5 wrong passwords"
         );
+    });
+}
+
+/// HTTPS for the web admin (tls.rs): a self-signed certificate made at first start; on plain HTTP the admin pages are
+/// sent to https://, the admin API refused, the machines' paths served; the session cookie is Secure; an uploaded
+/// certificate takes over at once (no restart), a bad one is refused; a new self-signed one on request; HTTPS can be
+/// turned off for the admin pages.
+#[test]
+fn https_admin() {
+    sandbox("https_admin", || {
+        let home = Home::new("https");
+        let _srv = Server::start_with(&home, &["--https-port", "443"]);
+        let anon = Http::new();
+
+        // What the capture tool reads first (public, plain HTTP): where HTTPS listens — and nothing to trust: no
+        // certificate is handed out over plain HTTP (the old path for it is gone).
+        let t = anon.get("/api/tls/port").json();
+        assert_eq!(t, json!({"port": 443}));
+        assert_ne!(anon.get("/api/tls/cert").status, 200);
+        let cert = std::fs::read_to_string(home.0.join("tls/cert.pem")).unwrap();
+        assert!(cert.starts_with("-----BEGIN CERTIFICATE-----"));
+
+        // Plain HTTP: pages → https://, the sign-in API refused, the machines' paths served.
+        let nav = anon.request("GET", "/machines?x=1", &[("Accept", "text/html")], b"");
+        assert_eq!(
+            (nav.status, nav.header("location")),
+            (308, Some(format!("https://{SRV}/machines?x=1").as_str()))
+        );
+        assert_eq!(
+            anon.get("/login").header("location"),
+            Some(format!("https://{SRV}/login").as_str())
+        );
+        let hello = json!({"user": "admin", "cnonce": "00112233445566778899aabbccddeeff"});
+        assert_eq!(anon.post("/api/auth/hello", &hello).status, 403);
+        assert_eq!(anon.get("/boot.ipxe").status, 200);
+        assert_eq!(anon.get("/broom-diskless.ps1").status, 200);
+
+        // HTTPS, trusting exactly that certificate (by the server's IP): sign in there; the cookie is Secure.
+        let tls = Http::tls(&cert);
+        let h = admin_via(&home, &tls);
+        assert_eq!(h.get("/api/auth/status").json()["authed"], true);
+        let r = tls.post("/api/auth/hello", &hello);
+        assert_eq!(r.status, 200, "{}", r.text());
+        let r = h.get("/login");
+        assert!(
+            r.header("content-security-policy").is_some(),
+            "security headers on HTTPS too"
+        );
+
+        // That session on plain HTTP: not served (a browser would not even send it: Secure).
+        let leaked = Http {
+            cookie: h.cookie.clone(),
+            ..Http::new()
+        };
+        assert_eq!(leaked.get("/api/status").status, 308);
+        assert_eq!(
+            leaked
+                .post("/api/power", &json!({"action": "restart", "ids": []}))
+                .status,
+            403
+        );
+        // …and no header opens it (the capture tool once said "I cannot check the certificate" this way).
+        let tool = leaked.request("GET", "/api/status", &[("X-Broom-Tool", "capture")], b"");
+        assert_eq!(tool.status, 308);
+        let tool = leaked.request(
+            "POST",
+            "/api/auth/hello",
+            &[
+                ("X-Broom-Tool", "capture"),
+                ("Content-Type", "application/json"),
+            ],
+            hello.to_string().as_bytes(),
+        );
+        assert_eq!(tool.status, 403);
+
+        // The System page's view: a self-signed certificate, its fingerprint, its end (≤ 825 days away).
+        let c = h.get("/api/config/tls").json();
+        assert_eq!(
+            (
+                c["kind"].as_str(),
+                c["https"].as_bool(),
+                c["listening"].as_bool()
+            ),
+            (Some("self-signed"), Some(true), Some(true))
+        );
+        let fp = |pem: &str| {
+            use sha2::Digest;
+            use tokio_rustls::rustls::pki_types::{CertificateDer, pem::PemObject};
+            let der = CertificateDer::from_pem_slice(pem.as_bytes()).unwrap();
+            sha2::Sha256::digest(der.as_ref())
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        };
+        assert_eq!(c["sha256"].as_str(), Some(fp(&cert).as_str()));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let until = c["until"].as_u64().unwrap();
+        assert!(
+            until > now + 800 * 86400 && until <= now + 825 * 86400,
+            "{c}"
+        );
+        assert!(
+            c["names"].as_array().unwrap().iter().any(|n| n == SRV),
+            "made for the server's address: {c}"
+        );
+
+        // Your own certificate (made here for the server's address): in use at once, the old one no longer served.
+        let mut p = rcgen::CertificateParams::new(vec![SRV.to_string()]).unwrap();
+        p.distinguished_name
+            .push(rcgen::DnType::CommonName, "venue test");
+        let k = rcgen::KeyPair::generate().unwrap();
+        let mine = p.self_signed(&k).unwrap();
+        let (mine_pem, mine_key) = (mine.pem(), k.serialize_pem());
+        let other_key = rcgen::KeyPair::generate().unwrap().serialize_pem();
+        let r = h.post(
+            "/api/config/tls",
+            &json!({"cert": mine_pem, "key": other_key}),
+        );
+        assert_eq!(r.status, 400, "a key of another certificate: {}", r.text());
+        assert_eq!(
+            h.post("/api/config/tls", &json!({"cert": mine_pem})).status,
+            400,
+            "the key too"
+        );
+        let r = h.post(
+            "/api/config/tls",
+            &json!({"cert": mine_pem, "key": mine_key}),
+        );
+        assert_eq!(r.status, 200, "{}", r.text());
+        assert_eq!(r.json()["kind"], "uploaded");
+        assert_eq!(r.json()["sha256"].as_str(), Some(fp(&mine_pem).as_str()));
+        let h2 = Http {
+            cookie: h.cookie.clone(),
+            ..Http::tls(&mine_pem)
+        };
+        assert_eq!(
+            h2.get("/api/status").status,
+            200,
+            "the new one serves, same session"
+        );
+        let old = tls.handshake();
+        assert!(old.is_err(), "the old certificate is gone: {old:?}");
+        assert_eq!(anon.get("/api/tls/port").json(), json!({"port": 443}));
+        assert!(std::fs::read_to_string(home.0.join("tls/cert.pem")).unwrap() == mine_pem);
+        let mode = {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(home.0.join("tls/key.pem"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        assert_eq!(mode, 0o600, "the key: root only");
+
+        // A new self-signed certificate on request: a new fingerprint, pinned again by the tool.
+        let r = h2.post("/api/config/tls", &json!({"self_signed": true}));
+        assert_eq!(r.status, 200, "{}", r.text());
+        let again = std::fs::read_to_string(home.0.join("tls/cert.pem")).unwrap();
+        assert_ne!(fp(&again), fp(&cert));
+        let h3 = Http {
+            cookie: h.cookie.clone(),
+            ..Http::tls(&again)
+        };
+        assert_eq!(h3.get("/api/status").status, 200);
+
+        // HTTPS off for the admin pages: plain HTTP serves them again (the tool is told port 0); back on.
+        assert_eq!(
+            h3.post("/api/config/tls", &json!({"https": false})).status,
+            200
+        );
+        assert_eq!(leaked.get("/api/status").status, 200);
+        assert_eq!(anon.get("/api/tls/port").json()["port"], 0);
+        assert_eq!(
+            leaked
+                .post("/api/config/tls", &json!({"https": true}))
+                .status,
+            200
+        );
+        assert_eq!(leaked.get("/api/status").status, 308);
+
+        // Signing out over HTTPS clears a Secure cookie.
+        let out = h3.post("/api/auth/logout", &json!({}));
+        let sc = out.header("set-cookie").unwrap_or("");
+        assert!(sc.contains("; Secure") && sc.contains("HttpOnly"), "{sc}");
+    });
+}
+
+/// What needs no sign-in is open to every host on the boot LAN, so what the server holds for it is bounded: a
+/// request body past 256 KB is refused (declared or not), and one address cannot hold more than its share of
+/// connections — the next one is closed at once, and a place is free again when one ends.
+#[test]
+fn open_requests_are_bounded() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+    sandbox("open_requests_are_bounded", || {
+        let home = Home::new("open");
+        let _srv = Server::start(&home);
+        let raw = |head: &str, body: &[u8]| -> String {
+            let mut s = TcpStream::connect((SRV, 80)).unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+            s.write_all(head.as_bytes()).unwrap();
+            let _ = s.write_all(body); // the server may answer and close before all of it is sent
+            let mut out = Vec::new();
+            let _ = s.read_to_end(&mut out);
+            String::from_utf8_lossy(&out).into_owned()
+        };
+        let path = "/api/drivers/for?mac=02:00:00:00:00:09";
+        // A machine's real request (its hardware IDs: a few kilobytes) is answered.
+        let ids = "PCI\\VEN_10EC&DEV_8126\r\n".repeat(200);
+        let ok = raw(
+            &format!(
+                "POST {path} HTTP/1.1\r\nHost: {SRV}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+                ids.len()
+            ),
+            ids.as_bytes(),
+        );
+        assert!(ok.starts_with("HTTP/1.1 200"), "{ok}");
+        // Declared too large: refused before any of it is read.
+        let big = raw(
+            &format!(
+                "POST {path} HTTP/1.1\r\nHost: {SRV}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+                300 << 10
+            ),
+            b"",
+        );
+        assert!(big.starts_with("HTTP/1.1 413"), "{big}");
+        // Not declared (chunked): refused once it passes the limit.
+        let chunk = format!("{:x}\r\n{}\r\n", 60 << 10, "x".repeat(60 << 10));
+        let chunked = raw(
+            &format!(
+                "POST {path} HTTP/1.1\r\nHost: {SRV}\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n"
+            ),
+            format!("{}0\r\n\r\n", chunk.repeat(5)).as_bytes(),
+        );
+        assert!(
+            chunked.starts_with("HTTP/1.1 413"),
+            "{}",
+            &chunked[..chunked.len().min(200)]
+        );
+
+        // One address: 256 connections held open, the next is closed as it arrives.
+        let held: Vec<TcpStream> = (0..256)
+            .map(|_| TcpStream::connect((SRV, 80)).unwrap())
+            .collect();
+        std::thread::sleep(Duration::from_millis(500));
+        let closed = |s: &mut TcpStream| {
+            s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let _ = s
+                .write_all(format!("GET /api/tls/port HTTP/1.1\r\nHost: {SRV}\r\n\r\n").as_bytes());
+            let mut b = [0u8; 16];
+            !matches!(s.read(&mut b), Ok(n) if n > 0)
+        };
+        let mut over = TcpStream::connect((SRV, 80)).unwrap();
+        assert!(
+            closed(&mut over),
+            "the 257th connection of one address is not served"
+        );
+        assert!(
+            home.log().contains("at most 256 per address"),
+            "and the log says why"
+        );
+        drop(held);
+        std::thread::sleep(Duration::from_millis(500));
+        let mut again = TcpStream::connect((SRV, 80)).unwrap();
+        assert!(!closed(&mut again), "places are free again");
     });
 }

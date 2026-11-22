@@ -91,3 +91,11 @@ fi
 mkdir -p dist
 cp "$bin" dist/bootrom-mgmt
 echo "== [3/3] OK: mgmt/dist/bootrom-mgmt $BROOM_VERSION ($(du -h dist/bootrom-mgmt | cut -f1))"
+# "Add hardware" also needs broom-report.exe (what Windows PE runs). A release gets it from CI; a local build makes
+# it here when mingw-w64 is installed — it is not kept in the repository.
+if command -v x86_64-w64-mingw32-gcc >/dev/null; then
+  bash "$root/mgmt/winpe/build.sh" "$root/mgmt/dist/broom-report.exe" >/dev/null
+  echo "   + mgmt/dist/broom-report.exe: copy it to <Broom's folder on the server>/winpe/ (Add hardware)"
+else
+  echo "   (Add hardware needs broom-report.exe: apt install gcc-mingw-w64-x86-64 and build again, or use a release)"
+fi

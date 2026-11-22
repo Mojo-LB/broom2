@@ -29,5 +29,14 @@ tr.filters .form-control,tr.filters .form-select{min-width:72px}
 .ic{width:1.05em;height:1.05em;vertical-align:-.17em;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}
 .ic.ok{color:var(--bs-success)} .ic.err{color:var(--bs-danger)} .ic.wait,.ic.warn{color:var(--bs-warning)}
 
-/* Staff accounts (auth.rs): what only an owner may do is not shown (the server refuses it anyway). */
-body[data-role="staff"] [data-owner]{display:none!important}
+/* Roles (auth.rs): what an account's role does not allow is not shown — the server refuses it anyway (auth.rs needs()).
+   data-owner: the owner's alone. data-perm="x": needs permission x; "vm": Vm or Maintain. body[data-perms] lists the
+   signed-in account's permissions (loadMe). */
+body:not([data-role="owner"]) [data-owner]{display:none!important}
+body:not([data-perms~="remote"]) [data-perm="remote"],
+body:not([data-perms~="wake"]) [data-perm="wake"],
+body:not([data-perms~="power"]) [data-perm="power"],
+body:not([data-perms~="games"]) [data-perm="games"],
+body:not([data-perms~="maintain"]) [data-perm="maintain"],
+body:not([data-perms~="versions"]) [data-perm="versions"],
+body:not([data-perms~="vm"]):not([data-perms~="maintain"]) [data-perm="vm"]{display:none!important}
