@@ -308,6 +308,7 @@ fn api_contract() {
             ("/api/power", json!({"action": "shutdown", "ids": []})),
             ("/api/roles", json!({"name": "mine", "perms": ["maintain"]})),
             ("/api/diskless/room", json!({"pc_gb": 0, "free_pct": 0})),
+            ("/api/diskless/windows", json!({"block_update": false})),
             ("/api/versions/keep-free", json!({"keep": true})),
         ] {
             let r = st.post(path, &body);
@@ -322,6 +323,18 @@ fn api_contract() {
             403
         );
         assert_eq!(st.get("/api/vm").status, 200, "looking at the VM's state");
+
+        // Windows on the machines (Diskless page): everything on until the owner turns one off; staff changed nothing.
+        let win = || h.get("/api/diskless").json()["windows"].clone();
+        let all_on = json!({"block_update": true, "block_browser_update": true, "block_driver_search": true,
+                            "games_first": true});
+        assert_eq!(win(), all_on);
+        let mut one_off = all_on.clone();
+        one_off["block_browser_update"] = json!(false);
+        assert_eq!(h.post("/api/diskless/windows", &one_off).status, 200);
+        assert_eq!(win(), one_off);
+        assert_eq!(h.post("/api/diskless/windows", &all_on).status, 200);
+        assert_eq!(win(), all_on);
 
         // A role the owner makes: its permissions, and nothing else; built-in names and unknown roles refused.
         let role = |v: serde_json::Value| h.post("/api/roles", &v);

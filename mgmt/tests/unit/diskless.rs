@@ -145,6 +145,7 @@ fn base_layer_plan() {
         host: Some(host.into()),
         lic,
         akey: "k1".into(),
+        prep: String::new(),
     };
     // First boot on g2 reported → promote at the next boot.
     assert_eq!(
@@ -154,7 +155,8 @@ fn base_layer_plan() {
             false,
             Some("PC01"),
             0,
-            "k1"
+            "k1",
+            ""
         ),
         (true, false)
     );
@@ -166,27 +168,60 @@ fn base_layer_plan() {
             false,
             Some("PC01"),
             0,
-            "k1"
+            "k1",
+            ""
         ),
         (false, false)
     );
     // Nothing reported: nothing kept, base untouched.
     assert_eq!(
-        base_plan(&st(None, "PC01", 0), Some(2), true, Some("PC01"), 0, "k1"),
+        base_plan(
+            &st(None, "PC01", 0),
+            Some(2),
+            true,
+            Some("PC01"),
+            0,
+            "k1",
+            ""
+        ),
         (false, false)
     );
     // Renamed on the Devices page, or a new licence: set up again.
     assert_eq!(
-        base_plan(&st(None, "PC01", 0), Some(2), true, Some("PC09"), 0, "k1"),
+        base_plan(
+            &st(None, "PC01", 0),
+            Some(2),
+            true,
+            Some("PC09"),
+            0,
+            "k1",
+            ""
+        ),
         (false, true)
     );
     assert_eq!(
-        base_plan(&st(None, "PC01", 0), Some(2), true, Some("PC01"), 1, "k1"),
+        base_plan(
+            &st(None, "PC01", 0),
+            Some(2),
+            true,
+            Some("PC01"),
+            1,
+            "k1",
+            ""
+        ),
         (false, true)
     );
     // A new agent key (Re-issue), or a base built before agents came to diskless machines: set up again.
     assert_eq!(
-        base_plan(&st(None, "PC01", 0), Some(2), true, Some("PC01"), 0, "k2"),
+        base_plan(
+            &st(None, "PC01", 0),
+            Some(2),
+            true,
+            Some("PC01"),
+            0,
+            "k2",
+            ""
+        ),
         (false, true)
     );
     let old = BaseState {
@@ -194,7 +229,7 @@ fn base_layer_plan() {
         ..st(None, "PC01", 0)
     };
     assert_eq!(
-        base_plan(&old, Some(2), true, Some("PC01"), 0, "k1"),
+        base_plan(&old, Some(2), true, Some("PC01"), 0, "k1", ""),
         (false, true)
     );
     // The first boot's report wins over a key change seen at the same boot: kept, the key compared next time.
@@ -205,13 +240,22 @@ fn base_layer_plan() {
             true,
             Some("PC01"),
             0,
-            "k2"
+            "k2",
+            ""
         ),
         (true, false)
     );
     // No base to drop.
     assert_eq!(
-        base_plan(&st(None, "PC01", 0), Some(2), false, Some("PC09"), 0, "k2"),
+        base_plan(
+            &st(None, "PC01", 0),
+            Some(2),
+            false,
+            Some("PC09"),
+            0,
+            "k2",
+            ""
+        ),
         (false, false)
     );
     // A stored state from before the key field still reads (no key = "").
@@ -484,9 +528,10 @@ fn rebuild_drops_the_base_at_the_next_boot() {
         host: Some("PC01".into()),
         lic: 3,
         akey: "abcd".into(),
+        prep: String::new(),
     };
     assert_eq!(
-        base_plan(&built, Some(7), true, Some("PC01"), 3, "abcd"),
+        base_plan(&built, Some(7), true, Some("PC01"), 3, "abcd", ""),
         (false, false)
     );
     let asked = BaseState {
@@ -494,11 +539,11 @@ fn rebuild_drops_the_base_at_the_next_boot() {
         ..built
     };
     assert_eq!(
-        base_plan(&asked, Some(7), true, Some("PC01"), 3, "abcd"),
+        base_plan(&asked, Some(7), true, Some("PC01"), 3, "abcd", ""),
         (false, true)
     );
     assert_eq!(
-        base_plan(&asked, Some(7), false, Some("PC01"), 3, "abcd"),
+        base_plan(&asked, Some(7), false, Some("PC01"), 3, "abcd", ""),
         (false, false)
     );
 }
@@ -518,4 +563,58 @@ fn windows_report_is_plain_and_short() {
         prep_report(&"x".repeat(5000)).len(),
         "; Windows: ".len() + 300
     );
+}
+
+/// Windows on the machines (Diskless page): a base stays while it was built with the settings of now; a base from
+/// before the settings could be chosen counts as built with all of them on, whatever its pagefile.
+#[test]
+fn windows_settings_changed_set_a_machine_up_again() {
+    let all_on = WinPrep::default();
+    assert!(
+        all_on.block_update
+            && all_on.block_browser_update
+            && all_on.block_driver_search
+            && all_on.games_first
+    );
+    assert_eq!(prep_id(&all_on, 0), "u1b1d1g1p0");
+    let no_browser = WinPrep {
+        block_browser_update: false,
+        ..all_on
+    };
+    assert_eq!(prep_id(&no_browser, 8), "u1b0d1g1p8");
+    // Stored settings: a field that is missing is on (a newer Broom's field, an empty config).
+    assert_eq!(serde_json::from_str::<WinPrep>("{}").unwrap(), all_on);
+    assert_eq!(
+        serde_json::from_str::<WinPrep>(r#"{"block_browser_update":false}"#).unwrap(),
+        no_browser
+    );
+
+    assert!(prep_same("u1b1d1g1p0", "u1b1d1g1p0"));
+    assert!(!prep_same("u1b1d1g1p0", "u1b0d1g1p0"));
+    assert!(!prep_same("u1b1d1g1p0", "u1b1d1g1p8")); // the pagefile
+    // An older base: kept while everything is on, whatever the pagefile is now; set up again once one is off.
+    assert!(prep_same("", "u1b1d1g1p0") && prep_same("", "u1b1d1g1p16"));
+    assert!(!prep_same("", "u1b0d1g1p0") && !prep_same("", "u1b1d1g0p0"));
+    // A Linux golden has no such settings.
+    assert!(prep_same("", "") && prep_same("u1b1d1g1p0", ""));
+
+    let built = BaseState {
+        pending: None,
+        host: Some("PC01".into()),
+        lic: 0,
+        akey: "k1".into(),
+        prep: "u1b1d1g1p0".into(),
+    };
+    let plan = |s: &BaseState, has_base: bool, prep: &str| {
+        base_plan(s, Some(3), has_base, Some("PC01"), 0, "k1", prep)
+    };
+    assert_eq!(plan(&built, true, "u1b1d1g1p0"), (false, false));
+    assert_eq!(plan(&built, true, "u1b0d1g1p0"), (false, true));
+    assert_eq!(plan(&built, false, "u1b0d1g1p0"), (false, false)); // no base to drop
+    // The first boot's report wins: the base is kept, the settings compared at the boot after.
+    let reported = BaseState {
+        pending: Some(3),
+        ..built.clone()
+    };
+    assert_eq!(plan(&reported, true, "u1b0d1g1p0"), (true, false));
 }

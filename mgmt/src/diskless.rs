@@ -53,6 +53,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/diskless/discard", post(discard))
         .route("/api/diskless/volume", post(set_volume))
         .route("/api/diskless/room", post(set_room))
+        .route("/api/diskless/windows", post(set_windows))
         .route("/api/diskless/rebuild", post(rebuild))
         .route("/api/diskless/iso/upload-start", post(iso_start))
         .route(
@@ -426,6 +427,10 @@ pub(crate) struct BaseState {
     /// in the base, so a new key — or a base from before agents came to diskless machines — means building it again.
     #[serde(default)]
     pub akey: String,
+    /// The Windows settings the base was built with (`prep_id`; Windows goldens): changed on the Diskless page since,
+    /// the machine sets itself up again. Empty = a base from before these settings could be chosen.
+    #[serde(default)]
+    pub prep: String,
 }
 
 fn base_key(golden: &str, mac: &str) -> String {
@@ -446,8 +451,9 @@ fn set_base_state(st: &SharedState, golden: &str, mac: &str, b: &BaseState) {
 }
 
 /// This boot's plan for a machine's layers: (promote the last session to its base, drop its base). Promote when its
-/// first boot on the version it was on reported its setup done; drop the base when the machine's name, licence or
-/// agent key changed since the base was built (the golden version changing drops it anyway, in the daemon).
+/// first boot on the version it was on reported its setup done; drop the base when the machine's name, licence,
+/// agent key or Windows settings (`prep`) changed since the base was built (the golden version changing drops it
+/// anyway, in the daemon).
 pub(crate) fn base_plan(
     s: &BaseState,
     session_ver: Option<u64>,
@@ -455,10 +461,15 @@ pub(crate) fn base_plan(
     host: Option<&str>,
     lic: i64,
     akey: &str,
+    prep: &str,
 ) -> (bool, bool) {
     let promote = s.pending.is_some() && s.pending == session_ver;
-    let drop =
-        !promote && has_base && (s.host.as_deref() != host || s.lic != lic || s.akey != akey);
+    let drop = !promote
+        && has_base
+        && (s.host.as_deref() != host
+            || s.lic != lic
+            || s.akey != akey
+            || !prep_same(&s.prep, prep));
     (promote, drop)
 }
 
@@ -962,6 +973,12 @@ pub(crate) fn boot_diskless(
     } else {
         bs.akey.clone()
     };
+    // Windows: what the machines set in Windows (Diskless page); a Linux golden has no such settings.
+    let prep = if g.os == "windows" {
+        prep_id(&win_prep(st), pagefile_gb(st))
+    } else {
+        bs.prep.clone()
+    };
     let (promote, drop_base) = base_plan(
         &bs,
         mine.as_ref().and_then(|x| x.session_ver),
@@ -969,7 +986,15 @@ pub(crate) fn boot_diskless(
         m.hostname.as_deref(),
         m.license_gen,
         &akey,
+        &prep,
     );
+    if drop_base && !prep_same(&bs.prep, &prep) {
+        tracing::info!(
+            "golden {name}: {} sets itself up again at this boot (Windows on the machines changed on the Diskless \
+             page)",
+            who(m)
+        );
+    }
     // Its last sessions were just told to close (a reset PC never logged out): that takes a moment — asked again
     // soon, then less often, for up to CLOSE_S. Only this machine waits here; the others are prepared meanwhile.
     let mut pause = std::time::Duration::from_millis(10);
@@ -1287,9 +1312,16 @@ async fn client(
         .map_err(ise)??;
     let v = if let Some((g, x)) = on {
         let first = x.base_ver.is_none() || x.base_ver != x.session_ver;
+        let (w, pf) = (win_prep(&st), pagefile_gb(&st));
+        if first {
+            // What this first boot is told to set: kept with its base when it reports the setup done.
+            PREP_SENT
+                .lock()
+                .insert(golden::mac12(&m.mac).unwrap_or_default(), prep_id(&w, pf));
+        }
         serde_json::json!({
             "role": "diskless", "golden": g, "ver": x.session_ver, "first": first, "host": m.hostname,
-            "gateway": router_of(&m.mac), "pagefile_gb": pagefile_gb(&st),
+            "gateway": router_of(&m.mac), "pagefile_gb": pf, "windows": w,
         })
     } else {
         let role = if goldens(&st).iter().any(|g| g.maint == Some(m.id)) {
@@ -1379,6 +1411,10 @@ async fn base_done(
             host: m.hostname.clone(),
             lic: m.license_gen,
             akey: crate::agentauth::fingerprint(&st, &m.mac),
+            prep: PREP_SENT
+                .lock()
+                .remove(&golden::mac12(&m.mac).unwrap_or_default())
+                .unwrap_or_else(|| prep_id(&win_prep(&st), pagefile_gb(&st))),
         },
     );
     tracing::info!(
@@ -1506,6 +1542,7 @@ async fn status(State(st): State<SharedState>) -> Result<Json<serde_json::Value>
         "places": places,
         "room": {"pc_gb": pc_gb(&st), "free_pct": free_pct(&st), "fair_gb": crate::iscsid::overlay::FAIR >> 30,
                  "pagefile_gb": pagefile_gb(&st)},
+        "windows": win_prep(&st),
         "machines": machines,
         // The address the machines reach the server at (boot LAN), for the commands shown on the page.
         "server": st.db.get_config("dhcp_server_ip", ""),
@@ -1935,6 +1972,92 @@ pub(crate) fn pagefile_gb(st: &SharedState) -> u64 {
         .ok()
         .filter(|g| *g <= PAGEFILE_MAX)
         .unwrap_or(0)
+}
+
+/// What a Windows diskless machine sets in Windows while it builds its base (broom-diskless.ps1's Prep), chosen on
+/// the Diskless page; all on by default. Off = that part of Windows is left as the golden has it.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(default)]
+pub(crate) struct WinPrep {
+    /// No Windows Update on the machines (it would start over after every wipe).
+    pub block_update: bool,
+    /// Edge and Chrome do not update themselves on the machines.
+    pub block_browser_update: bool,
+    /// No driver search on Windows Update.
+    pub block_driver_search: bool,
+    /// The games drives are there before the logon (the logon waits for them).
+    pub games_first: bool,
+}
+
+impl Default for WinPrep {
+    fn default() -> Self {
+        WinPrep {
+            block_update: true,
+            block_browser_update: true,
+            block_driver_search: true,
+            games_first: true,
+        }
+    }
+}
+
+const WINPREP_KEY: &str = "diskless_windows";
+
+pub(crate) fn win_prep(st: &SharedState) -> WinPrep {
+    serde_json::from_str(&st.db.get_config(WINPREP_KEY, "{}")).unwrap_or_default()
+}
+
+/// The settings a base is built with, as one short text kept with the base (`BaseState.prep`).
+pub(crate) fn prep_id(w: &WinPrep, pagefile_gb: u64) -> String {
+    format!(
+        "u{}b{}d{}g{}p{pagefile_gb}",
+        w.block_update as u8,
+        w.block_browser_update as u8,
+        w.block_driver_search as u8,
+        w.games_first as u8
+    )
+}
+
+/// Is a base built with `built` still right for the settings `now`? A base from before the settings could be chosen
+/// (`built` empty) was made with all of them on, and with a pagefile nobody recorded: it stays while they are all on.
+/// `now` empty: a golden without such settings (Linux).
+pub(crate) fn prep_same(built: &str, now: &str) -> bool {
+    if now.is_empty() {
+        return true;
+    }
+    if built.is_empty() {
+        return now.starts_with(&prep_id(&WinPrep::default(), 0)[..8]);
+    }
+    built == now
+}
+
+/// What each first boot was told to set (by MAC), until it reports its setup done: the settings may change in
+/// between, and the base must be kept with the ones it was built with.
+static PREP_SENT: parking_lot::Mutex<std::collections::BTreeMap<String, String>> =
+    parking_lot::Mutex::new(std::collections::BTreeMap::new());
+
+/// POST /api/diskless/windows {block_update, block_browser_update, block_driver_search, games_first} (owner) — what
+/// the Windows machines set while they build their base. A change makes each machine set itself up again at its
+/// next boot (its base is dropped then). A field not sent is on.
+async fn set_windows(
+    State(st): State<SharedState>,
+    Json(w): Json<WinPrep>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let was = win_prep(&st);
+    st.db
+        .set_config(WINPREP_KEY, &serde_json::to_string(&w).map_err(ise)?)
+        .map_err(ise)?;
+    if w != was {
+        let onoff = |b: bool| if b { "off" } else { "left on" };
+        tracing::info!(
+            "diskless: Windows on the machines — Windows Update {}, browser updates {}, driver search {}, games \
+             drives before the logon {} — each machine sets itself up again at its next boot",
+            onoff(w.block_update),
+            onoff(w.block_browser_update),
+            onoff(w.block_driver_search),
+            if w.games_first { "on" } else { "off" }
+        );
+    }
+    Ok(ok())
 }
 
 #[derive(Deserialize)]

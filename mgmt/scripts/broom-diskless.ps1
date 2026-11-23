@@ -34,11 +34,16 @@ function step($m) {
 $me = $MyInvocation.MyCommand.Path
 
 # Windows settings for a disk on the network that is wiped at every boot. $pc = a machine building its base: also no
-# Windows Update / browser update / driver search (they would start over after every wipe) and its pagefile ($pagefile
-# GB, 0 = none, -1 = left alone). Not $pc = the golden itself (installing, its maintenance machine or VM): updates and
-# drivers stay on. Every step on its own: one that fails is reported, the others still count. Returns what it did.
-function Prep([bool]$pc, [int]$pagefile = -1) {
+# Windows Update / browser update / driver search (they would start over after every wipe), the games drives before
+# the logon and its pagefile ($pagefile GB, 0 = none, -1 = left alone). Those four are the Diskless page's choice
+# ("Windows on the machines"; $w = the server's answer "windows"): one turned off there is left as the golden has it
+# and reported as update=on / browserupdate=on / drivers=on / gamesfirst=off. Not $pc = the golden itself
+# (installing, its maintenance machine or VM): updates and drivers stay on. Every step on its own: one that fails is
+# reported, the others still count. Returns what it did.
+function Prep([bool]$pc, [int]$pagefile = -1, $w = $null) {
   $did = @()
+  # A setting the server does not name (an older server, nothing chosen yet) is on.
+  function Want($n) { ($null -eq $w) -or ($null -eq $w.$n) -or [bool]$w.$n }
   function Dw($k, $n, $v) { & reg.exe add $k /v $n /t REG_DWORD /d $v /f | Out-Null; if ($LASTEXITCODE) { throw "reg add $k $n" } }
   function Off($svc) { Set-Service -Name $svc -StartupType Disabled -ErrorAction Stop; Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue }
   # No automatic device encryption (Windows 11 turns it on by itself on a PC with a TPM): the disk is the server's.
@@ -73,37 +78,43 @@ function Prep([bool]$pc, [int]$pagefile = -1) {
   $ws = 'HKLM\SOFTWARE\Policies\Microsoft\WindowsStore'
   $cur = 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching'
   if ($pc) {
-    try {
-      Dw "$wu\AU" NoAutoUpdate 1
-      Dw $ws AutoDownload 2
-      # The update orchestrator too, not only the policy: an update the golden was saved with half installed is taken
-      # up again by it at every boot whatever the policy says (seen: 2.7 GB written by its installer in a boot's
-      # first minutes, every boot, never finished: the session is dropped at the reset). The Windows Update service
-      # itself is only stopped and stays on demand: Windows put it back to manual two seconds after it was disabled
-      # here, and had it running again later in the boot (both seen on a lab machine).
-      Off UsoSvc
-      foreach ($svc in 'wuauserv', 'DoSvc') { Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue }
-      $did += 'update=off'
-    } catch { $did += 'update=FAILED' }
+    if (Want block_update) {
+      try {
+        Dw "$wu\AU" NoAutoUpdate 1
+        Dw $ws AutoDownload 2
+        # The update orchestrator too, not only the policy: an update the golden was saved with half installed is taken
+        # up again by it at every boot whatever the policy says (seen: 2.7 GB written by its installer in a boot's
+        # first minutes, every boot, never finished: the session is dropped at the reset). The Windows Update service
+        # itself is only stopped and stays on demand: Windows put it back to manual two seconds after it was disabled
+        # here, and had it running again later in the boot (both seen on a lab machine).
+        Off UsoSvc
+        foreach ($svc in 'wuauserv', 'DoSvc') { Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue }
+        $did += 'update=off'
+      } catch { $did += 'update=FAILED' }
+    } else { $did += 'update=on' }
     # The browsers update themselves (Edge, Chrome and whatever else comes with Google's updater), and that too starts
     # over after every wipe: seen on a lab machine, Edge fetched and installed its next version 22 minutes into a
     # boot, 1.4 GB into a session that is dropped. Their updater services and tasks are off on the machines; the
     # golden keeps them, so the browsers are updated where Windows is: in a maintenance session.
-    try {
-      $n = 0
-      $svcs = Get-Service | Where-Object { $_.Name -match '^(edgeupdate|edgeupdatem|gupdate|gupdatem|GoogleUpdater(Internal)?Service.*)$' }
-      foreach ($s in $svcs) { Off $s.Name; $n++ }
-      $tasks = Get-ScheduledTask | Where-Object { $_.TaskName -match '^(MicrosoftEdgeUpdateTask|GoogleUpdateTask|GoogleUpdaterTask)' }
-      foreach ($t in $tasks) { $t | Disable-ScheduledTask -ErrorAction Stop | Out-Null; $n++ }
-      $did += $(if ($n) { 'browserupdate=off' } else { 'browserupdate=none' })
-    } catch { $did += 'browserupdate=FAILED' }
-    try {
-      Dw $wu ExcludeWUDriversInQualityUpdate 1
-      Dw $ds SearchOrderConfig 0
-      Dw $cur SearchOrderConfig 0
-      Dw $dm PreventDeviceMetadataFromNetwork 1
-      $did += 'drivers=off'
-    } catch { $did += 'drivers=FAILED' }
+    if (Want block_browser_update) {
+      try {
+        $n = 0
+        $svcs = Get-Service | Where-Object { $_.Name -match '^(edgeupdate|edgeupdatem|gupdate|gupdatem|GoogleUpdater(Internal)?Service.*)$' }
+        foreach ($s in $svcs) { Off $s.Name; $n++ }
+        $tasks = Get-ScheduledTask | Where-Object { $_.TaskName -match '^(MicrosoftEdgeUpdateTask|GoogleUpdateTask|GoogleUpdaterTask)' }
+        foreach ($t in $tasks) { $t | Disable-ScheduledTask -ErrorAction Stop | Out-Null; $n++ }
+        $did += $(if ($n) { 'browserupdate=off' } else { 'browserupdate=none' })
+      } catch { $did += 'browserupdate=FAILED' }
+    } else { $did += 'browserupdate=on' }
+    if (Want block_driver_search) {
+      try {
+        Dw $wu ExcludeWUDriversInQualityUpdate 1
+        Dw $ds SearchOrderConfig 0
+        Dw $cur SearchOrderConfig 0
+        Dw $dm PreventDeviceMetadataFromNetwork 1
+        $did += 'drivers=off'
+      } catch { $did += 'drivers=FAILED' }
+    } else { $did += 'drivers=on' }
     # The games drives before the logon. Left to the agent (three PowerShell processes one after the other) they came
     # 50 s after the desktop on a lab machine: a launcher that starts with the desktop finds its library missing. So
     # broom-games.ps1 also gets a task of its own (BroomGames, no trigger), and a machine startup script of the local
@@ -112,44 +123,46 @@ function Prep([bool]$pc, [int]$pagefile = -1) {
     # script's process has no SeManageVolumePrivilege and cannot attach a VHDX ("A required privilege is not held by
     # the client"; a task run as SYSTEM can). The task leaves broom-games.done when it ends, however it ends; the
     # startup script waits for that file for 2 minutes at most (the task itself gives up on the server after 30 s).
-    try {
-      $done = "$env:SystemRoot\Temp\broom-games.done"
-      $cmd = "/c powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$dir\broom-games.ps1`" -Srv $srv -WaitS 30 & echo.> `"$done`""
-      $act = New-ScheduledTaskAction -Execute cmd.exe -Argument $cmd
-      $set = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-      Register-ScheduledTask -TaskName BroomGames -Action $act -Settings $set -User SYSTEM -RunLevel Highest -Force | Out-Null
-      $gp = "$env:SystemRoot\System32\GroupPolicy"
-      $ini = "$gp\Machine\Scripts\scripts.ini"
-      $have = if (Test-Path $ini) { [IO.File]::ReadAllText($ini) } else { '' }
-      if ($have -notmatch 'BroomGames') {
-        # Startup scripts someone set up on the golden: not rewritten here (and the drives keep coming the old way).
-        if ($have -match '(?m)^\s*\d+CmdLine=') { throw 'this Windows has startup scripts of its own' }
-        New-Item -ItemType Directory -Force -Path "$gp\Machine\Scripts\Startup", "$gp\Machine\Scripts\Shutdown" | Out-Null
-        if (Test-Path $ini) { Remove-Item -LiteralPath $ini -Force }
-        $wait = "/c del `"$done`" 2>nul & schtasks /run /tn BroomGames >nul 2>&1 && for /l %i in (1,1,120) do @if not exist `"$done`" ping -n 2 127.0.0.1 >nul"
-        [IO.File]::WriteAllText($ini, "`r`n[Startup]`r`n0CmdLine=cmd.exe`r`n0Parameters=$wait`r`n", [Text.Encoding]::Unicode)
-        (Get-Item -LiteralPath $ini -Force).Attributes = 'Hidden'
-        # gpt.ini: the Scripts extension among the machine's, and a higher version, or Windows does not read the file.
-        $g = "$gp\gpt.ini"
-        $t = if (Test-Path $g) { [IO.File]::ReadAllText($g) } else { "[General]`r`n" }
-        $ext = @('[{42B5FAAE-6536-11D2-AE5A-0000F87571E3}{40B6664F-4972-11D1-A7CA-0000F87571E3}]')
-        if ($t -match '(?m)^gPCMachineExtensionNames=(.*)$') { $ext += [regex]::Matches($Matches[1], '\[[^\]]+\]') | ForEach-Object { $_.Value } }
-        $line = 'gPCMachineExtensionNames=' + (($ext | Sort-Object -Unique) -join '')
-        if ($t -match '(?m)^gPCMachineExtensionNames=') { $t = [regex]::Replace($t, '(?m)^gPCMachineExtensionNames=.*$', { $line }) } else { $t = $t.TrimEnd() + "`r`n$line`r`n" }
-        $v = 0; if ($t -match '(?m)^Version=(\d+)') { $v = [int]$Matches[1] }
-        $v = ($v -band 0x7FFF0000) + ((($v -band 0xFFFF) + 1) -band 0xFFFF)
-        if ($t -match '(?m)^Version=\d+') { $t = [regex]::Replace($t, '(?m)^Version=\d+', "Version=$v") } else { $t = $t.TrimEnd() + "`r`nVersion=$v`r`n" }
-        [IO.File]::WriteAllText($g, $t, [Text.Encoding]::ASCII)
-      }
-      Dw 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' RunStartupScriptSync 1
-      Dw 'HKLM\SOFTWARE\Policies\Microsoft\Windows NT\CurrentVersion\Winlogon' SyncForegroundPolicy 1
-      & gpupdate.exe /target:computer /force | Out-Null
-      # What Windows took over from scripts.ini (read with .NET: Get-ItemProperty fails on this key, "Specified cast is
-      # not valid").
-      $reg = [Microsoft.Win32.Registry]::GetValue('HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Startup\0\0', 'Parameters', '')
-      if ([string]$reg -notmatch 'BroomGames') { throw 'the startup script did not register' }
-      $did += 'gamesfirst=on'
-    } catch { step "games drives before the logon NOT set up: $_"; $did += 'gamesfirst=FAILED' }
+    if (Want games_first) {
+      try {
+        $done = "$env:SystemRoot\Temp\broom-games.done"
+        $cmd = "/c powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$dir\broom-games.ps1`" -Srv $srv -WaitS 30 & echo.> `"$done`""
+        $act = New-ScheduledTaskAction -Execute cmd.exe -Argument $cmd
+        $set = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+        Register-ScheduledTask -TaskName BroomGames -Action $act -Settings $set -User SYSTEM -RunLevel Highest -Force | Out-Null
+        $gp = "$env:SystemRoot\System32\GroupPolicy"
+        $ini = "$gp\Machine\Scripts\scripts.ini"
+        $have = if (Test-Path $ini) { [IO.File]::ReadAllText($ini) } else { '' }
+        if ($have -notmatch 'BroomGames') {
+          # Startup scripts someone set up on the golden: not rewritten here (and the drives keep coming the old way).
+          if ($have -match '(?m)^\s*\d+CmdLine=') { throw 'this Windows has startup scripts of its own' }
+          New-Item -ItemType Directory -Force -Path "$gp\Machine\Scripts\Startup", "$gp\Machine\Scripts\Shutdown" | Out-Null
+          if (Test-Path $ini) { Remove-Item -LiteralPath $ini -Force }
+          $wait = "/c del `"$done`" 2>nul & schtasks /run /tn BroomGames >nul 2>&1 && for /l %i in (1,1,120) do @if not exist `"$done`" ping -n 2 127.0.0.1 >nul"
+          [IO.File]::WriteAllText($ini, "`r`n[Startup]`r`n0CmdLine=cmd.exe`r`n0Parameters=$wait`r`n", [Text.Encoding]::Unicode)
+          (Get-Item -LiteralPath $ini -Force).Attributes = 'Hidden'
+          # gpt.ini: the Scripts extension among the machine's, and a higher version, or Windows does not read the file.
+          $g = "$gp\gpt.ini"
+          $t = if (Test-Path $g) { [IO.File]::ReadAllText($g) } else { "[General]`r`n" }
+          $ext = @('[{42B5FAAE-6536-11D2-AE5A-0000F87571E3}{40B6664F-4972-11D1-A7CA-0000F87571E3}]')
+          if ($t -match '(?m)^gPCMachineExtensionNames=(.*)$') { $ext += [regex]::Matches($Matches[1], '\[[^\]]+\]') | ForEach-Object { $_.Value } }
+          $line = 'gPCMachineExtensionNames=' + (($ext | Sort-Object -Unique) -join '')
+          if ($t -match '(?m)^gPCMachineExtensionNames=') { $t = [regex]::Replace($t, '(?m)^gPCMachineExtensionNames=.*$', { $line }) } else { $t = $t.TrimEnd() + "`r`n$line`r`n" }
+          $v = 0; if ($t -match '(?m)^Version=(\d+)') { $v = [int]$Matches[1] }
+          $v = ($v -band 0x7FFF0000) + ((($v -band 0xFFFF) + 1) -band 0xFFFF)
+          if ($t -match '(?m)^Version=\d+') { $t = [regex]::Replace($t, '(?m)^Version=\d+', "Version=$v") } else { $t = $t.TrimEnd() + "`r`nVersion=$v`r`n" }
+          [IO.File]::WriteAllText($g, $t, [Text.Encoding]::ASCII)
+        }
+        Dw 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' RunStartupScriptSync 1
+        Dw 'HKLM\SOFTWARE\Policies\Microsoft\Windows NT\CurrentVersion\Winlogon' SyncForegroundPolicy 1
+        & gpupdate.exe /target:computer /force | Out-Null
+        # What Windows took over from scripts.ini (read with .NET: Get-ItemProperty fails on this key, "Specified cast is
+        # not valid").
+        $reg = [Microsoft.Win32.Registry]::GetValue('HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Startup\0\0', 'Parameters', '')
+        if ([string]$reg -notmatch 'BroomGames') { throw 'the startup script did not register' }
+        $did += 'gamesfirst=on'
+      } catch { step "games drives before the logon NOT set up: $_"; $did += 'gamesfirst=FAILED' }
+    } else { $did += 'gamesfirst=off' }
     if ($pagefile -ge 0) {
       try {
         # Not Windows' own choice (as large as it likes, on a disk that is the server's): none, or one fixed size.
@@ -302,7 +315,7 @@ if ($info.first) {
   # First boot of this machine on this golden version: its own setup, then the restart that keeps it as its base.
   $pfg = -1
   if ($null -ne $info.pagefile_gb) { $pfg = [int]$info.pagefile_gb }
-  $prep = Prep $true $pfg
+  $prep = Prep $true $pfg $info.windows
   step "prepared: $prep"
   if ($info.host -and ($info.host -ne $env:COMPUTERNAME)) {
     step "machine name $env:COMPUTERNAME -> $($info.host)"
