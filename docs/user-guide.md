@@ -8,7 +8,7 @@ last_modified_at: 2026-10-29
 [← Broom](index.md)
 
 This guide walks through Broom from an empty server to a room in daily use. Each part says where to click in the web
-admin. The [README](https://github.com/morningstar-sudo/broom#readme) is the reference: every option, the security
+admin. The [README](https://github.com/Mojo-LB/broom2#readme) is the reference: every option, the security
 model and how to build from source.
 
 **Contents:** [1. Plan](#plan) · [2. Install the server](#install) ·
@@ -24,7 +24,7 @@ model and how to build from source.
 
 - **Server:** an x86_64 Linux machine (Debian/Ubuntu or Rocky Linux 10 are tested), run as root. Its network link and
   disks decide how many PCs it serves: up to 30 PCs on 1 GbE with an SSD, 30–60 on 10 GbE with NVMe, 60–100 on 2×
-  10 GbE bonded or 25 GbE with PCIe 4 NVMe and 64 GB of RAM ([Sizing](https://github.com/morningstar-sudo/broom#sizing)).
+  10 GbE bonded or 25 GbE with PCIe 4 NVMe and 64 GB of RAM ([Sizing](https://github.com/Mojo-LB/broom2#sizing)).
 - **Disk for the images:** a golden is a raw disk, usually 20–50 GB of data. Keep room for the goldens, their versions
   and one extra golden while a rollback rebuilds it. **Give the images a disk formatted by Broom** (XFS): there,
   versions share the data they have in common and each one costs only what changed. On ext4 every version takes its
@@ -40,8 +40,8 @@ Use a **fixed directory**: the binary keeps its database and images next to itse
 
 ```bash
 sudo mkdir -p /opt/bootrom && cd /opt/bootrom
-sudo curl -fLO https://github.com/morningstar-sudo/broom/releases/latest/download/bootrom-mgmt
-sudo curl -fLO https://github.com/morningstar-sudo/broom/releases/latest/download/SHA256SUMS
+sudo curl -fLO https://github.com/Mojo-LB/broom2/releases/latest/download/bootrom-mgmt
+sudo curl -fLO https://github.com/Mojo-LB/broom2/releases/latest/download/SHA256SUMS
 sha256sum --ignore-missing -c SHA256SUMS   # must say: bootrom-mgmt: OK
 sudo chmod +x bootrom-mgmt
 sudo ./bootrom-mgmt install-service

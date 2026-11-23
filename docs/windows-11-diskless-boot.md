@@ -41,8 +41,8 @@ base: a new or updated one is installed once (one extra restart) and needs no ne
 
 ```bash
 sudo mkdir -p /opt/bootrom && cd /opt/bootrom
-sudo curl -fLO https://github.com/morningstar-sudo/broom/releases/latest/download/bootrom-mgmt
-sudo curl -fLO https://github.com/morningstar-sudo/broom/releases/latest/download/SHA256SUMS
+sudo curl -fLO https://github.com/Mojo-LB/broom2/releases/latest/download/bootrom-mgmt
+sudo curl -fLO https://github.com/Mojo-LB/broom2/releases/latest/download/SHA256SUMS
 sha256sum --ignore-missing -c SHA256SUMS   # must say: bootrom-mgmt: OK
 sudo chmod +x bootrom-mgmt
 sudo ./bootrom-mgmt install-service
@@ -119,4 +119,4 @@ PC restarts once by itself, and from then on every boot is clean.
   plugged in gets no internet. Block outside DNS (ports 53, 853) on the router to make it stick.
 
 The [user guide](user-guide.md) goes through daily use step by step; the
-[full manual](https://github.com/morningstar-sudo/broom#readme) covers every option, backup and security.
+[full manual](https://github.com/Mojo-LB/broom2#readme) covers every option, backup and security.
