@@ -13,17 +13,26 @@
 # Why mode 2 (diskless): such a machine has no SSD to hold a differencing VHDX, so its writes (game settings, saves,
 # shader caches) go to its own layer on the server instead, and that layer is dropped at its next PXE boot - the same
 # clean-every-boot rule as the SSD machines, one sparse copy per machine rather than a full copy of the disk.
-param([string]$Srv, [string]$LinesFile)
+# A diskless machine also runs this BEFORE LOGON (task BroomGames, started and waited for by a machine startup script,
+# both set up in its base by broom-diskless.ps1): its games drives are there when the desktop and whatever starts with
+# it (game launchers) come up. -WaitS: how long that run waits for the server before it lets the logon go on (the
+# agent's run comes later).
+param([string]$Srv, [string]$LinesFile, [int]$WaitS = 90)
 $ErrorActionPreference = 'Stop'
+# One run at a time: the run before logon and the agent's would attach the same disk side by side (seen: "The
+# requested access path is already in use"). The second waits, then finds every drive up and has nothing to do.
+$one = New-Object Threading.Mutex($false, 'Global\BroomGames')
+try { [void]$one.WaitOne(180000) } catch [Threading.AbandonedMutexException] { }
+function Done { try { $one.ReleaseMutex() } catch { }; exit }
 # The run at startup comes before the network is up (DHCP): wait for the server up to ~90 s instead of giving up
 # until the next run 5 minutes later.
 $list = $null
 if ($LinesFile) { $list = [IO.File]::ReadAllText($LinesFile) }
-$until = (Get-Date).AddSeconds(90)
+$until = (Get-Date).AddSeconds($WaitS)
 while ($null -eq $list -and (Get-Date) -lt $until) {
   try { $list = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 -Uri "http://$Srv/api/games/for").Content } catch { Start-Sleep 3 }
 }
-if ($null -eq $list) { exit }
+if ($null -eq $list) { Done }
 
 $log = "$env:SystemRoot\Temp\broom-games.log"
 function Log($m) { Add-Content -Encoding ascii $log ((Get-Date -Format s) + ' ' + $m) }
@@ -67,6 +76,24 @@ function SetLetter($vd, $L) {
   if ($vd.IsOffline) { Set-Disk -Number $vd.Number -IsOffline $false }
   $q = BasicPart $vd.Number
   if ($q.DriveLetter -ne [char]$L) { Set-Partition -DiskNumber $vd.Number -PartitionNumber $q.PartitionNumber -NewDriveLetter $L }
+}
+# A VHDX attached, its disk returned. Attached with Mount-DiskImage -NoDriveLetter: diskpart's "attach vdisk" lets
+# Windows give the volume the first free letter until SetLetter moves it (seen on diskless machines: D: for 7 to 10
+# seconds, then G: - a launcher started in between finds its library on the wrong drive, then loses it), and diskpart
+# was seen failing before the logon ("DiskPart encountered an error starting the COM services"). Mount-DiskImage
+# needs SeManageVolumePrivilege: a task run as SYSTEM has it, a Group Policy startup script's process does not. The
+# disk's number comes a moment after Mount-DiskImage returns. diskpart stays as the fallback.
+function Attach($file) {
+  if (-not (Get-DiskImage -ImagePath $file).Attached) {
+    try { Mount-DiskImage -ImagePath $file -NoDriveLetter -ErrorAction Stop | Out-Null }
+    catch { Log "$file - Mount-DiskImage: $($_.Exception.Message) - attached with diskpart"; DP "select vdisk file=`"$file`"", 'attach vdisk' }
+  }
+  for ($i = 0; $i -lt 150; $i++) {
+    $n = (Get-DiskImage -ImagePath $file).Number
+    if ($null -ne $n) { $d = Get-Disk -Number $n -ErrorAction SilentlyContinue; if ($d) { return $d } }
+    Start-Sleep -Milliseconds 200
+  }
+  throw "$file is attached but its disk did not show up"
 }
 
 function GamesDisk($name, $iqn, $L, $mode) {
@@ -119,8 +146,7 @@ function GamesDisk($name, $iqn, $L, $mode) {
       Log "$name - games.vhdx grown to $mb MB"
       DP "select vdisk file=`"$vhd`"", "expand vdisk maximum=$mb"
     }
-    if (-not (Get-DiskImage -ImagePath $vhd).Attached) { DP "select vdisk file=`"$vhd`"", 'attach vdisk' }
-    $vd = Get-DiskImage -ImagePath $vhd | Get-Disk
+    $vd = Attach $vhd
     if ($vd.PartitionStyle -eq 'RAW') { NewNtfs $vd.Number $name.ToUpper() }
     $null = Grow (BasicPart $vd.Number)
     SetLetter $vd $L
@@ -139,8 +165,7 @@ function GamesDisk($name, $iqn, $L, $mode) {
     MountAt $p $store
     Hide $p $false
     if (-not (Test-Path $vhd)) { throw 'no games.vhdx on the disk yet: set it up from its update machine first' }
-    if (-not (Get-DiskImage -ImagePath $vhd).Attached) { DP "select vdisk file=`"$vhd`"", 'attach vdisk' }
-    SetLetter (Get-DiskImage -ImagePath $vhd | Get-Disk) $L
+    SetLetter (Attach $vhd) $L
     Log "$name - diskless: its own copy as ${L}: (writes dropped at the next PXE boot)"
   } else {
     # 2b. Every other machine: games.vhdx read-only under this boot's differencing disk on the SSD (BROOMWIN: C: is
@@ -154,9 +179,9 @@ function GamesDisk($name, $iqn, $L, $mode) {
     $ci = Get-DiskImage -ImagePath $child -ErrorAction SilentlyContinue
     if (-not ($ci -and $ci.Attached)) {
       if (Test-Path $child) { Remove-Item -Force $child }   # made over another version: never reused
-      DP "create vdisk file=`"$child`" parent=`"$vhd`"", "select vdisk file=`"$child`"", 'attach vdisk'
+      DP "create vdisk file=`"$child`" parent=`"$vhd`""
     }
-    SetLetter (Get-DiskImage -ImagePath $child | Get-Disk) $L
+    SetLetter (Attach $child) $L
   }
 }
 
@@ -168,14 +193,15 @@ function Up($name, $L) {
 $re = '^([a-z0-9-]+) (\S+) ([D-Z]) ([012])\s*$'
 # Every disk already up (the 5-minute runs, nearly always) -> nothing to do.
 $lines = @($list -split "`n" | Where-Object { $_ -match $re -and -not (Up $Matches[1] $Matches[3]) })
-if ($lines.Count -eq 0) { exit }
+if ($lines.Count -eq 0) { Done }
 try {
   # The initiator service is manual by default.
   Set-Service MSiSCSI -StartupType Automatic
   Start-Service MSiSCSI
-} catch { Log $_.Exception.Message; exit }
+} catch { Log $_.Exception.Message; Done }
 foreach ($l in $lines) {
   $null = $l -match $re
   $name = $Matches[1]
   try { GamesDisk $name $Matches[2] $Matches[3] $Matches[4] } catch { Log "$name - $($_.Exception.Message)" }
 }
+Done

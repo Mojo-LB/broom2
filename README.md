@@ -259,9 +259,14 @@ PC down.
 - **Games disks on diskless machines:** a diskless Windows machine has no SSD for its writes, so each one gets its own
   copy of every games disk of its group on the server (target `<disk iqn>.m<mac>`: the disk's newest version + the
   machine's own layer in `<writeback>/.games-<disk>/<mac>/`, dropped at its next PXE boot — like the per-PC writeback
-  of commercial diskless systems). `broom-games.ps1` (run by `broom-watch.ps1 -Dir` at start and every 5
-  minutes) logs in to it and attaches its `games.vhdx` writable as the disk's letter. The disk's update machine (a
-  diskless one too) gets the disk itself, writable, as on SSD machines; Save makes the next version, which every
+  of commercial diskless systems). `broom-games.ps1` logs in to it and attaches its `games.vhdx` writable as the
+  disk's letter. **The drives are there before the desktop:** each machine's base holds a task (`BroomGames`) and a
+  machine startup script (local Group Policy) that starts it and that Windows waits for, so the logon — and a game
+  launcher that starts with it — comes after the drives; the volume gets its letter directly, never another one
+  first. It gives up on the server after 30 s (the startup script after 2 minutes), and `broom-watch.ps1 -Dir` runs
+  the script again at start and every 5 minutes. A golden that has startup scripts of its own keeps them: there the
+  drives come with the agent only (`gamesfirst=FAILED` in the machine's first-boot line). The disk's update machine
+  (a diskless one too) gets the disk itself, writable, as on SSD machines; Save makes the next version, which every
   machine's copy reads from its next boot.
 - **Maintain in the browser (Windows):** the Diskless page runs a golden in a VM on the server (QEMU/KVM, 4 CPU
   threads and 8 GB unless you set its size on that page — at most the server's threads less 4 and its memory less
