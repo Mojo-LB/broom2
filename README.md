@@ -34,8 +34,10 @@ labs, up to ~100 PCs per server (see [Sizing](#sizing)).
 
 ## This fork
 
-A fork of [Broom](https://github.com/morningstar-sudo/broom), kept in step with it, that adds
-[diskless machines](#diskless-machines-no-ssd) and the machine features above (offered upstream as one pull request).
+A fork of [Broom](https://github.com/morningstar-sudo/broom), kept in step with it. Its
+[diskless machines](#diskless-machines-no-ssd) work and the machine features above are part of Broom itself since
+November 2026 (upstream's pull request #3); beyond upstream's `main` this fork holds a few later fixes on their way
+there.
 Releases, downloads and build attestations in this README are this fork's
 ([Mojo-LB/broom2](https://github.com/Mojo-LB/broom2)). Diskless is tested on virtual-machine clients so far, not yet
 on real PCs or in production (see [Tested so far](#diskless-machines-no-ssd)).
@@ -75,6 +77,18 @@ their own layer over it. Every boot resets to `base ← drivers ← fresh child`
 ## Requirements
 
 - **Server:** x86_64 Linux (tested on Debian/Ubuntu and Rocky Linux 10), run as root, disk space for the goldens.
+  **No packages to install** for the boot server itself (DHCP, TFTP, iSCSI, DNS, the web admin, image conversion, NTFS
+  reading are all in the binary; no kernel modules). Only two optional parts use programs of the system:
+  - **The VM features** (*Maintain in the browser* and *Add hardware* on the Diskless page): QEMU, OVMF and `/dev/kvm`.
+    The Diskless page shows what is missing and an owner installs it with **Install** (it detects apt, dnf or yum and
+    runs the command as root). The VM's disk comes from Broom's own daemon over a Unix socket and *Add hardware*'s job
+    over HTTP, so no `open-iscsi` and no `ntfs-3g`.
+  - **Formatting a server disk** (*Server → Disks*): `mkfs.xfs` (package `xfsprogs`) for XFS with reflink; without it
+    the disk is formatted ext4, where versions do not share their data. The Server packages card on the Diskless page
+    installs it too, and the format result says when a disk came out ext4.
+
+  `install-service` needs systemd. Where systemd is there, the iSCSI daemon and the VM run as its transient units;
+  without it they start as plain processes and the binary runs in the foreground.
 - **Clients:** x86_64 PCs, UEFI or legacy BIOS (CSM), **PXE first in the boot order**. Windows images need a local
   SSD; Linux images can run without one (writes in RAM). [Diskless goldens](#diskless-machines-no-ssd) run Windows (or
   Linux) with no disk at all, entirely from the server (tested on UEFI clients only).
@@ -238,8 +252,9 @@ PC down.
 - **Windows goldens:** run `irm http://<server>/broom-diskless.ps1 | iex` on the golden (as Administrator) before
   the first Save: each machine then takes its own name (Devices page) on its first boot, kept as its base. At every
   start the golden's copy runs the server's current version of the script, so a newer Broom reaches every machine
-  without a new golden version. A golden set up before that: **Update script** (Diskless page) writes the current
-  script into it as its next version, without booting it.
+  without a new golden version. A golden set up before that (its copy is the whole script, not the one that fetches
+  the server's) or after Broom moved to another address (the copy holds the server's address): run the command again
+  on it, in its maintenance machine or in **Maintain in the browser**, and Save.
 - **Windows on a disk that starts fresh at every boot:** that script also sets Windows for it. Always: no automatic
   BitLocker device encryption (Windows 11 turns it on by itself on a PC with a TPM), no hibernation, System Restore,
   scheduled defrag, search index, SysMain or crash dump, no "last access" time written for every file read, and ping
@@ -254,9 +269,14 @@ PC down.
 - **Games disks on diskless machines:** a diskless Windows machine has no SSD for its writes, so each one gets its own
   copy of every games disk of its group on the server (target `<disk iqn>.m<mac>`: the disk's newest version + the
   machine's own layer in `<writeback>/.games-<disk>/<mac>/`, dropped at its next PXE boot — like the per-PC writeback
-  of commercial diskless systems). `broom-games.ps1` (run by `broom-watch.ps1 -Dir` at start and every 5
-  minutes) logs in to it and attaches its `games.vhdx` writable as the disk's letter. The disk's update machine (a
-  diskless one too) gets the disk itself, writable, as on SSD machines; Save makes the next version, which every
+  of commercial diskless systems). `broom-games.ps1` logs in to it and attaches its `games.vhdx` writable as the
+  disk's letter. **The drives are there before the desktop:** each machine's base holds a task (`BroomGames`) and a
+  machine startup script (local Group Policy) that starts it and that Windows waits for, so the logon — and a game
+  launcher that starts with it — comes after the drives; the volume gets its letter directly, never another one
+  first. It gives up on the server after 30 s (the startup script after 2 minutes), and `broom-watch.ps1 -Dir` runs
+  the script again at start and every 5 minutes. A golden that has startup scripts of its own keeps them: there the
+  drives come with the agent only (`gamesfirst=FAILED` in the machine's first-boot line). The disk's update machine
+  (a diskless one too) gets the disk itself, writable, as on SSD machines; Save makes the next version, which every
   machine's copy reads from its next boot.
 - **Maintain in the browser (Windows):** the Diskless page runs a golden in a VM on the server (QEMU/KVM, 4 CPU
   threads and 8 GB unless you set its size on that page — at most the server's threads less 4 and its memory less
@@ -273,7 +293,8 @@ PC down.
   network is left open on purpose (internet, and the LANs the server reaches). One VM at a time on the server —
   this one or Add hardware's — and it is started only when its memory and 1 GB to spare are free; the golden needs
   no maintenance machine. Needs
-  `qemu-system-x86`, `ovmf`, `open-iscsi` and KVM, as Add hardware — so the server is either a physical machine
+  QEMU, OVMF and KVM only: its disks are served to QEMU by Broom's own iSCSI daemon over a root-only Unix socket (NBD), so no `open-iscsi` and no kernel iSCSI initiator (the Diskless page shows what is missing and an owner installs it
+  with **Install**: it detects apt, dnf or yum and runs the command as root) — so the server is either a physical machine
   with virtualization (Intel VT-x / AMD-V) turned on in its BIOS, or a VM on a host that hands virtualization down
   to it (nested virtualization on, CPU type *host*); without `/dev/kvm` the page says so and no VM starts. In the VM, Steam and other sign-ins are lost with
   the Windows changes unless they are kept.
@@ -287,13 +308,16 @@ PC down.
   golden has never seen (a new board, or a card in another slot), pick the golden and that PC under *Add hardware*
   and press Start. Its next network boot starts Windows PE (wimboot + the Windows PE of the golden's installer ISO;
   Microsoft-signed, so it also works with *Secure Boot clients*), which reports its cards to Broom (the report
-  counts only with the job's token and from that PC's network card). Broom attaches the golden's newest version to
-  itself (iSCSI over 127.0.0.1, with that job's own write key), boots it in a small VM (QEMU/KVM, no network,
-  confined as the maintenance VM) where
-  `broom-onboard.ps1`, run by the golden's own startup task, creates each card's device with that instance ID and lets
-  Windows install the best driver from its driver store, marked as a network-boot driver; then Broom saves the golden's
-  next version and the PC restarts into it. Identical PCs need it once; a PC whose cards are all known finishes at
-  once. Needs on the server: `qemu-system-x86_64`, OVMF, `iscsiadm` (open-iscsi), `ntfs-3g` and `/dev/kvm`: a
+  counts only with the job's token and from that PC's network card). Broom boots the golden's newest version in a
+  small VM (QEMU/KVM, confined as the maintenance VM; its disk is an NBD export of Broom's own daemon, written with
+  that job's own key; its network is closed — QEMU's `restrict=on` with one forward, the server's address on port 80 to
+  Broom's own HTTP port — so it reaches nothing but Broom: no internet, no LAN). The golden's own startup task asks the server for
+  its script, and to this VM the server answers with `broom-onboard.ps1`, which gets the job and the library's drivers
+  over HTTP, creates each card's device with that instance ID and lets Windows install the best driver from its
+  driver store, marked as a network-boot driver; then Broom saves the golden's next version and the PC restarts into
+  it. Nothing is written into the golden's disk by Broom itself. Identical PCs need it once; a PC whose cards are all
+  known finishes at once. Needs on the server: `qemu-system-x86_64` (or `qemu-kvm`), OVMF and `/dev/kvm` (the
+  Diskless page lists what is missing, with an **Install** button for owners): a
   physical server with virtualization (Intel VT-x / AMD-V) turned on in its BIOS, or — when Broom itself runs in a
   VM — a host with nested virtualization on and CPU type *host* for that VM. The card needs a driver in Windows PE (to report) and in the
   golden (to install). **Network-card drivers from the library** (Drivers page; packages whose .inf is Class=Net are
@@ -334,8 +358,8 @@ PC down.
   is booted with into a route to its disk *through* that gateway, even on the same subnet, so every disk read would
   go through the router (and a router that tracks connections drops Windows' new connections to Broom). When Broom is
   on the PC's subnet, the Windows boot leaves the gateway out and the startup script adds the router as the default
-  route once the disk is up. After moving Broom to another address, **Update script** (Diskless page) writes the new
-  address into the golden.
+  route once the disk is up. After moving Broom to another address, run the command of the Windows goldens again on
+  each golden (its copy of the script holds the server's address) and Save.
 
 **Tested so far**, on virtual-machine clients: Windows 11 24H2 and Ubuntu 26.04 goldens end to end — installed from the
 library (the golden attached, the installer from the server), maintained, saved, then booted diskless: each machine's
@@ -465,12 +489,9 @@ sends it over plain HTTP. What the network must do:
   filesystems on loop devices (`xfsprogs`, `e2fsprogs`).
 - **iPXE** is fetched at `mgmt/ipxe/IPXE_COMMIT`, patched with `mgmt/ipxe/patches/` and embedded; rebuilt only when
   those change (`--ipxe` forces it).
-- **Add hardware, Update script and Maintain in the browser** attach the golden to the server itself over iSCSI
-  (open-iscsi, loopback). A server running the multipath service (`multipathd`, on by default on Ubuntu Server)
-  takes a disk it has seen twice at the same time — two logins of one golden by hand, for instance — at every later
-  login; Broom then refuses the job and says so. Keep multipath off Broom's own disks:
-  `/etc/multipath/conf.d/broom.conf` with `blacklist { device { vendor "BROOM" product ".*" } }`, then
-  `multipath -w <ID>` for an ID already in `/etc/multipath/wwids` and `multipathd reconfigure`.
+- **Add hardware and Maintain in the browser** give the golden to QEMU over NBD, from Broom's own iSCSI daemon on a
+  root-only Unix socket: the server attaches no disk to itself (no iSCSI initiator, no multipath to keep away, no
+  mount).
 - **Add hardware** runs `broom-report.exe` in Windows PE. A release gets it from CI (built from
   `mgmt/winpe/broom-report.c`; no binary of it is in the repository). A local build: install `gcc-mingw-w64-x86-64`,
   `./build.sh` then also makes `mgmt/dist/broom-report.exe` — copy it to `<Broom's folder>/winpe/` on the server.

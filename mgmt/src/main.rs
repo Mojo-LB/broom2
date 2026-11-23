@@ -46,6 +46,7 @@ mod ntfsread;
 mod onboard;
 mod overlay;
 mod pins;
+mod pkgmgr;
 mod power;
 mod preflight;
 mod publish;
@@ -340,6 +341,10 @@ pub struct AppState {
     pub ssd_low: Mutex<std::collections::HashMap<String, (u64, u64)>>,
 }
 
+/// The port the web admin and the machines' HTTP endpoints listen on (--port; 80 by default): the job's VM reaches it
+/// through a forward (onboard.rs).
+pub static HTTP_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(80);
+
 pub fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -415,6 +420,7 @@ async fn main() {
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
         .unwrap_or(80);
+    HTTP_PORT.store(port, std::sync::atomic::Ordering::Relaxed);
     // Bind HTTP FIRST: the UDP listeners use SO_REUSEPORT (hot Apply), so a second instance started by mistake would
     // happily share :67/:69 — it must die here, before it stops services, touches the DB or rebuilds iSCSI targets.
     let addr = format!("0.0.0.0:{port}");
@@ -607,6 +613,7 @@ async fn main() {
         .merge(settings::routes()) // boot menu, zram, DHCP, guest user
         .merge(devices::routes()) // Devices page: edit / bulk / CSV / detail
         .merge(monitor::routes()) // online status, Wake-on-LAN
+        .merge(pkgmgr::routes()) // which packages the VM features need, and installing them (Diskless page)
         .merge(power::routes()) // turn on / restart / shut down machines (Machines page)
         .merge(inventory::routes()) // each machine's hardware list (Machines page)
         .merge(display::routes()) // resolution + refresh per machine / group (Machines page)
