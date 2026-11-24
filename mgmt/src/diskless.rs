@@ -1990,6 +1990,13 @@ pub(crate) struct WinPrep {
     /// Microsoft Defender does not scan the games drives (an exclusion per drive, set by broom-games.ps1 wherever
     /// the drives come up: the machines, and the maintenance VM). Off by default: Defender is left as it is.
     pub defender_skip_games: bool,
+    /// Windows Firewall off on the machines (all three profiles). Off by default: the firewall stays as it is.
+    pub firewall_off: bool,
+    /// No UAC prompts on the machines: what asks for administrator rights gets them without the question (UAC itself
+    /// stays on). Off by default.
+    pub uac_no_prompt: bool,
+    /// Game Mode on for every user of the machines. Off by default: left as each user has it.
+    pub game_mode: bool,
 }
 
 impl Default for WinPrep {
@@ -2000,6 +2007,9 @@ impl Default for WinPrep {
             block_driver_search: true,
             games_first: true,
             defender_skip_games: false,
+            firewall_off: false,
+            uac_no_prompt: false,
+            game_mode: false,
         }
     }
 }
@@ -2010,17 +2020,28 @@ pub(crate) fn win_prep(st: &SharedState) -> WinPrep {
     serde_json::from_str(&st.db.get_config(WINPREP_KEY, "{}")).unwrap_or_default()
 }
 
-/// The settings a base is built with, as one short text kept with the base (`BaseState.prep`): "u1b1d1g1p0", with
-/// "x1" at its end when Defender skips the games drives.
+/// The settings a base is built with, as one short text kept with the base (`BaseState.prep`): "u1b1d1g1p0", then a
+/// tag per box that is off by default and was ticked: x1 Defender skips the games drives, f1 firewall off, a1 no
+/// UAC prompts, m1 Game Mode.
 pub(crate) fn prep_id(w: &WinPrep, pagefile_gb: u64) -> String {
-    format!(
-        "u{}b{}d{}g{}p{pagefile_gb}{}",
+    let mut id = format!(
+        "u{}b{}d{}g{}p{pagefile_gb}",
         w.block_update as u8,
         w.block_browser_update as u8,
         w.block_driver_search as u8,
-        w.games_first as u8,
-        if w.defender_skip_games { "x1" } else { "" }
-    )
+        w.games_first as u8
+    );
+    for (on, tag) in [
+        (w.defender_skip_games, "x1"),
+        (w.firewall_off, "f1"),
+        (w.uac_no_prompt, "a1"),
+        (w.game_mode, "m1"),
+    ] {
+        if on {
+            id.push_str(tag);
+        }
+    }
+    id
 }
 
 /// Is a base built with `built` still right for the settings `now`? A base from before the settings could be chosen
@@ -2031,7 +2052,9 @@ pub(crate) fn prep_same(built: &str, now: &str) -> bool {
         return true;
     }
     if built.is_empty() {
-        return now.starts_with("u1b1d1g1p") && !now.ends_with("x1");
+        return now
+            .strip_prefix("u1b1d1g1p")
+            .is_some_and(|pf| pf.bytes().all(|b| b.is_ascii_digit()));
     }
     built == now
 }
@@ -2042,9 +2065,9 @@ static PREP_SENT: parking_lot::Mutex<std::collections::BTreeMap<String, String>>
     parking_lot::Mutex::new(std::collections::BTreeMap::new());
 
 /// POST /api/diskless/windows {block_update, block_browser_update, block_driver_search, games_first,
-/// defender_skip_games} (owner) — what the Windows machines set while they build their base. A change makes each
-/// machine set itself up again at its next boot (its base is dropped then). A field not sent is at its default
-/// (the first four on, defender_skip_games off).
+/// defender_skip_games, firewall_off, uac_no_prompt, game_mode} (owner) — what the Windows machines set while they
+/// build their base. A change makes each machine set itself up again at its next boot (its base is dropped then). A
+/// field not sent is at its default (the first four on, the others off).
 async fn set_windows(
     State(st): State<SharedState>,
     Json(w): Json<WinPrep>,
@@ -2055,19 +2078,23 @@ async fn set_windows(
         .map_err(ise)?;
     if w != was {
         let onoff = |b: bool| if b { "off" } else { "left on" };
+        let yes = |b: bool| if b { "on" } else { "off" };
         tracing::info!(
             "diskless: Windows on the machines — Windows Update {}, browser updates {}, driver search {}, games \
-             drives before the logon {}, Defender {} the games drives — each machine sets itself up again at its \
-             next boot",
+             drives before the logon {}, Defender {} the games drives, firewall {}, UAC prompts {}, Game Mode {} — \
+             each machine sets itself up again at its next boot",
             onoff(w.block_update),
             onoff(w.block_browser_update),
             onoff(w.block_driver_search),
-            if w.games_first { "on" } else { "off" },
+            yes(w.games_first),
             if w.defender_skip_games {
                 "does not scan"
             } else {
                 "scans"
-            }
+            },
+            onoff(w.firewall_off),
+            onoff(w.uac_no_prompt),
+            if w.game_mode { "forced on" } else { "as it is" }
         );
     }
     Ok(ok())

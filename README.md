@@ -268,6 +268,10 @@ PC down.
   protecting Windows, with an exclusion per games drive on the machines and in the maintenance VM (where the game
   downloads run; lab: 2.5 s of Defender's CPU per 565 MB of program files written, 0.2–0.3 s with the exclusion).
   Defender's real-time protection itself is not turned off by Broom: Tamper Protection refuses it, without an error.
+  Three more, unticked by default, for rooms that want them: **Windows Firewall off** (all three profiles: a machine
+  then takes connections from everything on its network), **no UAC prompts** (UAC stays on; an administrator is no
+  longer asked, so an installer or an anti-cheat that requests administrator rights gets them at once) and **Game
+  Mode on** (for every user of the machine). Reported as `firewall=off`, `uac=noprompt`, `gamemode=on`.
   A change there, or of the pagefile, makes each Windows machine set itself up again at its next start (its base is
   dropped: one extra restart). On the golden's maintenance machine or VM Windows Update, the browsers and drivers
   stay on: that is where they are installed. **Let an update finish there — its restarts too — before Save:** a golden saved with an

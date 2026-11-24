@@ -589,6 +589,16 @@ fn windows_settings_changed_set_a_machine_up_again() {
     // Chosen later: an older base (and one built without it) is set up again, which also brings it the script.
     assert!(!prep_same("", "u1b1d1g1p0x1") && !prep_same("u1b1d1g1p0", "u1b1d1g1p0x1"));
     assert!(prep_same("u1b1d1g1p0x1", "u1b1d1g1p0x1"));
+    let more = WinPrep {
+        firewall_off: true,
+        uac_no_prompt: true,
+        game_mode: true,
+        ..skip
+    };
+    assert_eq!(prep_id(&more, 16), "u1b1d1g1p16x1f1a1m1");
+    assert!(!all_on.firewall_off && !all_on.uac_no_prompt && !all_on.game_mode);
+    assert!(!prep_same("", "u1b1d1g1p0f1") && !prep_same("", "u1b1d1g1p16a1"));
+    assert!(!prep_same("u1b1d1g1p0", "u1b1d1g1p0m1"));
     let no_browser = WinPrep {
         block_browser_update: false,
         ..all_on

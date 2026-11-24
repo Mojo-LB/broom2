@@ -44,6 +44,8 @@ function Prep([bool]$pc, [int]$pagefile = -1, $w = $null) {
   $did = @()
   # A setting the server does not name (an older server, nothing chosen yet) is on.
   function Want($n) { ($null -eq $w) -or ($null -eq $w.$n) -or [bool]$w.$n }
+  # ...and one of those that are off unless ticked there (Defender is broom-games.ps1's) is off.
+  function Opt($n) { ($null -ne $w) -and ($null -ne $w.$n) -and [bool]$w.$n }
   function Dw($k, $n, $v) { & reg.exe add $k /v $n /t REG_DWORD /d $v /f | Out-Null; if ($LASTEXITCODE) { throw "reg add $k $n" } }
   function Off($svc) { Set-Service -Name $svc -StartupType Disabled -ErrorAction Stop; Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue }
   # No automatic device encryption (Windows 11 turns it on by itself on a PC with a TPM): the disk is the server's.
@@ -163,6 +165,46 @@ function Prep([bool]$pc, [int]$pagefile = -1, $w = $null) {
         $did += 'gamesfirst=on'
       } catch { step "games drives before the logon NOT set up: $_"; $did += 'gamesfirst=FAILED' }
     } else { $did += 'gamesfirst=off' }
+    # Off unless ticked on the Diskless page: the firewall, UAC's question, Game Mode.
+    if (Opt firewall_off) {
+      # Windows Firewall off, all three profiles: the machine takes connections from whatever is on its network.
+      try {
+        Set-NetFirewallProfile -All -Enabled False -ErrorAction Stop
+        if (@(Get-NetFirewallProfile | Where-Object { "$($_.Enabled)" -ne 'False' }).Count) { throw 'a profile is still on' }
+        $did += 'firewall=off'
+      } catch { step "firewall NOT turned off: $_"; $did += 'firewall=FAILED' }
+    }
+    if (Opt uac_no_prompt) {
+      # UAC stays on (EnableLUA is not touched: without it every program of an administrator runs with full rights
+      # and Windows changes how programs start); an administrator is just no longer asked - what requests
+      # administrator rights (a game's installer, an anti-cheat's service) gets them at once.
+      try {
+        $sys = 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+        Dw $sys ConsentPromptBehaviorAdmin 0
+        Dw $sys PromptOnSecureDesktop 0
+        $did += 'uac=noprompt'
+      } catch { $did += 'uac=FAILED' }
+    }
+    if (Opt game_mode) {
+      # Game Mode is each user's own setting (HKCU\Software\Microsoft\GameBar, AutoGameModeEnabled): set for every
+      # user profile of this Windows, signed in or not, and for the profiles made later (Default).
+      try {
+        $n = 0
+        $pl = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'
+        $users = @(Get-ChildItem $pl | Where-Object { $_.PSChildName -match '^S-1-5-21-' } |
+          ForEach-Object { @{ sid = $_.PSChildName; dir = [Environment]::ExpandEnvironmentVariables([string]$_.GetValue('ProfileImagePath')) } })
+        $users += @{ sid = ''; dir = "$env:SystemDrive\Users\Default" }
+        foreach ($u in $users) {
+          $loaded = $u.sid -and (Test-Path "Registry::HKEY_USERS\$($u.sid)")
+          $root = if ($loaded) { "HKU\$($u.sid)" } else { 'HKU\BroomGameMode' }
+          if (-not $loaded) { & reg.exe load $root "$($u.dir)\NTUSER.DAT" 2>&1 | Out-Null; if ($LASTEXITCODE) { continue } }
+          try { Dw "$root\Software\Microsoft\GameBar" AutoGameModeEnabled 1; $n++ }
+          finally { if (-not $loaded) { & reg.exe unload $root 2>&1 | Out-Null } }
+        }
+        if (-not $n) { throw 'no user profile could be opened' }
+        $did += 'gamemode=on'
+      } catch { step "Game Mode NOT set: $_"; $did += 'gamemode=FAILED' }
+    }
     if ($pagefile -ge 0) {
       try {
         # Not Windows' own choice (as large as it likes, on a disk that is the server's): none, or one fixed size.

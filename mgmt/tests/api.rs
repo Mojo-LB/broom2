@@ -327,7 +327,8 @@ fn api_contract() {
         // Windows on the machines (Diskless page): everything on until the owner turns one off; staff changed nothing.
         let win = || h.get("/api/diskless").json()["windows"].clone();
         let all_on = json!({"block_update": true, "block_browser_update": true, "block_driver_search": true,
-                            "games_first": true, "defender_skip_games": false});
+                            "games_first": true, "defender_skip_games": false, "firewall_off": false,
+                            "uac_no_prompt": false, "game_mode": false});
         assert_eq!(win(), all_on);
         let mut one_off = all_on.clone();
         one_off["block_browser_update"] = json!(false);
