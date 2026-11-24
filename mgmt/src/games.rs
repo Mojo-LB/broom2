@@ -578,10 +578,13 @@ async fn for_client(
     } else {
         "0"
     };
-    (
-        [("x-broom-defender-skip", skip)],
-        for_lines(st, peer.ip().to_canonical().to_string()).await,
-    )
+    // The maintenance VM on this server (it reaches us through QEMU's NAT): its games disks, by their serial, as
+    // /api/diskless/client tells it too — so broom-games.ps1 can attach them by itself, before the VM's logon.
+    let lines = match crate::vmmaint::client_answer(&st, peer.ip().to_canonical()) {
+        Some(a) => a["games"].as_str().unwrap_or_default().to_string(),
+        None => for_lines(st, peer.ip().to_canonical().to_string()).await,
+    };
+    ([("x-broom-defender-skip", skip)], lines)
 }
 
 async fn for_lines(st: SharedState, ip: String) -> String {

@@ -285,7 +285,9 @@ PC down.
   machine startup script (local Group Policy) that starts it and that Windows waits for, so the logon — and a game
   launcher that starts with it — comes after the drives; the volume gets its letter directly, never another one
   first. It gives up on the server after 30 s (the startup script after 2 minutes), and `broom-watch.ps1 -Dir` runs
-  the script again at start and every 5 minutes. A golden that has startup scripts of its own keeps them: there the
+  the script again at start and every 5 minutes. The golden's maintenance VM sets the same up for itself (kept in
+  the golden with Save), so its games disks are there before its desktop too — and before a launcher that starts
+  with it. A golden that has startup scripts of its own keeps them: there the
   drives come with the agent only (`gamesfirst=FAILED` in the machine's first-boot line). The disk's update machine
   (a diskless one too) gets the disk itself, writable, as on SSD machines; Save makes the next version, which every
   machine's copy reads from its next boot.

@@ -40,7 +40,7 @@ $me = $MyInvocation.MyCommand.Path
 # and reported as update=on / browserupdate=on / drivers=on / gamesfirst=off. Not $pc = the golden itself
 # (installing, its maintenance machine or VM): updates and drivers stay on. Every step on its own: one that fails is
 # reported, the others still count. Returns what it did.
-function Prep([bool]$pc, [int]$pagefile = -1, $w = $null) {
+function Prep([bool]$pc, [int]$pagefile = -1, $w = $null, [string]$gs = '') {
   $did = @()
   # A setting the server does not name (an older server, nothing chosen yet) is on.
   function Want($n) { ($null -eq $w) -or ($null -eq $w.$n) -or [bool]$w.$n }
@@ -117,54 +117,6 @@ function Prep([bool]$pc, [int]$pagefile = -1, $w = $null) {
         $did += 'drivers=off'
       } catch { $did += 'drivers=FAILED' }
     } else { $did += 'drivers=on' }
-    # The games drives before the logon. Left to the agent (three PowerShell processes one after the other) they came
-    # 50 s after the desktop on a lab machine: a launcher that starts with the desktop finds its library missing. So
-    # broom-games.ps1 also gets a task of its own (BroomGames, no trigger), and a machine startup script of the local
-    # Group Policy starts that task and waits for it - Windows is told to wait for startup scripts, so the logon, the
-    # desktop and what starts with it come after the drives. The task, not the startup script itself: a startup
-    # script's process has no SeManageVolumePrivilege and cannot attach a VHDX ("A required privilege is not held by
-    # the client"; a task run as SYSTEM can). The task leaves broom-games.done when it ends, however it ends; the
-    # startup script waits for that file for 2 minutes at most (the task itself gives up on the server after 30 s).
-    if (Want games_first) {
-      try {
-        $done = "$env:SystemRoot\Temp\broom-games.done"
-        $cmd = "/c powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$dir\broom-games.ps1`" -Srv $srv -WaitS 30 & echo.> `"$done`""
-        $act = New-ScheduledTaskAction -Execute cmd.exe -Argument $cmd
-        $set = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-        Register-ScheduledTask -TaskName BroomGames -Action $act -Settings $set -User SYSTEM -RunLevel Highest -Force | Out-Null
-        $gp = "$env:SystemRoot\System32\GroupPolicy"
-        $ini = "$gp\Machine\Scripts\scripts.ini"
-        $have = if (Test-Path $ini) { [IO.File]::ReadAllText($ini) } else { '' }
-        if ($have -notmatch 'BroomGames') {
-          # Startup scripts someone set up on the golden: not rewritten here (and the drives keep coming the old way).
-          if ($have -match '(?m)^\s*\d+CmdLine=') { throw 'this Windows has startup scripts of its own' }
-          New-Item -ItemType Directory -Force -Path "$gp\Machine\Scripts\Startup", "$gp\Machine\Scripts\Shutdown" | Out-Null
-          if (Test-Path $ini) { Remove-Item -LiteralPath $ini -Force }
-          $wait = "/c del `"$done`" 2>nul & schtasks /run /tn BroomGames >nul 2>&1 && for /l %i in (1,1,120) do @if not exist `"$done`" ping -n 2 127.0.0.1 >nul"
-          [IO.File]::WriteAllText($ini, "`r`n[Startup]`r`n0CmdLine=cmd.exe`r`n0Parameters=$wait`r`n", [Text.Encoding]::Unicode)
-          (Get-Item -LiteralPath $ini -Force).Attributes = 'Hidden'
-          # gpt.ini: the Scripts extension among the machine's, and a higher version, or Windows does not read the file.
-          $g = "$gp\gpt.ini"
-          $t = if (Test-Path $g) { [IO.File]::ReadAllText($g) } else { "[General]`r`n" }
-          $ext = @('[{42B5FAAE-6536-11D2-AE5A-0000F87571E3}{40B6664F-4972-11D1-A7CA-0000F87571E3}]')
-          if ($t -match '(?m)^gPCMachineExtensionNames=(.*)$') { $ext += [regex]::Matches($Matches[1], '\[[^\]]+\]') | ForEach-Object { $_.Value } }
-          $line = 'gPCMachineExtensionNames=' + (($ext | Sort-Object -Unique) -join '')
-          if ($t -match '(?m)^gPCMachineExtensionNames=') { $t = [regex]::Replace($t, '(?m)^gPCMachineExtensionNames=.*$', { $line }) } else { $t = $t.TrimEnd() + "`r`n$line`r`n" }
-          $v = 0; if ($t -match '(?m)^Version=(\d+)') { $v = [int]$Matches[1] }
-          $v = ($v -band 0x7FFF0000) + ((($v -band 0xFFFF) + 1) -band 0xFFFF)
-          if ($t -match '(?m)^Version=\d+') { $t = [regex]::Replace($t, '(?m)^Version=\d+', "Version=$v") } else { $t = $t.TrimEnd() + "`r`nVersion=$v`r`n" }
-          [IO.File]::WriteAllText($g, $t, [Text.Encoding]::ASCII)
-        }
-        Dw 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' RunStartupScriptSync 1
-        Dw 'HKLM\SOFTWARE\Policies\Microsoft\Windows NT\CurrentVersion\Winlogon' SyncForegroundPolicy 1
-        & gpupdate.exe /target:computer /force | Out-Null
-        # What Windows took over from scripts.ini (read with .NET: Get-ItemProperty fails on this key, "Specified cast is
-        # not valid").
-        $reg = [Microsoft.Win32.Registry]::GetValue('HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Startup\0\0', 'Parameters', '')
-        if ([string]$reg -notmatch 'BroomGames') { throw 'the startup script did not register' }
-        $did += 'gamesfirst=on'
-      } catch { step "games drives before the logon NOT set up: $_"; $did += 'gamesfirst=FAILED' }
-    } else { $did += 'gamesfirst=off' }
     # Off unless ticked on the Diskless page: the firewall, UAC's question, Game Mode.
     if (Opt firewall_off) {
       # Windows Firewall off, all three profiles: the machine takes connections from whatever is on its network.
@@ -230,6 +182,75 @@ function Prep([bool]$pc, [int]$pagefile = -1, $w = $null) {
       if ((Get-Service -Name $svc -ErrorAction SilentlyContinue).StartType -eq 'Disabled') { & sc.exe config $svc start= demand | Out-Null }
     }
     $did += 'update=on'; $did += 'drivers=on'
+  }
+  # The games drives before the logon. Left to the agent (three PowerShell processes one after the other) they came
+  # 50 s after the desktop on a lab machine: a launcher that starts with the desktop finds its library missing. So
+  # broom-games.ps1 also gets a task of its own (BroomGames, no trigger), and a machine startup script of the local
+  # Group Policy starts that task and waits for it - Windows is told to wait for startup scripts, so the logon, the
+  # desktop and what starts with it come after the drives. The task, not the startup script itself: a startup
+  # script's process has no SeManageVolumePrivilege and cannot attach a VHDX ("A required privilege is not held by
+  # the client"; a task run as SYSTEM can). The task leaves broom-games.done when it ends, however it ends; the
+  # startup script waits for that file for 2 minutes at most (the task itself gives up on the server after 30 s).
+  # The golden's maintenance VM gets the same ($gs = its copy of broom-games.ps1, kept in the golden with Save): its
+  # games disks are there before its desktop too (seen without: G: after the logon and after Steam, whose library was
+  # missing at first). A machine's first boot inherits that and makes it its own here.
+  $gfile = if ($pc) { "$dir\broom-games.ps1" } else { $gs }
+  if ($gfile -and (Want games_first)) {
+    try {
+      $done = "$env:SystemRoot\Temp\broom-games.done"
+      $cmd = "/c powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$gfile`" -Srv $srv -WaitS 30 & echo.> `"$done`""
+      $act = New-ScheduledTaskAction -Execute cmd.exe -Argument $cmd
+      $set = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+      Register-ScheduledTask -TaskName BroomGames -Action $act -Settings $set -User SYSTEM -RunLevel Highest -Force | Out-Null
+      $gp = "$env:SystemRoot\System32\GroupPolicy"
+      $ini = "$gp\Machine\Scripts\scripts.ini"
+      $have = if (Test-Path $ini) { [IO.File]::ReadAllText($ini) } else { '' }
+      if ($have -notmatch 'BroomGames') {
+        # Startup scripts someone set up on the golden: not rewritten here (and the drives keep coming the old way).
+        if ($have -match '(?m)^\s*\d+CmdLine=') { throw 'this Windows has startup scripts of its own' }
+        New-Item -ItemType Directory -Force -Path "$gp\Machine\Scripts\Startup", "$gp\Machine\Scripts\Shutdown" | Out-Null
+        if (Test-Path $ini) { Remove-Item -LiteralPath $ini -Force }
+        $wait = "/c del `"$done`" 2>nul & schtasks /run /tn BroomGames >nul 2>&1 && for /l %i in (1,1,120) do @if not exist `"$done`" ping -n 2 127.0.0.1 >nul"
+        [IO.File]::WriteAllText($ini, "`r`n[Startup]`r`n0CmdLine=cmd.exe`r`n0Parameters=$wait`r`n", [Text.Encoding]::Unicode)
+        (Get-Item -LiteralPath $ini -Force).Attributes = 'Hidden'
+        # gpt.ini: the Scripts extension among the machine's, and a higher version, or Windows does not read the file.
+        $g = "$gp\gpt.ini"
+        $t = if (Test-Path $g) { [IO.File]::ReadAllText($g) } else { "[General]`r`n" }
+        $ext = @('[{42B5FAAE-6536-11D2-AE5A-0000F87571E3}{40B6664F-4972-11D1-A7CA-0000F87571E3}]')
+        if ($t -match '(?m)^gPCMachineExtensionNames=(.*)$') { $ext += [regex]::Matches($Matches[1], '\[[^\]]+\]') | ForEach-Object { $_.Value } }
+        $line = 'gPCMachineExtensionNames=' + (($ext | Sort-Object -Unique) -join '')
+        if ($t -match '(?m)^gPCMachineExtensionNames=') { $t = [regex]::Replace($t, '(?m)^gPCMachineExtensionNames=.*$', { $line }) } else { $t = $t.TrimEnd() + "`r`n$line`r`n" }
+        $v = 0; if ($t -match '(?m)^Version=(\d+)') { $v = [int]$Matches[1] }
+        $v = ($v -band 0x7FFF0000) + ((($v -band 0xFFFF) + 1) -band 0xFFFF)
+        if ($t -match '(?m)^Version=\d+') { $t = [regex]::Replace($t, '(?m)^Version=\d+', "Version=$v") } else { $t = $t.TrimEnd() + "`r`nVersion=$v`r`n" }
+        [IO.File]::WriteAllText($g, $t, [Text.Encoding]::ASCII)
+      }
+      Dw 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' RunStartupScriptSync 1
+      Dw 'HKLM\SOFTWARE\Policies\Microsoft\Windows NT\CurrentVersion\Winlogon' SyncForegroundPolicy 1
+      & gpupdate.exe /target:computer /force | Out-Null
+      # What Windows took over from scripts.ini (read with .NET: Get-ItemProperty fails on this key, "Specified cast is
+      # not valid").
+      $reg = [Microsoft.Win32.Registry]::GetValue('HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Startup\0\0', 'Parameters', '')
+      if ([string]$reg -notmatch 'BroomGames') { throw 'the startup script did not register' }
+      $did += 'gamesfirst=on'
+    } catch { step "games drives before the logon NOT set up: $_"; $did += 'gamesfirst=FAILED' }
+  } elseif ($gfile) {
+    # Unticked: Broom's own startup script and task go, where a golden brought them (its maintenance VM sets them up).
+    try {
+      $gp = "$env:SystemRoot\System32\GroupPolicy"; $ini = "$gp\Machine\Scripts\scripts.ini"
+      if ((Test-Path $ini) -and [IO.File]::ReadAllText($ini) -match 'BroomGames') {
+        Remove-Item -LiteralPath $ini -Force
+        $g = "$gp\gpt.ini"
+        if (Test-Path $g) {
+          $t = [IO.File]::ReadAllText($g); $v = 0; if ($t -match '(?m)^Version=(\d+)') { $v = [int]$Matches[1] }
+          $v = ($v -band 0x7FFF0000) + ((($v -band 0xFFFF) + 1) -band 0xFFFF)
+          [IO.File]::WriteAllText($g, [regex]::Replace($t, '(?m)^Version=\d+', "Version=$v"), [Text.Encoding]::ASCII)
+        }
+        & gpupdate.exe /target:computer /force | Out-Null
+      }
+      Unregister-ScheduledTask -TaskName BroomGames -Confirm:$false -ErrorAction SilentlyContinue
+      $did += 'gamesfirst=off'
+    } catch { step "games drives before the logon NOT taken out: $_"; $did += 'gamesfirst=FAILED' }
   }
   $did -join ' '
 }
@@ -306,17 +327,22 @@ function Fetch($f, $to) {
   if ((Get-FileHash -Algorithm SHA256 $to).Hash.ToLower() -ne $sum) { Remove-Item -LiteralPath $to -Force; throw "$f does not match scripts.sha256" }
 }
 if ($info.role -eq 'maintenance') {
-  step ("golden prepared: " + (Prep $false))
+  # The maintenance VM on the server with games disks: its copy of broom-games.ps1 first (Prep sets up the games
+  # drives before the logon with it, for the VM's next start).
+  $gs = ''
+  if ($info.vm -and $info.games) {
+    try { $gs = "$env:SystemRoot\Temp\broom-games-vm.ps1"; Fetch 'broom-games.ps1' $gs } catch { step "broom-games.ps1 NOT fetched: $_"; $gs = '' }
+  }
+  step ("golden prepared: " + (Prep $false -1 $info.windows $gs))
   # Its writes go into the golden: no machine's key or agent files may end up there. .NET's Directory.Delete does not
   # follow a folder mount point (it only removes it), so a volume mounted inside is never emptied with it.
   if (Test-Path $dir) {
     try { [IO.Directory]::Delete($dir, $true); step "removed $dir from the golden" } catch { step "could not remove ${dir}: $_" }
   }
   # The maintenance VM on the server: its games disks (found by their disk serial), writable, under their letters.
-  if ($info.vm -and $info.games) {
+  if ($gs) {
     try {
-      $gs = "$env:SystemRoot\Temp\broom-games-vm.ps1"; $lf = "$env:SystemRoot\Temp\broom-games-vm.txt"
-      Fetch 'broom-games.ps1' $gs
+      $lf = "$env:SystemRoot\Temp\broom-games-vm.txt"
       [IO.File]::WriteAllText($lf, [string]$info.games, [Text.Encoding]::ASCII)
       # With them: what the Diskless page chose for Defender and the games drives (the game downloads run here).
       $ga = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $gs, '-Srv', $srv, '-LinesFile', $lf)
