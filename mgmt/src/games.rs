@@ -567,12 +567,24 @@ async fn discard(
 
 /// GET /api/games/for (public, broom-games.ps1) → one line per games disk of the machine at the peer IP (its group):
 /// "<name> <iqn of the newest version> <letter> <1 = its update machine | 0>"; nothing = no iSCSI disk. The update flag
-/// is decided by the peer IP, exactly as the daemon decides who may write.
+/// is decided by the peer IP, exactly as the daemon decides who may write. With it, as a header the older scripts do
+/// not look at: `X-Broom-Defender-Skip: 1|0` — the Diskless page's "Defender does not scan the games drives".
 async fn for_client(
     State(st): State<SharedState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
-) -> String {
-    let ip = peer.ip().to_canonical().to_string();
+) -> impl axum::response::IntoResponse {
+    let skip = if crate::diskless::win_prep(&st).defender_skip_games {
+        "1"
+    } else {
+        "0"
+    };
+    (
+        [("x-broom-defender-skip", skip)],
+        for_lines(st, peer.ip().to_canonical().to_string()).await,
+    )
+}
+
+async fn for_lines(st: SharedState, ip: String) -> String {
     let Some(info) = tokio::task::spawn_blocking(crate::iscsi::games_status)
         .await
         .ok()

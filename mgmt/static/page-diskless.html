@@ -109,8 +109,9 @@
       <label class="form-check mb-0"><input class="form-check-input" type="checkbox" id="win_browser"> <span class="form-check-label">Edge and Chrome do not update themselves</span></label>
       <label class="form-check mb-0"><input class="form-check-input" type="checkbox" id="win_drivers"> <span class="form-check-label">no driver search on Windows Update</span></label>
       <label class="form-check mb-0"><input class="form-check-input" type="checkbox" id="win_games"> <span class="form-check-label">games drives before the desktop</span></label>
+      <label class="form-check mb-0"><input class="form-check-input" type="checkbox" id="win_defender"> <span class="form-check-label">Defender does not scan the games drives</span></label>
       <button class="btn btn-sm btn-outline-primary" data-click="setWindows">Save</button> <span id="win_msg" class="msg"></span></div>
-    <div class="small text-body-secondary mt-1">All on (the default) suits a room: a machine starts fresh at every boot, so an update it fetched would be fetched again at the next one. One turned off is left as the golden has it. Updates are installed on the golden, in a maintenance session. A change makes each Windows machine set itself up again at its next start (one extra restart).</div>
+    <div class="small text-body-secondary mt-1">The first four are on by default and suit a room: a machine starts fresh at every boot, so an update it fetched would be fetched again at the next one. One turned off is left as the golden has it. Updates are installed on the golden, in a maintenance session. Defender (off by default): Microsoft Defender keeps protecting Windows but skips the games drives, on the machines and in the maintenance VM, where scanning every file of a game download costs time; the rest of Defender cannot be turned off from here (Tamper Protection). A change makes each Windows machine set itself up again at its next start (one extra restart).</div>
     <div class="small text-body-secondary mt-2">Server disks are added on the Server page. A place can change only while it is empty.</div>
     <span id="dl_pmsg" class="msg"></span>
   </div>

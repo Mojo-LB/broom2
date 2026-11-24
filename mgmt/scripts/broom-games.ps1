@@ -17,7 +17,7 @@
 # both set up in its base by broom-diskless.ps1): its games drives are there when the desktop and whatever starts with
 # it (game launchers) come up. -WaitS: how long that run waits for the server before it lets the logon go on (the
 # agent's run comes later).
-param([string]$Srv, [string]$LinesFile, [int]$WaitS = 90)
+param([string]$Srv, [string]$LinesFile, [int]$WaitS = 90, [string]$DefenderSkip = '')
 $ErrorActionPreference = 'Stop'
 # One run at a time: the run before logon and the agent's would attach the same disk side by side (seen: "The
 # requested access path is already in use"). The second waits, then finds every drive up and has nothing to do.
@@ -30,7 +30,12 @@ $list = $null
 if ($LinesFile) { $list = [IO.File]::ReadAllText($LinesFile) }
 $until = (Get-Date).AddSeconds($WaitS)
 while ($null -eq $list -and (Get-Date) -lt $until) {
-  try { $list = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 -Uri "http://$Srv/api/games/for").Content } catch { Start-Sleep 3 }
+  try {
+    $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 -Uri "http://$Srv/api/games/for"
+    $list = $r.Content
+    # With the list: what the Diskless page chose for Defender and the games drives (see Defender below).
+    $r.Headers.GetEnumerator() | Where-Object { $_.Key -ieq 'X-Broom-Defender-Skip' } | ForEach-Object { $DefenderSkip = [string]$_.Value }
+  } catch { Start-Sleep 3 }
 }
 if ($null -eq $list) { Done }
 
@@ -191,6 +196,36 @@ function Up($name, $L) {
   try { $d = New-Object IO.DriveInfo "${L}:"; $d.IsReady -and $d.VolumeLabel -eq $name.ToUpper() } catch { $false }
 }
 $re = '^([a-z0-9-]+) (\S+) ([D-Z]) ([012])\s*$'
+# Microsoft Defender and the games drives: "Defender does not scan the games drives" on the Diskless page. The server
+# says what is wanted with its list (a header), the maintenance VM's caller with -DefenderSkip; neither -> nothing is
+# touched. Wanted (1): an exclusion per games drive, there before the drive is (Add-MpPreference: it works with
+# Tamper Protection on, where turning real-time protection off is refused without an error). Not wanted (0): the
+# exclusions Broom added go, an admin's own stay - HKLM\SOFTWARE\Broom, DefenderSkips = the drives Broom excluded
+# (kept beside the exclusions: both dropped with a machine's session, both saved with a golden). Seen on a lab
+# machine: 1200 program files (565 MB) written to G: cost Defender 2.5 s of CPU, 0.2-0.3 s with the exclusion.
+function Defender($want, [string[]]$letters) {
+  if ($want -ne '1' -and $want -ne '0') { return }
+  $key = 'HKEY_LOCAL_MACHINE\SOFTWARE\Broom'
+  $mine = [string][Microsoft.Win32.Registry]::GetValue($key, 'DefenderSkips', '')
+  # Nothing to do (the 5-minute runs, nearly always): no Defender cmdlet is loaded.
+  $todo = if ($want -eq '1') { @($letters | Where-Object { $mine -notmatch $_ }) } else { @($mine.ToCharArray() | ForEach-Object { [string]$_ }) }
+  if ($todo.Count -eq 0) { return }
+  try {
+    $have = @((Get-MpPreference -ErrorAction Stop).ExclusionPath)
+    foreach ($L in $todo) {
+      $p = "${L}:\"
+      if ($want -eq '1') {
+        # One an admin set by hand is not Broom's: left out of DefenderSkips, never removed here.
+        if ($have -notcontains $p) { Add-MpPreference -ExclusionPath $p -ErrorAction Stop; $mine += $L; Log "Defender does not scan $p (Diskless page)" }
+      } else {
+        if ($have -contains $p) { Remove-MpPreference -ExclusionPath $p -ErrorAction Stop; Log "Defender scans $p again (Diskless page)" }
+        $mine = $mine.Replace($L, '')
+      }
+    }
+    [Microsoft.Win32.Registry]::SetValue($key, 'DefenderSkips', $mine)
+  } catch { Log "Defender and the games drives: $($_.Exception.Message)" }
+}
+Defender $DefenderSkip @($list -split "`n" | Where-Object { $_ -match $re } | ForEach-Object { $Matches[3] })
 # Every disk already up (the 5-minute runs, nearly always) -> nothing to do.
 $lines = @($list -split "`n" | Where-Object { $_ -match $re -and -not (Up $Matches[1] $Matches[3]) })
 if ($lines.Count -eq 0) { Done }

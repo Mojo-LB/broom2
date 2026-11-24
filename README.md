@@ -264,6 +264,10 @@ PC down.
   the games drives before the desktop (below), and the pagefile set on the Diskless page (*Where things are kept*;
   default none, or a fixed size for rooms whose games ask for one). **Yours to choose:** those first four are boxes
   on the Diskless page (*Windows on the machines*), all ticked by default; one unticked is left as the golden has it.
+  A fifth box, unticked by default: **Defender does not scan the games drives** — Microsoft Defender keeps
+  protecting Windows, with an exclusion per games drive on the machines and in the maintenance VM (where the game
+  downloads run; lab: 2.5 s of Defender's CPU per 565 MB of program files written, 0.2–0.3 s with the exclusion).
+  Defender's real-time protection itself is not turned off by Broom: Tamper Protection refuses it, without an error.
   A change there, or of the pagefile, makes each Windows machine set itself up again at its next start (its base is
   dropped: one extra restart). On the golden's maintenance machine or VM Windows Update, the browsers and drivers
   stay on: that is where they are installed. **Let an update finish there — its restarts too — before Save:** a golden saved with an

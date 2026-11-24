@@ -1987,6 +1987,9 @@ pub(crate) struct WinPrep {
     pub block_driver_search: bool,
     /// The games drives are there before the logon (the logon waits for them).
     pub games_first: bool,
+    /// Microsoft Defender does not scan the games drives (an exclusion per drive, set by broom-games.ps1 wherever
+    /// the drives come up: the machines, and the maintenance VM). Off by default: Defender is left as it is.
+    pub defender_skip_games: bool,
 }
 
 impl Default for WinPrep {
@@ -1996,6 +1999,7 @@ impl Default for WinPrep {
             block_browser_update: true,
             block_driver_search: true,
             games_first: true,
+            defender_skip_games: false,
         }
     }
 }
@@ -2006,26 +2010,28 @@ pub(crate) fn win_prep(st: &SharedState) -> WinPrep {
     serde_json::from_str(&st.db.get_config(WINPREP_KEY, "{}")).unwrap_or_default()
 }
 
-/// The settings a base is built with, as one short text kept with the base (`BaseState.prep`).
+/// The settings a base is built with, as one short text kept with the base (`BaseState.prep`): "u1b1d1g1p0", with
+/// "x1" at its end when Defender skips the games drives.
 pub(crate) fn prep_id(w: &WinPrep, pagefile_gb: u64) -> String {
     format!(
-        "u{}b{}d{}g{}p{pagefile_gb}",
+        "u{}b{}d{}g{}p{pagefile_gb}{}",
         w.block_update as u8,
         w.block_browser_update as u8,
         w.block_driver_search as u8,
-        w.games_first as u8
+        w.games_first as u8,
+        if w.defender_skip_games { "x1" } else { "" }
     )
 }
 
 /// Is a base built with `built` still right for the settings `now`? A base from before the settings could be chosen
-/// (`built` empty) was made with all of them on, and with a pagefile nobody recorded: it stays while they are all on.
-/// `now` empty: a golden without such settings (Linux).
+/// (`built` empty) was made with the defaults, and with a pagefile nobody recorded: it stays while they are the
+/// defaults. `now` empty: a golden without such settings (Linux).
 pub(crate) fn prep_same(built: &str, now: &str) -> bool {
     if now.is_empty() {
         return true;
     }
     if built.is_empty() {
-        return now.starts_with(&prep_id(&WinPrep::default(), 0)[..8]);
+        return now.starts_with("u1b1d1g1p") && !now.ends_with("x1");
     }
     built == now
 }
@@ -2035,9 +2041,10 @@ pub(crate) fn prep_same(built: &str, now: &str) -> bool {
 static PREP_SENT: parking_lot::Mutex<std::collections::BTreeMap<String, String>> =
     parking_lot::Mutex::new(std::collections::BTreeMap::new());
 
-/// POST /api/diskless/windows {block_update, block_browser_update, block_driver_search, games_first} (owner) — what
-/// the Windows machines set while they build their base. A change makes each machine set itself up again at its
-/// next boot (its base is dropped then). A field not sent is on.
+/// POST /api/diskless/windows {block_update, block_browser_update, block_driver_search, games_first,
+/// defender_skip_games} (owner) — what the Windows machines set while they build their base. A change makes each
+/// machine set itself up again at its next boot (its base is dropped then). A field not sent is at its default
+/// (the first four on, defender_skip_games off).
 async fn set_windows(
     State(st): State<SharedState>,
     Json(w): Json<WinPrep>,
@@ -2050,11 +2057,17 @@ async fn set_windows(
         let onoff = |b: bool| if b { "off" } else { "left on" };
         tracing::info!(
             "diskless: Windows on the machines — Windows Update {}, browser updates {}, driver search {}, games \
-             drives before the logon {} — each machine sets itself up again at its next boot",
+             drives before the logon {}, Defender {} the games drives — each machine sets itself up again at its \
+             next boot",
             onoff(w.block_update),
             onoff(w.block_browser_update),
             onoff(w.block_driver_search),
-            if w.games_first { "on" } else { "off" }
+            if w.games_first { "on" } else { "off" },
+            if w.defender_skip_games {
+                "does not scan"
+            } else {
+                "scans"
+            }
         );
     }
     Ok(ok())

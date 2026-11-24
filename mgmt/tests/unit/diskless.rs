@@ -576,7 +576,19 @@ fn windows_settings_changed_set_a_machine_up_again() {
             && all_on.block_driver_search
             && all_on.games_first
     );
+    assert!(
+        !all_on.defender_skip_games,
+        "Defender is left as it is unless chosen"
+    );
     assert_eq!(prep_id(&all_on, 0), "u1b1d1g1p0");
+    let skip = WinPrep {
+        defender_skip_games: true,
+        ..all_on
+    };
+    assert_eq!(prep_id(&skip, 0), "u1b1d1g1p0x1");
+    // Chosen later: an older base (and one built without it) is set up again, which also brings it the script.
+    assert!(!prep_same("", "u1b1d1g1p0x1") && !prep_same("u1b1d1g1p0", "u1b1d1g1p0x1"));
+    assert!(prep_same("u1b1d1g1p0x1", "u1b1d1g1p0x1"));
     let no_browser = WinPrep {
         block_browser_update: false,
         ..all_on

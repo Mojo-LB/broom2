@@ -783,7 +783,7 @@ async function loadDiskless(){
     if(rn)rn.textContent=rm.free_pct?`Below ${rm.free_pct}% free, only machines holding less than ${rm.fair_gb} GB still get new room: the big writer is stopped (its writes fail until it restarts), the others go on.`:'No reserve: one machine can fill the drive for all.';}
   const vk=document.getElementById('ver_keep');if(vk&&verData&&document.activeElement!==vk)vk.checked=!!verData.keep;
   const wn=dlData&&dlData.windows;
-  if(wn)for(const [id,val] of [['win_update',wn.block_update],['win_browser',wn.block_browser_update],['win_drivers',wn.block_driver_search],['win_games',wn.games_first]]){const e=document.getElementById(id);if(e&&document.activeElement!==e&&!winDirty)e.checked=!!val;}
+  if(wn)for(const [id,val] of [['win_update',wn.block_update],['win_browser',wn.block_browser_update],['win_drivers',wn.block_driver_search],['win_games',wn.games_first],['win_defender',wn.defender_skip_games]]){const e=document.getElementById(id);if(e&&document.activeElement!==e&&!winDirty)e.checked=!!val;}
   // Their machines: each with its own layers (from the daemon) and target.
   const mb=document.querySelector('#dl_machines tbody');
   const rows=d.goldens.flatMap(x=>x.machines.map(m=>{const st=x.status?x.status.machines.find(y=>y.mac===mac12(m.mac)):null;
@@ -933,9 +933,9 @@ const isoOs=(name,el)=>dlCall('/api/diskless/iso/os',{name,os:el.value});
 const delIso=name=>dlCall('/api/diskless/iso/delete',{name},'Delete '+name+' from the ISO library?');
 // Windows on the machines: the boxes keep what was ticked until Save (the page reloads its data every few seconds).
 let winDirty=false;
-document.addEventListener('change',e=>{if(e.target&&/^win_(update|browser|drivers|games)$/.test(e.target.id))winDirty=true;});
+document.addEventListener('change',e=>{if(e.target&&/^win_(update|browser|drivers|games|defender)$/.test(e.target.id))winDirty=true;});
 const setWindows=()=>{const c=id=>document.getElementById(id).checked;
-  return post('/api/diskless/windows',{block_update:c('win_update'),block_browser_update:c('win_browser'),block_driver_search:c('win_drivers'),games_first:c('win_games')},'win_msg',()=>'saved - each Windows machine sets itself up again at its next start',()=>{winDirty=false;return loadDiskless();});};
+  return post('/api/diskless/windows',{block_update:c('win_update'),block_browser_update:c('win_browser'),block_driver_search:c('win_drivers'),games_first:c('win_games'),defender_skip_games:c('win_defender')},'win_msg',()=>'saved - each Windows machine sets itself up again at its next start',()=>{winDirty=false;return loadDiskless();});};
 const setRoom=()=>post('/api/diskless/room',{pc_gb:+v('room_gb'),free_pct:+v('room_pct'),pagefile_gb:+v('room_pf')},'room_msg',()=>'saved - machines get it at their next start',loadDiskless);
 const setPlace=k=>dlCall('/api/diskless/volume',{kind:k,id:document.getElementById('dl_place_'+k).value},null,'dl_pmsg');
 function editGolden(name){const g=dlData.goldens.find(x=>x.golden.name===name).golden;

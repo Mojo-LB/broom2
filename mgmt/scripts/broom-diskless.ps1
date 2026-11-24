@@ -276,7 +276,12 @@ if ($info.role -eq 'maintenance') {
       $gs = "$env:SystemRoot\Temp\broom-games-vm.ps1"; $lf = "$env:SystemRoot\Temp\broom-games-vm.txt"
       Fetch 'broom-games.ps1' $gs
       [IO.File]::WriteAllText($lf, [string]$info.games, [Text.Encoding]::ASCII)
-      & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $gs -Srv $srv -LinesFile $lf
+      # With them: what the Diskless page chose for Defender and the games drives (the game downloads run here).
+      $ga = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $gs, '-Srv', $srv, '-LinesFile', $lf)
+      if ($null -ne $info.windows -and $null -ne $info.windows.defender_skip_games) {
+        $ga += '-DefenderSkip', $(if ($info.windows.defender_skip_games) { '1' } else { '0' })
+      }
+      & powershell.exe @ga
       step ("VM: games disks {0} (log: broom-games.log)" -f (($info.games -split "`n" | Where-Object { $_ } | ForEach-Object { ($_ -split ' ')[0] }) -join ', '))
     } catch { step "VM games disks FAILED: $_" }
   }
