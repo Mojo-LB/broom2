@@ -349,7 +349,12 @@ fn api_contract() {
         assert_eq!(skip().as_deref(), Some("1"));
         assert_eq!(h.post("/api/diskless/windows", &all_on).status, 200);
 
-        // The Display lists of the Machines page: what each machine's monitors offer.
+        // The Maintenance page is one of the app's pages, and what its lists and the Machines page's pick from.
+        assert!(
+            h.get("/ui/maintenance")
+                .text()
+                .contains("id=\"page-maintenance\"")
+        );
         assert_eq!(
             h.get("/api/machines/modes").json(),
             json!({"modes": {}}),
@@ -362,6 +367,12 @@ fn api_contract() {
                 &json!({"start": true, "ok": ["rt640x64"]})
             )
             .status,
+            403
+        );
+        // A games disk's update PC is picked by who may save its update (no such disk here: a plain answer, not 403).
+        assert_ne!(
+            st.post("/api/games/update", &json!({"name": "nope", "id": null}))
+                .status,
             403
         );
 

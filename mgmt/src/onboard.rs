@@ -670,7 +670,7 @@ pub(crate) fn reporter_missing() -> Option<String> {
 
 // ---------- the VM side ----------
 
-/// What the VM of either feature (Add hardware, Maintain in the browser) needs on this server: QEMU, OVMF and KVM. Its
+/// What the VM of either feature (Add hardware, the maintenance VM) needs on this server: QEMU, OVMF and KVM. Its
 /// disk comes over NBD from Broom's own daemon and Add hardware's job over HTTP: no open-iscsi, no ntfs-3g. Err lists
 /// what is missing.
 pub(crate) fn preflight() -> Result<(), String> {
@@ -1124,7 +1124,7 @@ fn install(
     let v = result.ok_or(
         "the script in the VM never finished (see broom-onboard.log / qemu.log in the work folder). A golden set up by \
          an older Broom runs its own copy of the startup script, not this job's: install the current one in it (the \
-         command on the Diskless page, run in Maintain in the browser), Save, and start again",
+         command on the Diskless page, run in the VM of the Maintenance page), Save, and start again",
     )?;
     let results: Vec<serde_json::Value> = v["nics"].as_array().cloned().unwrap_or_default();
     if v["ok"].as_bool() != Some(true) {
@@ -1274,14 +1274,14 @@ async fn start(
         if crate::vmmaint::owns_golden(&b.golden) {
             return Err((
                 StatusCode::CONFLICT,
-                format!("{} is running in the VM (Maintain in the browser) — shut it down first", b.golden),
+                format!("{} is running in the VM (Maintenance page) — shut it down first", b.golden),
             ));
         }
         // One VM at a time on a server, of either kind: Add hardware ends in a VM of its own.
         if let Some(g) = crate::vmmaint::running(&st) {
             return Err((
                 StatusCode::CONFLICT,
-                format!("the VM of {g} is running (Maintain in the browser; one VM at a time) — shut it down first"),
+                format!("the VM of {g} is running (Maintenance page; one VM at a time) — shut it down first"),
             ));
         }
         preflight().map_err(|e| (StatusCode::CONFLICT, e))?;
@@ -1298,7 +1298,7 @@ async fn start(
         if g.maint.is_some() {
             return Err((
                 StatusCode::CONFLICT,
-                format!("{} has a maintenance machine — turn maintenance off (Save or Discard its work) first", g.name),
+                format!("{} is open on a PC — end that session first (Maintenance page)", g.name),
             ));
         }
         let info = diskless::served(&g.name).ok_or((StatusCode::CONFLICT, "the golden is not served".to_string()))?;

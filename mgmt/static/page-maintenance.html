@@ -1,0 +1,54 @@
+<section id="page-maintenance">
+  <div class="d-flex flex-wrap align-items-baseline gap-3 mb-4"><h1 class="h4 mb-0">Maintenance</h1>
+    <span class="small text-body-secondary">Update Windows and the games in one session, on a PC or in a VM on this server, and save it here: every machine gets the new version at its next start.</span>
+    <span class="flex-grow-1"></span><button class="btn btn-sm btn-outline-secondary" data-click="loadMaint" title="Refresh" aria-label="Refresh"><svg class="ic" aria-hidden="true"><use href="/icons.svg#refresh"/></svg></button></div>
+
+  <!-- One card per session (a PC, or the VM) and one for unsaved work no session holds: mtRender in app.js. -->
+  <div id="mt_sessions" aria-live="polite"></div>
+
+  <div class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">Start a session</h2>
+    <div class="d-flex flex-column gap-3">
+      <fieldset>
+        <legend class="form-label small text-body-secondary mb-1">Where</legend>
+        <div class="form-check"><input class="form-check-input" type="radio" name="mt_where" id="mt_where_pc" value="pc" checked data-change="mtForm">
+          <label class="form-check-label" for="mt_where_pc"><b>A PC</b> <span class="text-body-secondary">— the real hardware: the fastest, and games behave as in the room</span></label></div>
+        <div class="ms-4 mt-1 mb-2"><label class="visually-hidden" for="mt_pc">PC</label><select class="form-select form-select-sm w-auto" id="mt_pc" data-change="mtPcChanged"></select></div>
+        <div class="form-check"><input class="form-check-input" type="radio" name="mt_where" id="mt_where_vm" value="vm" data-change="mtForm">
+          <label class="form-check-label" for="mt_where_vm"><b>The VM on this server</b> <span class="text-body-secondary">— its screen in this browser, internet through the server, no PC leaves the room; slower</span></label></div>
+        <div id="mt_vm_note" class="small ms-4"></div>
+      </fieldset>
+      <fieldset>
+        <legend class="form-label small text-body-secondary mb-1">What to open for changes</legend>
+        <div class="d-flex flex-wrap gap-2 align-items-center">
+          <div class="form-check mb-0" data-perm="maintain"><input class="form-check-input" type="checkbox" id="mt_win" data-change="mtForm">
+            <label class="form-check-label" for="mt_win"><b>Windows (C:)</b> of golden</label></div>
+          <span class="form-check-label" id="mt_golden_l">Golden</span>
+          <select class="form-select form-select-sm w-auto" id="mt_golden" data-change="mtForm" aria-labelledby="mt_golden_l"></select>
+        </div>
+        <div id="mt_games" class="d-flex flex-wrap gap-3 mt-2" role="group" aria-label="Games disks"></div>
+        <div class="form-text" id="mt_note"></div>
+      </fieldset>
+      <div class="d-flex flex-wrap gap-2 align-items-center">
+        <button class="btn btn-primary" id="mt_start" data-click="mtStart">Start session</button>
+        <span id="mt_msg" class="msg"></span>
+      </div>
+    </div>
+    <!-- The VM's size (owner): used from its next start. -->
+    <details class="mt-3" data-owner><summary class="small text-body-secondary">Size of the VM: <span id="vm_size_txt"></span></summary>
+      <div class="d-flex flex-wrap gap-2 align-items-end mt-2">
+        <div><label class="form-label small mb-1" for="vm_cpus">CPU threads</label><input class="form-control form-control-sm" id="vm_cpus" type="number" min="1" style="width:6rem"></div>
+        <div><label class="form-label small mb-1" for="vm_gb">Memory, GB</label><input class="form-control form-control-sm" id="vm_gb" type="number" min="2" style="width:6rem"></div>
+        <button class="btn btn-sm btn-outline-secondary" data-click="vmSize">Save</button>
+        <span id="vm_msg" class="msg"></span>
+        <span class="small text-body-secondary" id="vm_size_max"></span>
+      </div></details>
+  </div>
+
+  <div class="card card-body mb-3">
+    <h2 class="h6 text-uppercase text-body-secondary mb-3">Last saved</h2>
+    <div class="table-responsive"><table class="table table-sm align-middle mb-0" id="mt_saved">
+      <thead><tr><th>When</th><th>What</th><th>Version</th><th title="what that version changed over the one before">Size</th></tr></thead>
+      <tbody></tbody></table></div>
+  </div>
+</section>

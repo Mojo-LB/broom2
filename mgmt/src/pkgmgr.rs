@@ -1,4 +1,4 @@
-// pkgmgr.rs — what this server's operating system must provide for the VM features (Maintain in the browser, Add
+// pkgmgr.rs — what this server's operating system must provide for the VM features (the maintenance VM, Add
 // hardware), and installing it from the web admin. Everything else Broom does is built in; only the VM needs programs
 // from the distribution: QEMU and OVMF. Its disk comes from Broom's own daemon over NBD, and Add hardware hands its job
 // to the VM over HTTP: no open-iscsi, no ntfs-3g. One more is optional: xfsprogs, so that a disk Broom formats is XFS
@@ -111,7 +111,7 @@ pub(crate) fn os_name(os_release: &str) -> String {
 /// What Broom may need programs of the system for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Feature {
-    /// The VM (Maintain in the browser, Add hardware): required for them.
+    /// The VM (the maintenance VM, Add hardware): required for them.
     Vm,
     /// XFS disks: optional, ext4 is the fallback.
     Xfs,

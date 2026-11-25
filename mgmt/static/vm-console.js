@@ -43,7 +43,7 @@ async function poll() {
   let s;
   try { s = (await api('/api/vm')).session; } catch (e) { state('server: ' + e.message); return; }
   last = s;
-  if (!s) { state('no VM'); note('No VM is running — start one on the Diskless page (Maintain in the browser).'); return; }
+  if (!s) { state('no VM'); note('No VM is running — start one on the Maintenance page.'); return; }
   $('title').textContent = `VM · ${s.golden}`;
   document.title = `${s.golden} · VM screen · Broom`;
   const run = s.state === 'running' || s.state === 'stopping';

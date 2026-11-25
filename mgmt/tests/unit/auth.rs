@@ -179,6 +179,7 @@ fn staff_rights() {
     }
     for p in [
         "/api/wake",
+        "/api/games/update",
         "/api/games/save",
         "/api/games/discard",
         "/api/password",
@@ -271,6 +272,10 @@ fn roles_and_permissions() {
     assert!(may(&night, &np, &post, "/api/power") && may(&night, &np, &post, "/api/wake"));
     assert!(!may(&night, &np, &get, "/api/vnc/view"), "no Remote");
     assert!(!may(&night, &np, &post, "/api/games/save"));
+    assert!(
+        !may(&night, &np, &post, "/api/games/update"),
+        "a games disk's update PC is picked by who may save its update"
+    );
     assert!(may(&night, &np, &get, "/api/status") && may(&night, &np, &post, "/api/password"));
     let looker = Role::Custom("looker".into());
     let lp = perms_of(&looker, &custom);

@@ -1,4 +1,4 @@
-// vmmaint.rs — "Maintain in the browser" (Diskless page): a Windows golden in a virtual machine on this server, with
+// vmmaint.rs — the maintenance VM (Maintenance page): a Windows golden in a virtual machine on this server, with
 // games disks attached, its screen in the browser (noVNC, static/novnc/ + static/vm-console.js) and internet through
 // QEMU's NAT — Windows / app updates and games updates without taking a PC out of the room.
 // - The VM writes the golden's maintenance layer the way a maintenance machine does: while the VM holds the golden
@@ -519,7 +519,7 @@ fn plan(
     }
     if g.maint.is_some() {
         return Err(format!(
-            "{golden} has a maintenance machine — turn maintenance off (Save or Discard its work) first"
+            "{golden} is open on a PC — end that session first (Maintenance page)"
         ));
     }
     if crate::onboard::busy(st, golden) || crate::onboard::vm_owns(golden) {
@@ -536,7 +536,7 @@ fn plan(
     }
     if !keep && info.disk.update_bytes > 0 {
         return Err(format!(
-            "{golden} has unsaved maintenance work — Save or Discard it first (Goldens)"
+            "{golden} has unsaved maintenance work — Save or Discard it first (Maintenance page)"
         ));
     }
     if games.len() > MAX_GAMES {
@@ -790,7 +790,7 @@ fn finish(st: &SharedState, why: Option<String>) {
     let mut notes: Vec<String> = why.into_iter().collect();
     if s.keep {
         notes.push(format!(
-            "Windows changes kept in {}: Save or Discard it (Goldens)",
+            "Windows changes kept in {}: Save or Discard it (Maintenance page)",
             s.golden
         ));
     } else {
@@ -798,7 +798,7 @@ fn finish(st: &SharedState, why: Option<String>) {
         match retry_connected(&|| crate::iscsi::golden_discard(&name)) {
             Ok(()) => notes.push("Windows changes discarded".into()),
             Err(e) => notes.push(format!(
-                "Windows changes NOT discarded ({e}) — Discard {} on the Goldens table",
+                "Windows changes NOT discarded ({e}) — Discard {} on the Maintenance page",
                 s.golden
             )),
         }

@@ -79,7 +79,8 @@ their own layer over it. Every boot resets to `base ← drivers ← fresh child`
 - **Server:** x86_64 Linux (tested on Debian/Ubuntu and Rocky Linux 10), run as root, disk space for the goldens.
   **No packages to install** for the boot server itself (DHCP, TFTP, iSCSI, DNS, the web admin, image conversion, NTFS
   reading are all in the binary; no kernel modules). Only two optional parts use programs of the system:
-  - **The VM features** (*Maintain in the browser* and *Add hardware* on the Diskless page): QEMU, OVMF and `/dev/kvm`.
+  - **The VM features** (the maintenance VM of the Maintenance page, *Add hardware* on the Diskless page): QEMU, OVMF
+    and `/dev/kvm`.
     The Diskless page shows what is missing and an owner installs it with **Install** (it detects apt, dnf or yum and
     runs the command as root). The VM's disk comes from Broom's own daemon over a Unix socket and *Add hardware*'s job
     over HTTP, so no `open-iscsi` and no `ntfs-3g`.
@@ -189,8 +190,9 @@ Upload the powered-off VM folder (only `.vmx` / `.vmdk` are sent, in parallel ch
   once into a driver layer over the base (one extra restart); later boots start with it. Two packages for the same
   device: Windows picks (best match, then newest `DriverVer`).
 - **iSCSI disks** (iSCSI Disks page): game libraries on the server, mounted read-only under a drive letter, writes
-  kept on the PC's SSD until reboot. Pick an **update machine**, boot it, install, shut down, **Save**: a new
-  version, picked up by each PC at its next boot. **Cache** serves a disk from the server's RAM.
+  kept on the PC's SSD until reboot. Update one in a session of the **Maintenance** page (a PC as its update machine,
+  or the VM on the server): install, shut down, **Save**: a new version, picked up by each PC at its next boot.
+  **Cache** serves a disk from the server's RAM.
 - **SSD room** (Windows page): the stage frees *Keep free* GB each boot; a watchdog warns the guest below *Warn* and
   restarts below *Restart* (a full SSD would blue-screen Windows). *Pagefile*: N GB on the SSD, new every boot.
 - **Strict reset** (Network page): Windows can only start through PXE. Without it a PC whose PXE fails boots its SSD
@@ -227,11 +229,21 @@ PC down.
 
 - **Create:** name, OS (Windows by default, or Linux), size, the **installer ISO** from the ISO library, and the
   groups whose machines boot it. It starts as a blank disk.
-- **Install / maintain:** pick its **maintenance machine**. Its boot menu then has *Install … from …* (the golden
+- **Install / maintain:** start a session for it on the **Maintenance** page (a PC, with *Windows (C:)* ticked): that
+  PC is its **maintenance machine**. Its boot menu then has *Install … from …* (the golden
   attached as a blank disk, the ISO booted as a DVD drive) and *Maintain …* (the golden itself, writable). Install
   the OS, then drivers, software and settings; shut down; **Save** makes that work the golden's next version, which
   every machine gets at its next boot (**Discard** throws it away). Windows ISOs ask to press a key to boot from the
   DVD: press one on the maintenance machine.
+- **Maintenance page — one session, saved in one place:** pick where (a PC, or the VM on the server) and what to open
+  for changes: *Windows (C:)* of a golden, games disks, or both. A PC is then the golden's maintenance machine and the
+  ticked disks' update machine at once. Broom does nothing to the PC by itself: it asks what should happen — restart
+  it now (through its agent), wake it, *I'll start it myself*, or cancel. The session's card shows what was changed
+  so far; **Save** / **Discard** per item unlock once the PC is off (or the VM has ended), and **Save all** makes
+  every new version in one step (games disks first, Windows last) and ends the PC's session. Work a session left
+  behind stays listed there until it is saved or thrown away. With only games disks ticked the PC starts as it always
+  does, agent included, so Remote shows its screen; with *Windows (C:)* ticked no agent runs (its key would be saved
+  into the golden): Remote shows that PC as a marked tile without a screen.
 - **Network-boot driver guard:** a network card's driver starts Windows from the network only while its service is
   flagged for it (`BootFlags`, set by *Add hardware*). A vendor's driver installer run in a maintenance session
   registers the service anew without the flag; saved like that, every PC with that card stops at
@@ -263,7 +275,7 @@ PC down.
   start the golden's copy runs the server's current version of the script, so a newer Broom reaches every machine
   without a new golden version. A golden set up before that (its copy is the whole script, not the one that fetches
   the server's) or after Broom moved to another address (the copy holds the server's address): run the command again
-  on it, in its maintenance machine or in **Maintain in the browser**, and Save.
+  on it in a maintenance session (a PC or the VM), and Save.
 - **Windows on a disk that starts fresh at every boot:** that script also sets Windows for it. Always: no automatic
   BitLocker device encryption (Windows 11 turns it on by itself on a PC with a TPM), no hibernation, System Restore,
   scheduled defrag, search index, SysMain or crash dump, no "last access" time written for every file read, and ping
@@ -300,12 +312,12 @@ PC down.
   drives come with the agent only (`gamesfirst=FAILED` in the machine's first-boot line). The disk's update machine
   (a diskless one too) gets the disk itself, writable, as on SSD machines; Save makes the next version, which every
   machine's copy reads from its next boot.
-- **Maintain in the browser (Windows):** the Diskless page runs a golden in a VM on the server (QEMU/KVM, 4 CPU
+- **The maintenance VM (Windows):** the Maintenance page runs a golden in a VM on the server (QEMU/KVM, 4 CPU
   threads and 8 GB unless you set its size on that page — at most the server's threads less 4 and its memory less
   4 GB; internet through QEMU's NAT) and shows its screen in the browser (**Open the screen**: noVNC,
   through Broom's signed-in WebSocket; QEMU's VNC is only a Unix socket). Tick games disks to attach them **writable**
   under their letters, as for an update machine: install or update games, shut the VM down, then **Save** each disk —
-  every machine gets it at its next boot. *Keep Windows changes* (Windows / app updates; the *maintain* permission):
+  every machine gets it at its next boot. *Windows (C:)* ticked (Windows / app updates; the *maintain* permission):
   Save or Discard the golden afterwards; without it the VM's Windows changes are thrown away when it stops, so a role
   with only the *vm* permission updates games but never changes the golden. Neither is the built-in staff role's:
   the owner gives them to a role (Settings → Roles). The VM writes through the server's own iSCSI sessions, each
@@ -422,17 +434,18 @@ PCs (their network card in Windows PE and in the iSCSI boot), production load, a
 |---|---|
 | Monitor | **Machines** (state, health, license, Wake / Manage / Remote, base mode), **Remote**, **Server** (load, charts, disks, services) |
 | Manage | **Devices** (register, import, per-PC detail and disks), **Groups** |
-| Content | **Images**, **iSCSI Disks**, **Drivers** |
+| Content | **Images**, **iSCSI Disks**, **Diskless** (goldens), **Maintenance** (update Windows and games: a PC or the VM, Save), **Drivers** |
 | Config | **Network** (DHCP, Secure Boot, strict reset, DNS), **Windows** (guest user, SSD room, downloads), **Settings** (users, boot menu) |
 | Tools | **Benchmark**, **Logs** |
 
-Accounts and roles (Settings): **owner** — everything; **staff** — look, Remote, Wake, save a games update; no
-deleting or settings. Both are built in. The owner can make **more roles**: a name and what its accounts may do beyond
-looking — `remote`, `wake`, `power` (restart / shut down), `games` (save / discard an update), `vm` (the maintenance
-VM for games disks), `maintain` (goldens: maintenance machine and VM keeping Windows changes, Save / Discard, Add
-hardware), `versions` (the version each group boots). Everything else — machines, groups, images, disks, network,
-settings, accounts, roles — stays the owner's. The server checks every request against the account's role
-(`auth.rs` `needs()`); the pages only hide what a role may not use. A change of role counts from the next request.
+Accounts and roles (Settings): **owner** — everything; **staff** — look, Remote, Wake, update a games disk from a PC
+and save it; no deleting or settings. Both are built in. The owner can make **more roles**: a name and what its
+accounts may do beyond looking — `remote`, `wake`, `power` (restart / shut down), `games` (update a games disk from a
+PC: pick its update machine, save / discard the update), `vm` (the maintenance VM for games disks), `maintain`
+(goldens: maintenance machine and VM keeping Windows changes, Save / Discard, Add hardware), `versions` (the version
+each group boots). Everything else — machines, groups, images, disks, network, settings, accounts, roles — stays the
+owner's. The server checks every request against the account's role (`auth.rs` `needs()`); the pages only hide what a
+role may not use. A change of role counts from the next request.
 
 **HTTPS.** The web admin is served on `https://` (port 443, `--https-port` to change it, `--https-port 0` = off);
 plain `http://` sends a browser there and refuses the admin API. The machines keep plain HTTP: iPXE, the boot files,
@@ -511,7 +524,7 @@ sends it over plain HTTP. What the network must do:
   filesystems on loop devices (`xfsprogs`, `e2fsprogs`).
 - **iPXE** is fetched at `mgmt/ipxe/IPXE_COMMIT`, patched with `mgmt/ipxe/patches/` and embedded; rebuilt only when
   those change (`--ipxe` forces it).
-- **Add hardware and Maintain in the browser** give the golden to QEMU over NBD, from Broom's own iSCSI daemon on a
+- **Add hardware and the maintenance VM** give the golden to QEMU over NBD, from Broom's own iSCSI daemon on a
   root-only Unix socket: the server attaches no disk to itself (no iSCSI initiator, no multipath to keep away, no
   mount).
 - **Add hardware** runs `broom-report.exe` in Windows PE. A release gets it from CI (built from

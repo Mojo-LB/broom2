@@ -12,7 +12,7 @@
 #  - a diskless machine on a later boot: starts the Remote agent and mounts its games disks (broom-watch.ps1 -Dir, its
 #    own task; broom-games.ps1 at start and every 5 minutes).
 #  - the maintenance machine: nothing - what it writes goes into the golden every machine shares (no key, no agent).
-#    The maintenance VM on the server (Diskless page, Maintain in the browser: vmmaint.rs) also gets its games disks,
+#    The maintenance VM on the server (Maintenance page: vmmaint.rs) also gets its games disks,
 #    writable, under their letters (broom-games.ps1 -LinesFile). In both, a guard keeps the golden's network cards'
 #    drivers flagged for network boot while the session runs (task BroomBootCard; a driver installer drops the flag).
 #  - anything else (the server unreachable): nothing.

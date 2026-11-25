@@ -285,7 +285,7 @@ async fn events(
 }
 
 /// The web admin's pages (one URL each, + their fragment /ui/<page>).
-const PAGES: [&str; 14] = [
+const PAGES: [&str; 15] = [
     "machines",
     "images",
     "network",
@@ -298,6 +298,7 @@ const PAGES: [&str; 14] = [
     "server",
     "games",
     "diskless",
+    "maintenance",
     "windows",
     "logs",
 ];
@@ -618,7 +619,7 @@ async fn main() {
         .merge(inventory::routes()) // each machine's hardware list (Machines page)
         .merge(display::routes()) // resolution + refresh per machine / group (Machines page)
         .merge(pins::routes()) // versions kept + which one each group gets (Diskless / iSCSI Disks / Groups)
-        .merge(vmmaint::routes()) // Maintain in the browser: a golden + games disks in a VM, its screen here
+        .merge(vmmaint::routes()) // the maintenance VM (Maintenance page): a golden + games disks in a VM, its screen here
         .merge(bench::routes()) // Benchmark page + client measurements
         .merge(vnc::routes()) // Remote page: screen + mouse/keys of a Windows machine
         .merge(agentauth::routes()) // Remote: agent keys (handed to the stage, re-issued)

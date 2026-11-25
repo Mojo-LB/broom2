@@ -37,6 +37,7 @@ assets!(
     "static/page-server.html",
     "static/page-games.html",
     "static/page-diskless.html",
+    "static/page-maintenance.html",
     "static/page-windows.html",
     "static/page-logs.html",
     "ipxe/snponly.efi",
@@ -60,7 +61,7 @@ assets!(
     "scripts/broom-onboard.ps1",
     "scripts/broom-fw.cs",
     "scripts/broom-vnc.cs",
-    // Maintain in the browser (vmmaint.rs): its page, and noVNC 1.7.0 (static/novnc/README.broom.md: MPL-2.0 / MIT).
+    // The maintenance VM (vmmaint.rs): its page, and noVNC 1.7.0 (static/novnc/README.broom.md: MPL-2.0 / MIT).
     "static/vm-console.html",
     "static/vm-console.js",
     "static/novnc/core/base64.js",

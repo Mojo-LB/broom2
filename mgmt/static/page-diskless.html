@@ -1,38 +1,19 @@
 <section id="page-diskless">
   <div class="d-flex flex-wrap align-items-baseline gap-3 mb-4"><h1 class="h4 mb-0">Diskless</h1>
-    <span class="small text-body-secondary">Machines with no disk boot a golden straight from the server. A golden is installed and kept up to date by its maintenance machine; Save makes that work the version every machine gets at its next boot.</span>
+    <span class="small text-body-secondary">Machines with no disk boot a golden straight from the server. A golden is installed and kept up to date in a maintenance session (<a href="/maintenance" data-click="go" data-args='["maintenance"]'>Maintenance</a> page); saving it there makes that work the version every machine gets at its next boot.</span>
     <span class="flex-grow-1"></span><button class="btn btn-sm btn-outline-secondary" data-click="loadDiskless" title="Refresh" aria-label="Refresh"><svg class="ic" aria-hidden="true"><use href="/icons.svg#refresh"/></svg></button></div>
   <div class="card card-body mb-3">
     <h2 class="h6 text-uppercase text-body-secondary mb-3">Goldens</h2>
     <div class="table-responsive"><table class="table table-sm table-hover align-middle" id="dl_goldens">
-      <thead><tr><th>Name</th><th>OS</th><th>Size</th><th>Installer ISO</th><th title="their machines (fixed IP) boot it diskless">Groups</th><th title="version machines get at boot">Version</th><th title="machines connected now">Machines</th><th title="installs / maintains it: its writes are kept apart until Save or Discard">Maintenance machine</th><th title="the maintenance machine's work, not saved yet">Unsaved work</th><th></th></tr></thead>
+      <thead><tr><th>Name</th><th>OS</th><th>Size</th><th>Installer ISO</th><th title="their machines (fixed IP) boot it diskless">Groups</th><th title="version machines get at boot">Version</th><th title="machines connected now">Machines</th><th title="where it is open for changes now (a session of the Maintenance page): those writes are kept apart until Save or Discard">Open on</th><th title="work of a maintenance session, not saved yet">Unsaved work</th><th></th></tr></thead>
       <tbody></tbody></table></div>
     <span id="dl_msg" class="msg"></span>
   </div>
   <div class="card card-body mb-3">
     <h2 class="h6 text-uppercase text-body-secondary mb-3">Server packages (for the VM features)</h2>
-    <div class="small text-body-secondary mb-2">Maintain in the browser and Add hardware run a virtual machine on this server: they need QEMU with KVM and OVMF from the operating system. Formatting a server disk as XFS (Server page) wants xfsprogs. Everything else in Broom is built in. <span id="pk_os"></span></div>
+    <div class="small text-body-secondary mb-2">The maintenance VM (Maintenance page) and Add hardware run a virtual machine on this server: they need QEMU with KVM and OVMF from the operating system. Formatting a server disk as XFS (Server page) wants xfsprogs. Everything else in Broom is built in. <span id="pk_os"></span></div>
     <div id="pk_state" class="small"></div>
     <pre id="pk_log" class="small mono mt-2 mb-0 border rounded p-2" style="max-height:14rem;overflow:auto" hidden></pre>
-  </div>
-  <div class="card card-body mb-3">
-    <h2 class="h6 text-uppercase text-body-secondary mb-3">Maintain in the browser (VM on the server)</h2>
-    <div class="small text-body-secondary mb-2">Runs a Windows golden in a virtual machine on this server — its screen in this browser, internet through the server — so no PC leaves the room. <b>Games</b>: tick the games disks; they are attached writable (as for an update machine) under their letters: install or update games, shut the VM down, then <b>Save</b> each disk — every machine gets it at its next boot. <b>Windows / apps</b> (owner): tick <i>Keep Windows changes</i>, then Save or Discard the golden in the Goldens table; without it the VM's Windows changes are thrown away when it stops. One VM at a time on the server (this one or Add hardware), with <span id="vm_size_txt">the size below</span>. The golden needs broom-diskless.ps1 and no maintenance machine.</div>
-    <div id="vm_form" class="d-flex flex-wrap gap-3 align-items-end" style="display:none!important">
-      <div><label class="form-label small mb-1" for="vm_golden">Golden</label><select class="form-select form-select-sm" id="vm_golden"></select></div>
-      <div><span class="form-label small mb-1 d-block">Games disks (writable)</span><div id="vm_games" class="d-flex flex-wrap gap-3 small"></div></div>
-      <div class="form-check mb-1" data-perm="maintain"><input class="form-check-input" type="checkbox" id="vm_keep"><label class="form-check-label small" for="vm_keep">Keep Windows changes</label></div>
-      <button class="btn btn-sm btn-primary" data-perm="vm" data-click="vmStart">Start VM</button>
-    </div>
-    <div class="d-flex flex-wrap gap-2 align-items-end mt-2" data-owner>
-      <div><label class="form-label small mb-1" for="vm_cpus">VM: CPU threads</label><input class="form-control form-control-sm" id="vm_cpus" type="number" min="1" style="width:6rem"></div>
-      <div><label class="form-label small mb-1" for="vm_gb">Memory, GB</label><input class="form-control form-control-sm" id="vm_gb" type="number" min="2" style="width:6rem"></div>
-      <button class="btn btn-sm btn-outline-secondary" data-click="vmSize">Save</button>
-      <span class="small text-body-secondary" id="vm_size_max"></span>
-    </div>
-    <span id="vm_msg" class="msg"></span>
-    <div id="vm_problem" class="small text-danger"></div>
-    <div id="vm_box" class="mt-2"></div>
   </div>
   <div class="card card-body mb-3">
     <h2 class="h6 text-uppercase text-body-secondary mb-3">Diskless machines</h2>
@@ -69,8 +50,8 @@
       <button class="btn btn-sm btn-primary" data-click="saveGolden">Create / change</button>
       <span id="dl_fmsg" class="msg align-self-center"></span>
     </div>
-    <div class="small text-body-secondary mt-2">A new golden is a blank disk. Choose its maintenance machine in the table, then on that machine pick <b>Install … from …</b> in the boot menu: the installer sees the golden as its disk. After the install, the menu boots the golden itself (<b>Maintain …</b>) for drivers, software and settings. Shut it down and press <b>Save</b>.<br>
-      Windows golden: before the first Save, run once on the maintenance machine (PowerShell as Administrator) <code id="dl_scriptcmd">irm http://SERVER/broom-diskless.ps1 | iex</code> — each machine then takes its own name (Devices page) on its first boot, kept as its base.<br>
+    <div class="small text-body-secondary mt-2">A new golden is a blank disk. Start a session for it on the <a href="/maintenance" data-click="go" data-args='["maintenance"]'>Maintenance</a> page (a PC, with <b>Windows (C:)</b> ticked), then on that PC pick <b>Install … from …</b> in the boot menu: the installer sees the golden as its disk. After the install, the menu boots the golden itself (<b>Maintain …</b>) for drivers, software and settings. Shut it down and press <b>Save</b> on the Maintenance page.<br>
+      Windows golden: before the first Save, run once on that PC (PowerShell as Administrator) <code id="dl_scriptcmd">irm http://SERVER/broom-diskless.ps1 | iex</code> — each machine then takes its own name (Devices page) on its first boot, kept as its base.<br>
       Linux golden: an Ubuntu installer ISO is booted from the server (the machine needs ~4 GB of RAM more than the ISO) and sets the golden up by itself. Another Debian / Ubuntu install: run once before the first Save <code id="dl_scriptcmd_sh">curl -fsS http://SERVER/broom-diskless.sh | sudo sh</code>.</div>
   </div>
   <div class="card card-body mb-3">

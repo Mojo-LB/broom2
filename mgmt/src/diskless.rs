@@ -246,7 +246,7 @@ fn configs(st: &SharedState) -> Result<Vec<golden::Config>, String> {
         let maint = g.maint.and_then(|id| all.iter().find(|m| m.id == id));
         // "Add hardware" (onboard.rs) running: its VM on this server writes the golden, through 127.0.0.1 (no LAN
         // host can send from the loopback address).
-        // Same for the maintenance VM (vmmaint.rs, Maintain in the browser).
+        // Same for the maintenance VM (vmmaint.rs, Maintenance page).
         // Loopback alone is not trusted (any program on the server, a VM's guest through QEMU's NAT): that job's
         // write key must come with the login (games::Config.update_key).
         let local = crate::onboard::vm_key(&g.name).or_else(|| crate::vmmaint::golden_key(&g.name));
@@ -1694,6 +1694,8 @@ async fn status(State(st): State<SharedState>) -> Result<Json<serde_json::Value>
                 "served": d.is_some(),
                 "status": d,
                 "machines_without_fixed_ip": without_ip,
+                // Open in the maintenance VM on this server right now (vmmaint.rs).
+                "vm": crate::vmmaint::owns_golden(&g.name),
                 // The maintenance session's network-boot driver guard: its last report, and how many cards Add
                 // hardware put into this golden.
                 "boot_check": checks.get(&g.name),
@@ -2033,7 +2035,7 @@ fn vm_off(name: &str) -> Result<(), ApiError> {
     if crate::vmmaint::owns_golden(name) {
         return Err((
             StatusCode::CONFLICT,
-            format!("{name} is running in the VM (Maintain in the browser) — shut it down first"),
+            format!("{name} is running in the VM (Maintenance page) — shut it down first"),
         ));
     }
     Ok(())

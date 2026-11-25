@@ -239,6 +239,8 @@ async fn status(State(st): State<SharedState>) -> Json<serde_json::Value> {
             let upd = d.update.and_then(|id| machines.iter().find(|m| m.id == id));
             serde_json::json!({
                 "update_name": upd.map(who),
+                // Attached to the maintenance VM on this server right now (vmmaint.rs).
+                "vm": crate::vmmaint::owns_games(&d.name),
                 "update_ip": d.update.and_then(|id| ip_of(&st, id)),
                 "status": s,
                 "volume": crate::volumes::volume_of(&st, "games", &d.name),
@@ -541,7 +543,7 @@ fn vm_off(name: &str) -> Result<(), ApiError> {
     if crate::vmmaint::owns_games(name) {
         return Err((
             StatusCode::CONFLICT,
-            format!("{name} is attached to the VM (Maintain in the browser) — shut it down first"),
+            format!("{name} is attached to the VM (Maintenance page) — shut it down first"),
         ));
     }
     Ok(())

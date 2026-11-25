@@ -90,7 +90,7 @@ pub enum Perm {
     Wake,
     /// Restart / shut down machines.
     Power,
-    /// Save / discard a games disk update.
+    /// Update a games disk from a PC: pick its update machine, save / discard the update.
     Games,
     /// Run the maintenance VM on the server for games disks (Windows changes are not kept).
     Vm,
@@ -106,7 +106,10 @@ pub(crate) const PERMS: [(Perm, &str); 7] = [
     (Perm::Remote, "Remote: see and control machines' screens"),
     (Perm::Wake, "Turn machines on"),
     (Perm::Power, "Restart / shut down machines"),
-    (Perm::Games, "Save / discard a games disk update"),
+    (
+        Perm::Games,
+        "Update a games disk from a PC: pick its update machine, save / discard the update",
+    ),
     (
         Perm::Vm,
         "Run the maintenance VM for games disks (Windows changes not kept)",
@@ -283,7 +286,10 @@ pub(crate) fn needs(method: &axum::http::Method, path: &str) -> Need {
             "/api/wake" => Need::Perm(&[Perm::Wake]),
             // on → Wake; restart / shut down → Power (power.rs).
             "/api/power" => Need::Perm(&[Perm::Wake, Perm::Power]),
-            "/api/games/save" | "/api/games/discard" => Need::Perm(&[Perm::Games]),
+            // A games disk updated from a PC: who may save the update also picks the PC that makes it.
+            "/api/games/update" | "/api/games/save" | "/api/games/discard" => {
+                Need::Perm(&[Perm::Games])
+            }
             // Keeping Windows changes → Maintain (vmmaint.rs).
             "/api/vm/start" | "/api/vm/stop" => Need::Perm(VM),
             "/api/diskless/maint"

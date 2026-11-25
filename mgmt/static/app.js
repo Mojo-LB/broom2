@@ -54,7 +54,7 @@ function grpBoxes(id,on){const e=document.getElementById(id);if(!e)return;on=on|
 const grpTicked=id=>[...document.querySelectorAll('#'+CSS.escape(id)+' input:checked')].map(e=>e.value);
 
 // ---- tabs: load HTML fragments on demand (/ui/<page>) + only load data for the tab being viewed ----
-const loaders={machines:()=>{loadDispLists().catch(()=>{});return loadStatus();},remote:loadRemote,server:loadServer,devices:loadDevices,groups:loadGroups,images:loadImages,games:loadGames,diskless:loadDiskless,drivers:loadDrivers,network:loadDhcp,windows:loadCafe,system:()=>{loadCafe();loadUsers();loadTls();},benchmark:loadBench,logs:loadLogs};
+const loaders={machines:()=>{loadDispLists().catch(()=>{});loadSessionMarks().then(()=>curPage==='machines'&&allMachines.length&&renderMachines());return loadStatus();},remote:loadRemote,server:loadServer,devices:loadDevices,groups:loadGroups,images:loadImages,games:loadGames,diskless:loadDiskless,maintenance:loadMaint,drivers:loadDrivers,network:loadDhcp,windows:loadCafe,system:()=>{loadCafe();loadUsers();loadTls();},benchmark:loadBench,logs:loadLogs};
 const fragCache={};
 let curPage=null;
 async function showPage(p){
@@ -107,6 +107,14 @@ async function loadStatus(){
   document.getElementById('onlinecount').textContent=online+'/'+allMachines.length+' online';
   if(curPage==='machines')renderMachines();
 }
+// Machines in a session of the Maintenance page (id → what for), marked in the table; read when the page is opened.
+let mMarks={};
+async function loadSessionMarks(){
+  try{const [d,g]=await Promise.all([j('/api/diskless'),j('/api/games')]),m={};
+    for(const x of g.disks)if(x.disk.update!=null)m[x.disk.update]='games update';
+    for(const x of d.goldens)if(x.golden.maint!=null)m[x.golden.maint]='maintenance';
+    mMarks=m;}catch(e){}}
+const sessBadge=m=>mMarks[m.id]?` <a class="badge text-bg-warning text-decoration-none" href="/maintenance" data-click="go" data-args='["maintenance"]' title="In a session of the Maintenance page">${esc(mMarks[m.id])}</a>`:'';
 // Per-column filters (the second header row of the machine table). Text = case-insensitive "contains".
 const MF=['mf_host','mf_grp','mf_ip','mf_mac','mf_state','mf_lic','mf_reg'];
 const mf=id=>((document.getElementById(id)||{}).value||'').trim().toLowerCase();
@@ -130,7 +138,7 @@ function renderMachines(){
        <td>${m.hostname?esc(m.hostname):'<span class="mono">—</span>'} ${m.registered?'':'<span class="badge rounded-pill text-bg-warning">new</span>'}</td>
        <td class="mono">${m.grp?esc(m.grp):'—'}</td>
        <td class="mono">${esc(m.ip)}</td><td class="mono">${esc(m.mac)}</td>
-       <td>${led(m.online)}${m.not_reset?' <span class="badge text-bg-danger" title="Windows started from the SSD without a PXE boot at '+new Date(m.not_reset*1000).toLocaleString()+' — this session was NOT reset (cable out, server down, boot order changed?). Cleared by the next PXE boot.">not reset</span>':''}${m.ssd_low?' <span class="badge text-bg-danger" title="SSD almost full during the session: '+gbs(m.ssd_low[0])+' free at '+new Date(m.ssd_low[1]*1000).toLocaleString()+' (the guest wrote a lot; Windows → SSD room). Cleared by the next PXE boot.">SSD full</span>':''}${pwBadge(m)}${mxBadge(m.metrics)}${upBadge(m)}${baseBadge(m)}</td>
+       <td>${led(m.online)}${m.not_reset?' <span class="badge text-bg-danger" title="Windows started from the SSD without a PXE boot at '+new Date(m.not_reset*1000).toLocaleString()+' — this session was NOT reset (cable out, server down, boot order changed?). Cleared by the next PXE boot.">not reset</span>':''}${m.ssd_low?' <span class="badge text-bg-danger" title="SSD almost full during the session: '+gbs(m.ssd_low[0])+' free at '+new Date(m.ssd_low[1]*1000).toLocaleString()+' (the guest wrote a lot; Windows → SSD room). Cleared by the next PXE boot.">SSD full</span>':''}${pwBadge(m)}${mxBadge(m.metrics)}${upBadge(m)}${baseBadge(m)}${sessBadge(m)}</td>
        <td class="mono" title="${esc(m.license_result||'')}">${licCell(m)}</td>
        <td><div class="d-flex gap-1">${m.registered
           ? `<button class="btn btn-sm btn-outline-secondary" data-perm="wake" ${act('wake',m.mac)}>Wake</button>
@@ -752,25 +760,20 @@ async function loadGames(){const [g]=await Promise.all([j('/api/games'),loadVols
   grpBoxes('gm_groups',grpTicked('gm_groups'));
   const le=document.getElementById('gm_letter');
   if(le&&!le.options.length)le.innerHTML=[...'DEFGHIJKLMNOPQRSTUVWXYZ'].map(c=>`<option${c==='G'?' selected':''}>${esc(c)}</option>`).join('');
-  const opts=sel=>'<option value="">— none —</option>'+g.machines.map(m=>
-    `<option value="${m.id}"${m.id===sel?' selected':''}>${esc(m.name)}${m.grp?' ('+esc(m.grp)+')':''}</option>`).join('');
   tb.innerHTML=g.disks.map(x=>{const d=x.disk,s=x.status;
     return `<tr><td>${esc(d.name)}</td><td class="mono">${esc(d.letter)}:</td><td class="mono">${d.size_gb} GB</td>
       <td>${d.groups.length?esc(d.groups.join(', ')):'<span class="mono">all</span>'}</td>
       <td class="mono text-nowrap">${s?verCell('games',d.name,s):'<span class="text-danger">not served</span>'}</td>
       <td class="mono">${s?s.sessions+(s.old_sessions?` <span title="still on an older version until they reboot">(${s.old_sessions} older)</span>`:''):''}</td>
-      <td><select class="form-select form-select-sm d-inline-block w-auto" data-owner data-change="setGamesUpdate" data-args="${esc(JSON.stringify([d.name]))}">${opts(d.update)}</select>${d.update!=null&&!x.update_ip?' <span class="text-danger" title="no fixed IP or lease known">no IP</span>':''}${s&&s.update_connected?' <span class="text-success">'+ic('dot','')+' writable</span>':''}</td>
-      <td class="mono">${s&&s.update_bytes?gbs(s.update_bytes)+` <button class="btn btn-sm btn-outline-primary" data-perm="games" ${act('saveGamesUpdate',d.name)}>Save</button> <button class="btn btn-sm btn-outline-secondary" data-perm="games" ${act('discardGamesUpdate',d.name)}>Discard</button>`:'—'}</td>
+      <td>${d.update!=null?esc(x.update_name||'machine '+d.update):x.vm?'the VM on this server':'—'}${d.update!=null&&!x.update_ip?' <span class="text-danger" title="no fixed IP or lease known">no IP</span>':''}${s&&s.update_connected?' <span class="text-success text-nowrap">'+ic('dot','')+' writable now</span>':''}</td>
+      <td class="mono">${s&&s.update_bytes?gbs(s.update_bytes)+' <a href="/maintenance" data-click="go" data-args=\'["maintenance"]\'>save it</a>':'—'}</td>
       <td>${volCell('games',d.name,x.volume)}</td>
       <td data-owner><button class="btn btn-sm btn-outline-secondary" ${act('toggleGamesRam',d.name,!d.ram)} title="RAM: the disk is served from a copy in the server's RAM (loaded in the background; needs about as much free RAM as the data on it — games barely compress). Disk: read from its file (the page cache keeps what is read most).">${d.ram?(s&&s.ram?'Cache: RAM':(s&&s.ram_loading?'Cache: RAM (loading…)':'Cache: RAM (not loaded)')):'Cache: disk'}</button> <button class="btn btn-sm btn-outline-secondary" ${act('editGames',d.name)}>Edit</button> <button class="btn btn-sm btn-outline-danger" ${act('delGames',d.name)}>Delete</button></td></tr>`+verRow('games',d.name,10);}).join('')
     ||'<tr><td colspan="10" class="mono">no iSCSI disk yet</td></tr>';
   const m=document.getElementById('gm_msg');if(m&&g.error)say(m,' ✗ not served: '+g.error);}
 async function gamesCall(url,body,q){if(q&&!await sure(q))return;await post(url,body,'gm_msg',r=>r.status||'saved',loadGames);}
 const saveGames=()=>gamesCall('/api/games/disk',{name:v('gm_name'),letter:v('gm_letter'),size_gb:+v('gm_size'),groups:grpTicked('gm_groups'),volume:v('gm_vol')||null});
-const setGamesUpdate=(name,el)=>gamesCall('/api/games/update',{name,id:el.value?+el.value:null});
 const toggleGamesRam=(name,ram)=>gamesCall('/api/games/cache',{name,ram},ram?'Serve iSCSI disk '+name+' from RAM? It is loaded in the background (served from the disk meanwhile) and needs about as much free RAM as the data on it; not enough RAM → it stays on the disk (see the log).':null);
-const saveGamesUpdate=name=>gamesCall('/api/games/save',{name},'Save the update of '+name+' as its new version? Its update machine must be shut down. Each machine gets it at its next boot.');
-const discardGamesUpdate=name=>gamesCall('/api/games/discard',{name},'Throw the update of '+name+' away?');
 const delGames=name=>gamesCall('/api/games/delete',{name},'Delete iSCSI disk '+name+' and EVERYTHING on it? Machines using it keep it until they reboot.');
 function editGames(name){const d=gmDisks.find(x=>x.disk.name===name).disk;
   for(const [k,val] of [['gm_name',d.name],['gm_letter',d.letter],['gm_size',d.size_gb]])document.getElementById(k).value=val;
@@ -818,16 +821,14 @@ const mac12=m=>(m||'').toLowerCase().replace(/[^0-9a-f]/g,'');
 async function loadDiskless(){
   const [d,vl]=await Promise.all([j('/api/diskless'),j('/api/volumes').catch(()=>({volumes:[]})),loadVersions(),loadGroupNames()]);
   dlData=d;const tb=document.querySelector('#dl_goldens tbody');if(!tb)return;
-  const opts=sel=>'<option value="">— none —</option>'+d.machines.map(m=>
-    `<option value="${esc(m.id)}"${m.id===sel?' selected':''}>${esc(m.name)}${m.group?' ('+esc(m.group)+')':''}</option>`).join('');
   tb.innerHTML=d.goldens.map(x=>{const g=x.golden,s=x.status?x.status.disk:null;
     return `<tr><td><b>${esc(g.name)}</b></td><td>${osPill(g.os)}</td><td class="mono">${esc(g.size_gb)} GB</td>
       <td><div class="mono small" style="max-width:16rem;white-space:normal;overflow-wrap:anywhere">${esc(g.iso||'—')}</div></td>
       <td>${g.groups.length?esc(g.groups.join(', ')):'<span class="text-body-secondary">none</span>'}</td>
       <td class="mono text-nowrap">${s?verCell('golden',g.name,s):'<span class="text-danger">not served</span>'}</td>
       <td class="mono">${x.status?x.status.machines.filter(m=>m.connected).length:''}</td>
-      <td><select class="form-select form-select-sm d-inline-block w-auto" data-perm="maintain" data-change="setMaint" data-args="${esc(JSON.stringify([g.name]))}">${opts(g.maint)}</select>${s&&s.update_connected?' <span class="text-success">'+ic('dot','')+' writable</span>':''}</td>
-      <td class="mono">${s&&s.update_bytes?gbs(s.update_bytes)+` <button class="btn btn-sm btn-outline-primary" data-perm="maintain" ${act('saveMaint',g.name)}>Save</button> <button class="btn btn-sm btn-outline-secondary" data-perm="maintain" ${act('discardMaint',g.name)}>Discard</button>`:'—'}</td>
+      <td>${g.maint!=null?esc((d.machines.find(m=>m.id===g.maint)||{}).name||'machine '+g.maint):x.vm?'the VM on this server':'—'}${s&&s.update_connected?' <span class="text-success text-nowrap">'+ic('dot','')+' writable now</span>':''}</td>
+      <td class="mono">${s&&s.update_bytes?gbs(s.update_bytes)+' <a href="/maintenance" data-click="go" data-args=\'["maintenance"]\'>save it</a>':'—'}</td>
       <td class="text-nowrap"><button class="btn btn-sm btn-outline-secondary" data-owner ${act('editGolden',g.name)}>Edit</button> <button class="btn btn-sm btn-outline-danger" data-owner ${act('delGolden',g.name)}>Delete</button></td></tr>`+verRow('golden',g.name,10);}).join('')
     ||'<tr><td colspan="10" class="mono">no golden yet — create one below</td></tr>';
   const vp=document.getElementById('ver_pct');if(vp&&verData&&document.activeElement!==vp)vp.value=verData.min_free_pct;
@@ -872,7 +873,7 @@ async function loadDiskless(){
   const sc=document.getElementById('dl_scriptcmd');if(sc)sc.textContent='irm http://'+srv+'/broom-diskless.ps1 | iex';
   const sh=document.getElementById('dl_scriptcmd_sh');if(sh)sh.textContent='curl -fsS http://'+srv+'/broom-diskless.sh | sudo sh';
   const m=document.getElementById('dl_msg');if(m)say(m,d.error?' ✗ not served: '+d.error:'');
-  loadPackages().catch(()=>{});loadOnboard().catch(()=>{});loadVm().catch(()=>{});}
+  loadPackages().catch(()=>{});loadOnboard().catch(()=>{});}
 // "Server packages" (pkgmgr.rs): what the VM features need from the operating system, and the owner's Install.
 let pkTimer=null,pkCmd={},pkWas=false;
 async function loadPackages(){
@@ -885,7 +886,7 @@ async function loadPackages(){
     return `<div class="mb-2"><b>${esc(title)}:</b> missing ${esc(miss.map(m=>m.what+(m.package?' ('+m.package+')':'')).join(', '))}`
       +(r.supported?`<div class="mono mt-1">${esc(f.command)}</div><button class="btn btn-sm btn-primary mt-1" data-owner ${act('pkInstall',key)}${run?' disabled':''}>Install</button>`
         :`<div class="text-danger mt-1">${esc(f.hint||'')}</div>`)+'</div>';};
-  let h=row('vm','QEMU and OVMF (Maintain in the browser, Add hardware)',r.vm)+row('xfs','xfsprogs (XFS server disks, optional)',r.xfs);
+  let h=row('vm','QEMU and OVMF (the maintenance VM, Add hardware)',r.vm)+row('xfs','xfsprogs (XFS server disks, optional)',r.xfs);
   if(!r.kvm)h+='<div class="text-danger">/dev/kvm is missing: a VM needs KVM (turn on virtualisation in the firmware, or nested virtualisation when this server is itself a VM).</div>';
   st.innerHTML=h;
   const lg=document.getElementById('pk_log'),jb=r.job;
@@ -893,8 +894,8 @@ async function loadPackages(){
   if(jb){lg.textContent=(jb.log||[]).join('\n')+(jb.state==='failed'?'\n✗ '+jb.msg:jb.state==='done'?'\n✓ '+jb.msg:'');lg.scrollTop=lg.scrollHeight;}
   clearTimeout(pkTimer);
   if(run&&pageFromPath()==='diskless')pkTimer=setTimeout(()=>loadPackages().catch(()=>{}),2000);
-  // The VM cards say what was missing: refresh them once an install has ended.
-  if(pkWas&&!run)loadVm().catch(()=>{});
+  // Add hardware says what was missing: refreshed once an install has ended.
+  if(pkWas&&!run)loadOnboard().catch(()=>{});
   pkWas=run;
 }
 async function pkInstall(feature){
@@ -926,46 +927,210 @@ async function loadOnboard(){
   clearTimeout(obTimer);
   if(jb&&(jb.state==='waiting'||jb.state==='installing')&&pageFromPath()==='diskless')obTimer=setTimeout(()=>loadOnboard().catch(()=>{}),4000);
 }
-// "Maintain in the browser" (vmmaint.rs): a Windows golden + games disks in a VM on the server, its screen at /vm-console.
-let vmTimer=null;
-async function loadVm(){
-  const r=await j('/api/vm').catch(()=>null);const box=document.getElementById('vm_box');if(!r||!box)return;
-  const s=r.session,run=s&&['starting','running','stopping'].includes(s.state);
-  const gs=document.getElementById('vm_golden'),keepG=gs.value;
-  gs.innerHTML=r.goldens.map(g=>`<option value="${esc(g.name)}"${g.name===keepG?' selected':''}>${esc(g.name)}</option>`).join('');
-  const was=new Set([...document.querySelectorAll('#vm_games input:checked')].map(i=>i.value));
-  document.getElementById('vm_games').innerHTML=r.games.filter(d=>d.served).map(d=>`<label class="form-check mb-0"><input class="form-check-input" type="checkbox" value="${esc(d.name)}"${was.has(d.name)?' checked':''}> ${esc(d.name)} <span class="mono">(${esc(d.letter)}:)</span></label>`).join('')||'<span class="text-body-secondary">none</span>';
-  // Shown only once the server has said no VM is running (hidden in the page until then: a second start is refused).
-  document.getElementById('vm_form').style.setProperty('display',run?'none':'flex','important');
-  const vc=document.getElementById('vm_cpus'),vg=document.getElementById('vm_gb');
-  if(vc&&document.activeElement!==vc&&document.activeElement!==vg){vc.value=r.cpus;vc.max=r.max_cpus;vg.value=r.mem_gb;vg.max=r.max_gb;}
-  const tx=(id,t)=>{const e=document.getElementById(id);if(e)e.textContent=t;};
-  tx('vm_size_txt',`${r.cpus} CPU threads and ${r.mem_gb} GB of memory`);
-  tx('vm_size_max',`at most ${r.max_cpus} threads and ${r.max_gb} GB here: 4 threads and 4 GB always stay with the server. Used from the VM's next start.`);
-  document.getElementById('vm_problem').textContent=r.problem?'Not possible on this server yet: '+r.problem:'';
-  if(!s){box.innerHTML='';return;}
-  const cls={running:'text-success',failed:'text-danger',stopped:'text-body-secondary'}[s.state]||'text-primary';
-  const games=(s.games||[]).map(g=>g.name+' ('+g.letter+':)').join(', ');
-  let h=`<div><b>${esc(s.golden)}</b> · <span class="${esc(cls)}">${esc(s.state)}</span> · started ${esc(new Date(s.started*1000).toLocaleString())} by ${esc(s.by)}`
-    +(s.ended?' · ended '+esc(new Date(s.ended*1000).toLocaleString()):'')+`</div><div class="small">games disks: ${esc(games||'none')} · Windows changes ${s.keep?'kept for Save / Discard':'thrown away at the end'}</div>`;
-  if(s.msg&&!run)h+=`<div class="small">${esc(s.msg)}</div>`;
-  if(run)h+=`<div class="d-flex flex-wrap gap-2 mt-2"><a class="btn btn-sm btn-primary" data-perm="${s.keep?'maintain':'vm'}" href="/vm-console" target="_blank" rel="noopener">Open the screen</a>
-    <button class="btn btn-sm btn-outline-warning" data-perm="${s.keep?'maintain':'vm'}" ${act('vmStop',false)}>Shut down</button>
-    <button class="btn btn-sm btn-outline-danger" data-perm="${s.keep?'maintain':'vm'}" ${act('vmStop',true)} title="like pulling the plug — only if Windows hangs">Turn off</button></div>`;
-  else{const pend=r.games.filter(d=>(s.games||[]).some(g=>g.name===d.name)&&d.update_bytes>0);
-    if(pend.length)h+='<div class="d-flex flex-wrap gap-2 align-items-center mt-2 small">'+pend.map(d=>`<span><b>${esc(d.name)}</b>: ${gbs(d.update_bytes)} written</span>
-      <button class="btn btn-sm btn-outline-primary" data-perm="games" ${act('vmGamesSave',d.name)}>Save</button>
-      <button class="btn btn-sm btn-outline-secondary" data-perm="games" ${act('vmGamesDiscard',d.name)}>Discard</button>`).join(' ')+'</div>';}
-  box.innerHTML=h;
-  clearTimeout(vmTimer);
-  if(run&&pageFromPath()==='diskless')vmTimer=setTimeout(()=>loadVm().catch(()=>{}),5000);
+// ---- Maintenance page: one session for Windows (C:) and the games disks, on a PC or in the VM on this server, and
+// its work saved in one place. A PC's session is what the server knows as a golden's maintenance machine
+// (diskless.rs) and a games disk's update machine (games.rs), set together here; the VM is vmmaint.rs, its screen at
+// /vm-console. Nothing is done to a PC by itself: once it is set up, the page asks what should happen to it. ----
+let mtD=null,mtAsk=null,mtTimer=null;   // mtAsk: the PC (id) just set up, asked about now
+const can=p=>document.body.dataset.role==='owner'||(document.body.dataset.perms||'').split(' ').includes(p);
+const mtRun=s=>!!s&&['starting','running','stopping'].includes(s.state);
+const mtWho=id=>{const m=mtD.d.machines.find(m=>m.id===id);return m?m.name:'machine '+id;};
+const mtBytes=i=>i.st?i.st.update_bytes:0, mtBusy=i=>!!(i.st&&i.st.update_connected);
+const mtName=i=>i.kind==='golden'?(i.os==='windows'?'Windows (C:)':'System disk')+' of golden '+i.name:'games disk '+i.name+' ('+i.letter+':)';
+const mtItem=(kind,name)=>(kind==='golden'?mtD.golds:mtD.disks).find(i=>i.name===name);
+const mtSay=t=>say(document.getElementById('mt_msg'),t);
+async function loadMaint(){
+  const [d,g,vm,ms]=await Promise.all([j('/api/diskless'),j('/api/games'),j('/api/vm').catch(()=>null),j('/api/status').catch(()=>allMachines)]);
+  mtD={d,g,vm,ms,
+    golds:d.goldens.map(x=>({kind:'golden',name:x.golden.name,os:x.golden.os,groups:x.golden.groups,pc:x.golden.maint,st:x.status&&x.status.disk,check:x.boot_check,cards:x.boot_cards})),
+    disks:g.disks.map(x=>({kind:'games',name:x.disk.name,letter:x.disk.letter,groups:x.disk.groups,pc:x.disk.update,st:x.status}))};
+  if(!document.getElementById('mt_sessions'))return;
+  mtForm();mtRender();mtSaved();mtVmSize();
+  // Followed while a session is open (a PC set up, the VM running).
+  clearTimeout(mtTimer);
+  if(pageFromPath()==='maintenance'&&mtSessions().some(x=>x.pc!=null||x.vm))mtTimer=setTimeout(()=>loadMaint().catch(()=>{}),5000);
 }
-function vmSize(){post('/api/vm/size',{cpus:+v('vm_cpus'),mem_gb:+v('vm_gb')},'vm_msg',()=>'saved — used from the VM\'s next start',loadVm);}
-function vmStart(){const games=[...document.querySelectorAll('#vm_games input:checked')].map(i=>i.value),keep=!!document.getElementById('vm_keep')?.checked;
-  post('/api/vm/start',{golden:v('vm_golden'),games,keep},'vm_msg',()=>'started — Open the screen',loadVm);}
-const vmStop=force=>sure(force?'Turn the VM off at once, like pulling the plug? Unsaved work in Windows is lost; use it only if Windows hangs.':'Press the VM\'s power button? Windows shuts down (close what you are doing first).').then(ok=>ok&&post('/api/vm/stop',{force},'vm_msg',r=>r.msg,loadVm));
-const vmGamesSave=name=>sure('Save the VM\'s changes to '+name+' as its new version? Each machine gets it at its next boot.').then(ok=>ok&&post('/api/games/save',{name},'vm_msg',r=>r.status||'saved',loadVm));
-const vmGamesDiscard=name=>sure('Throw the VM\'s changes to '+name+' away?').then(ok=>ok&&post('/api/games/discard',{name},'vm_msg',()=>'discarded',loadVm));
+// The sessions: one per PC that holds something, the VM while it runs, and what was written but is held by neither
+// (a VM that has ended, a session that was closed) — still there for Save or Discard.
+function mtSessions(){
+  const all=[...mtD.golds,...mtD.disks],s=mtD.vm&&mtD.vm.session,out=[],taken=new Set();
+  for(const id of [...new Set(all.map(i=>i.pc).filter(id=>id!=null))]){
+    const items=all.filter(i=>i.pc===id);items.forEach(i=>taken.add(i));out.push({key:'pc'+id,pc:id,items});}
+  if(mtRun(s)){const items=all.filter(i=>!taken.has(i)&&(i.kind==='golden'?s.keep&&i.name===s.golden:(s.games||[]).some(x=>x.name===i.name)));
+    items.forEach(i=>taken.add(i));out.push({key:'vm',vm:s,items});}
+  const rest=all.filter(i=>!taken.has(i)&&mtBytes(i)>0);
+  if(rest.length)out.push({key:'rest',items:rest});
+  return out;}
+// A session's PC: its row of /api/status (on, Broom agent connected), and whether it has started into the session.
+const mtPcOf=x=>({m:mtD.ms.find(m=>m.id===x.pc)||{},live:x.items.some(mtBusy)});
+// Save / Discard wait for the PC to be off (the server checks it again) and for the VM to have ended.
+const mtHeld=x=>x.vm?true:x.pc!=null?(()=>{const {m,live}=mtPcOf(x);return live&&!!m.online;})():false;
+// What the session's guard reported about the golden's network cards (diskless.rs BootCheck), next to Save.
+function mtCheck(i){
+  if(i.kind!=='golden'||i.os!=='windows')return '<span class="text-body-secondary">none needed</span>';
+  const c=i.check,at=t=>new Date(t*1000).toLocaleTimeString();
+  if(!c)return '<span class="text-body-secondary" title="Windows reports it when it starts in a maintenance session: Broom then keeps the network cards\' drivers flagged for network boot while the session runs">Network-boot driver: not checked in a session yet</span>';
+  if(c.missing.length)return `<span class="text-danger">${ic('err')} Network-boot driver not ready: ${esc(c.missing.join(', '))}. PCs with that card will not start from this golden: install the card again with Add hardware (Diskless page).</span>`;
+  if(c.restored.length)return `${ic('ok')} Network-boot driver: OK. Its network-boot flag was gone during the session (${esc(c.restored.map(r=>r.service+' at '+at(r.at)).join(', '))}: a driver installer does that) and Broom set it again.`;
+  if(!c.ok.length)return '<span class="text-body-secondary">Network-boot driver: no card to check (Add hardware has put none into this golden)</span>';
+  return `${ic('ok')} Network-boot driver: OK <span class="text-body-secondary">(${esc(c.ok.join(', '))}; checked ${esc(at(c.at))})</span>`;}
+// A session's button: for who has `perm` ('' = anyone who sees the page), an ACTIONS entry and its arguments.
+const mtBtn=(perm,label,cls,...a)=>`<button class="btn btn-sm ${esc(cls)}" ${perm?`data-perm="${esc(perm)}"`:''} ${act(...a)}>${label}</button>`;
+function mtCard(x){
+  const held=mtHeld(x),any=x.items.some(i=>mtBytes(i)>0);
+  let head='',ctl='',ask='',note='';
+  if(x.pc!=null){
+    const {m,live}=mtPcOf(x),name=mtWho(x.pc),on=!!m.online,agent=on&&!!m.remote,win=x.items.some(i=>i.kind==='golden');
+    if(live&&mtAsk===x.pc)mtAsk=null;
+    head=`<b>${esc(name)}</b> ${led(on)} <span class="small text-body-secondary">${live?'in the session':on?'not in the session yet: it begins at its next start from the network':''}</span>`;
+    if(mtAsk===x.pc)ask=`<div class="alert alert-info py-2 mb-3" role="status"><div class="mb-2"><b>${esc(name)} is set up.</b> Nothing has happened to the PC: the session begins at its next start from the network. What should happen now?</div>
+      <div class="d-flex flex-wrap gap-2">${agent?mtBtn('power','Restart it now','btn-primary','mtPower','restart',x.pc):''}${!on&&m.mac?mtBtn('wake','Wake it','btn-primary','mtWake',m.mac):''}
+        ${mtBtn('','I\'ll start it myself','btn-outline-secondary','mtAskDone')}${mtBtn('','Cancel the session','btn-outline-danger','mtEndAsk',x.pc,true)}</div>
+      ${on&&!agent?'<div class="small mt-2">It is on with no Broom agent connected, so Broom cannot restart it: restart it at the PC.</div>':''}</div>`;
+    else ctl=(agent?mtBtn('power','Restart it now','btn-outline-secondary','mtPower','restart',x.pc)+mtBtn('power','Shut it down','btn-outline-secondary','mtPower','shutdown',x.pc):'')
+      +(!on&&m.mac?mtBtn('wake','Wake it','btn-outline-secondary','mtWake',m.mac):'')
+      +(agent&&m.hostname?mtBtn('remote','Remote','btn-outline-primary','remoteTo',m.hostname):'')
+      +(live&&on?'':mtBtn('','End the session','btn-outline-danger','mtEndAsk',x.pc,false));
+    if(live&&on)note=(!agent&&win?'Windows (C:) is open for changes here, so no Broom agent runs on this PC (its key would be saved into the golden): Remote has no screen for it, and it is restarted or shut down at the PC itself. ':'')
+      +'Shut the PC down when the work is done: Save, Discard and ending the session unlock then.';
+  }else if(x.vm){const s=x.vm,p=s.keep?'maintain':'vm';
+    head=`<b>The VM on this server</b> <span class="badge ${s.state==='running'?'text-bg-success':'text-bg-info'}">${esc(s.state)}</span> <span class="small text-body-secondary">golden ${esc(s.golden)} · started ${esc(new Date(s.started*1000).toLocaleString())} by ${esc(s.by)} · Windows changes ${s.keep?'kept for Save':'thrown away at the end'}</span>`;
+    ctl=`<a class="btn btn-sm btn-primary" data-perm="${esc(p)}" href="/vm-console" target="_blank" rel="noopener">Open the screen</a>
+      <button class="btn btn-sm btn-outline-secondary" data-perm="${esc(p)}" ${act('vmStop',false)}>Shut down</button>
+      <button class="btn btn-sm btn-outline-danger" data-perm="${esc(p)}" ${act('vmStop',true)} title="like pulling the plug: only if Windows hangs">Turn off</button>`;
+    note='Shut the VM down when the work is done: Save and Discard unlock then.';
+  }else head='<b>Unsaved work</b> <span class="small text-body-secondary">written in a session that has ended: save it or throw it away</span>';
+  const rows=x.items.map(i=>{const n=mtBytes(i),p=i.kind==='golden'?'maintain':'games',off=held||!n;
+    return `<tr><td><b>${esc(i.kind==='golden'?(i.os==='windows'?'Windows (C:)':'System disk'):i.name+' ('+i.letter+':)')}</b>
+        <span class="text-body-secondary">${esc(i.kind==='golden'?'golden '+i.name:'games disk')}${i.st?' · g'+esc(i.st.ver)+' → g'+esc(i.st.ver+1):' · not served'}</span>${mtBusy(i)?' <span class="text-success text-nowrap">'+ic('dot','')+' writable now</span>':''}</td>
+      <td class="mono">${n?(n<1e6?'under 1 MB':gbs(n)):'nothing yet'}</td><td class="small" style="white-space:normal;min-width:14rem">${mtCheck(i)}</td>
+      <td class="text-nowrap text-end"><button class="btn btn-sm btn-outline-primary" data-perm="${esc(p)}" ${act('mtSave',i.kind,i.name)}${off?' disabled':''}>Save</button>
+        <button class="btn btn-sm btn-outline-secondary" data-perm="${esc(p)}" ${act('mtDiscard',i.kind,i.name)}${off?' disabled':''}>Discard</button></td></tr>`;}).join('');
+  return `<div class="card card-body mb-3">
+    <div class="d-flex flex-wrap gap-2 align-items-center mb-3"><h2 class="h6 text-uppercase text-body-secondary mb-0">${x.key==='rest'?'No session':'Session'}</h2><span>${head}</span><span class="flex-grow-1"></span>${ctl}</div>
+    ${ask}
+    ${rows?`<div class="table-responsive"><table class="table table-sm align-middle mb-2"><thead><tr><th>Open for changes</th><th>Changed so far</th><th>Before saving</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
+      :'<div class="small text-body-secondary mb-2">Nothing is open for changes: what is done in this VM is thrown away when it stops.</div>'}
+    <div class="d-flex flex-wrap gap-2 align-items-center justify-content-end"><span class="small text-body-secondary" style="flex:1 1 20rem">${esc(note)}</span>
+      ${any?`<button class="btn btn-sm btn-primary" ${act('mtSaveAll',x.key)}${held?' disabled':''} title="Saves each of them as its new version${x.pc!=null?', then ends the session':''}">Save all</button>`:''}</div>
+  </div>`;}
+// Redrawn only when something changed: a button being reached with the keyboard keeps its focus between refreshes.
+function mtRender(){const box=document.getElementById('mt_sessions');if(!box||!mtD)return;
+  const h=mtSessions().map(mtCard).join('');if(box.dataset.h!==h){box.innerHTML=h;box.dataset.h=h;}}
+// The form: what can be picked follows where the session runs (a PC, or the VM) and what is free.
+function mtForm(){
+  if(!mtD)return;const {d,vm,ms}=mtD,E=id=>document.getElementById(id);if(!E('mt_pc'))return;
+  const inVm=E('mt_where_vm').checked,s=vm&&vm.session,run=mtRun(s);
+  const fill=(e,h)=>{if(document.activeElement!==e&&e.dataset.h!==h){const keep=e.value;e.innerHTML=h;e.dataset.h=h;if([...e.options].some(o=>o.value===keep))e.value=keep;}};
+  fill(E('mt_pc'),d.machines.map(m=>{const st=ms.find(x=>x.id===m.id)||{};
+    return `<option value="${esc(m.id)}">${esc(m.name)}${m.ip?' · '+esc(m.ip):''}${m.group?' · group '+esc(m.group):''} · ${st.online?'on':'off'}</option>`;}).join('')||'<option value="">no machine registered yet</option>');
+  E('mt_pc').disabled=inVm;
+  const pc=d.machines.find(m=>String(m.id)===E('mt_pc').value),win=E('mt_win').checked;
+  // The VM runs a Windows golden; a PC can also open a Linux one, or a blank one to install.
+  const golds=inVm?mtD.golds.filter(i=>vm&&vm.goldens.some(x=>x.name===i.name)):mtD.golds;
+  fill(E('mt_golden'),golds.map(i=>`<option value="${esc(i.name)}">${esc(i.name)}${i.st?' · g'+esc(i.st.ver):''}</option>`).join('')||'<option value="">no golden yet (Diskless page)</option>');
+  // First shown: the golden the chosen PC's group boots.
+  if(!E('mt_golden').dataset.first){E('mt_golden').dataset.first='1';
+    const g=pc&&golds.find(i=>i.groups.some(x=>grpSame(x,pc.group)));if(g)E('mt_golden').value=g.name;}
+  E('mt_golden').disabled=!inVm&&!win;
+  E('mt_golden_l').hidden=can('maintain');   // who may not keep Windows changes has no "Windows (C:) of golden" box before the list
+  // Games disks: those served; on a PC, those its group gets.
+  const was=new Set([...document.querySelectorAll('#mt_games input:checked')].map(i=>i.value));
+  const gh=mtD.disks.map(i=>{const mine=inVm||!pc||!i.groups.length||i.groups.some(x=>grpSame(x,pc.group));
+    const why=!i.st?'not served':!mine?'not for the group of this PC':'';
+    return `<label class="form-check mb-0"${why?` title="${esc(why)}"`:''}><input class="form-check-input" type="checkbox" value="${esc(i.name)}"${was.has(i.name)&&!why?' checked':''}${why?' disabled':''}> <b>${esc(i.name)} (${esc(i.letter)}:)</b> <span class="text-body-secondary">games disk${i.st?' · g'+esc(i.st.ver):''}${why?' · '+esc(why):''}</span></label>`;}).join('')
+    ||'<span class="text-body-secondary small">no games disk yet (iSCSI Disks page)</span>';
+  const gb=E('mt_games');if(gb.dataset.h!==gh){gb.innerHTML=gh;gb.dataset.h=gh;}
+  E('mt_note').textContent=inVm
+    ?'The VM runs the golden. Windows (C:) unticked: what is done to Windows there is thrown away when the VM stops. A games disk left unticked is not attached.'
+    :win?'The PC starts the golden itself, so what is done to Windows is kept for Save. No Broom agent runs in such a session (Remote has no screen for it). A games disk left unticked is not attached.'
+      :'The PC starts as it always does, with the ticked games disks writable: its Broom agent runs, so Remote shows its screen. What it does to Windows is gone at its next start.';
+  E('mt_vm_note').innerHTML=!inVm?'':vm&&vm.problem?`<span class="text-danger">Not possible on this server yet: ${esc(vm.problem)} (Diskless page, Server packages)</span>`
+    :run?'<span class="text-body-secondary">The VM is running: one at a time on the server.</span>'
+    :s&&s.msg?`<span class="text-body-secondary">Last VM session: ${esc(s.golden)} · ${esc(s.state)}${s.ended?' '+esc(new Date(s.ended*1000).toLocaleString()):''} · ${esc(s.msg)}</span>`:'';
+  const st=E('mt_start');st.textContent=inVm?'Start the VM':'Start session'+(pc?' on '+pc.name:'');
+  st.disabled=inVm?!vm||!!vm.problem||run:!pc;}
+// Another PC: the golden its group boots is the one offered.
+function mtPcChanged(){const pc=mtD&&mtD.d.machines.find(m=>String(m.id)===v('mt_pc'));
+  const g=pc&&mtD.golds.find(i=>i.groups.some(x=>grpSame(x,pc.group))),e=document.getElementById('mt_golden');
+  if(g&&[...e.options].some(o=>o.value===g.name))e.value=g.name;mtForm();}
+async function mtStart(){
+  const E=id=>document.getElementById(id),win=E('mt_win').checked,golden=v('mt_golden');
+  const games=[...document.querySelectorAll('#mt_games input:checked')].map(i=>i.value);
+  if(E('mt_where_vm').checked){
+    if(!golden){mtSay(' ✗ pick the golden the VM runs');return;}
+    if(!win&&!games.length){mtSay(' ✗ tick what to open for changes: Windows (C:), a games disk, or both');return;}
+    await post('/api/vm/start',{golden,games,keep:win},'mt_msg',()=>'the VM is starting: Open the screen',loadMaint);return;}
+  const id=+v('mt_pc'),s=mtD.vm&&mtD.vm.session,run=mtRun(s);
+  if(!v('mt_pc')){mtSay(' ✗ pick the PC');return;}
+  if(!win&&!games.length){mtSay(' ✗ tick what to open for changes: Windows (C:), a games disk, or both');return;}
+  if(win&&!golden){mtSay(' ✗ pick the golden');return;}
+  // Each of them is open in one place at a time.
+  const want=[...(win?[mtItem('golden',golden)]:[]),...games.map(n=>mtItem('games',n))];
+  for(const i of want){
+    if(i.pc!=null&&i.pc!==id){mtSay(' ✗ '+mtName(i)+' is open on '+mtWho(i.pc)+': end that session first');return;}
+    if(run&&(i.kind==='golden'?s.golden===i.name:(s.games||[]).some(x=>x.name===i.name))){mtSay(' ✗ '+mtName(i)+' is in the VM: shut it down first');return;}}
+  const set=(i,to)=>j(i.kind==='golden'?'/api/diskless/maint':'/api/games/update',mk({name:i.name,id:to}));
+  const done=[];
+  try{for(const i of want)if(i.pc!==id){await set(i,id);done.push(i);}}
+  catch(e){for(const i of done)await set(i,null).catch(()=>{});mtSay(' ✗ '+e.message+' — nothing was set up');loadMaint();return;}
+  mtAsk=id;mtSay(' ✓ '+mtWho(id)+' is set up');
+  await loadMaint();document.getElementById('mt_sessions').scrollIntoView({behavior:'smooth',block:'start'});}
+const mtAskDone=()=>{mtAsk=null;mtRender();};
+async function mtPower(action,id){const name=mtWho(id);
+  if(!await sure((action==='restart'?'Restart ':'Shut down ')+name+' now? Whoever is using it loses what is not saved.'))return;
+  try{const r=await j('/api/power',mk({action,ids:[id],delay:0,msg:''})),x=r.results[0];
+    if(x&&x.ok){toast(name+': '+(action==='restart'?'restarting':'shutting down'));if(mtAsk===id)mtAsk=null;}else toast(name+': '+(x?x.msg:'not done'),true);}
+  catch(e){toast(e.message,true);}
+  loadMaint();}
+async function mtWake(mac){try{await wake(mac);if(mtAsk!=null)mtAsk=null;}catch(e){toast(e.message,true);}mtRender();}
+// End a PC's session: it is the maintenance / update machine of nothing any more (its next start is a normal one).
+// What it wrote and nobody saved stays, under "No session". cancel = from the question right after the start.
+async function mtEnd(id,cancel,quiet){
+  const x=mtSessions().find(x=>x.pc===id);if(!x)return true;
+  const {m,live}=mtPcOf(x),name=mtWho(id);
+  if(!quiet&&live&&m.online){toast(name+' is in the session: shut it down first',true);return false;}
+  const left=x.items.filter(i=>mtBytes(i)>0);
+  if(!quiet&&!await sure(cancel?'Cancel the session on '+name+'? Nothing has happened to the PC.'
+    :'End the session on '+name+'? Its next start is a normal one.'+(left.length?'\n\nNot saved yet: '+left.map(mtName).join(', ')+'. That work stays on this page for Save or Discard.':'')))return false;
+  let ok=true;
+  for(const i of x.items)try{await j(i.kind==='golden'?'/api/diskless/maint':'/api/games/update',mk({name:i.name,id:null}));}catch(e){ok=false;toast(e.message,true);}
+  if(mtAsk===id)mtAsk=null;
+  if(!quiet){if(ok)toast('Session on '+name+' ended');await loadMaint();}
+  return ok;}
+const mtEndAsk=(id,cancel)=>mtEnd(id,cancel,false);
+const mtSaveUrl=(i,what)=>'/api/'+(i.kind==='golden'?'diskless':'games')+'/'+what;
+const mtSaveQ=i=>i.kind==='golden'?'Save the work on '+mtName(i)+' as its next version? Every machine gets it at its next start (and sets itself up again).'
+  :'Save the update of '+mtName(i)+' as its new version? Each machine gets it at its next start.';
+async function mtSave(kind,name){const i=mtItem(kind,name);if(!i||!await sure(mtSaveQ(i)))return;
+  try{const r=await j(mtSaveUrl(i,'save'),mk({name}));toast(mtName(i)+': '+(r.status||'saved'));}catch(e){toast(e.message,true);}
+  loadMaint();}
+async function mtDiscard(kind,name){const i=mtItem(kind,name);if(!i||!await sure('Throw the work on '+mtName(i)+' away? It cannot be brought back.'))return;
+  try{await j(mtSaveUrl(i,'discard'),mk({name}));toast(mtName(i)+': discarded');}catch(e){toast(e.message,true);}
+  loadMaint();}
+// Every changed item of one session as its new version — games disks first, Windows last — then a PC's session ends.
+async function mtSaveAll(key){
+  const x=mtSessions().find(x=>x.key===key);if(!x)return;
+  const todo=x.items.filter(i=>mtBytes(i)>0).sort((a,b)=>(a.kind==='golden')-(b.kind==='golden'));
+  if(!todo.length||!await sure('Save as new versions: '+todo.map(mtName).join(', ')+'?\n\nEvery machine gets them at its next start (Windows machines set themselves up again after a new Windows version).'
+    +(x.pc!=null?'\n\nThe session on '+mtWho(x.pc)+' ends with it: its next start is a normal one.':'')))return;
+  const out=[];let bad=false;
+  for(const i of todo){try{const r=await j(mtSaveUrl(i,'save'),mk({name:i.name}));out.push(mtName(i)+': '+(r.status||'saved'));}
+    catch(e){bad=true;out.push(mtName(i)+': NOT saved — '+e.message);break;}}
+  if(!bad&&x.pc!=null){await loadMaint();if(!await mtEnd(x.pc,false,true))out.push('the session could not be ended');}
+  toast(out.join('\n'),bad);loadMaint();}
+// The versions saved last, newest first (what each golden / games disk still keeps).
+function mtSaved(){const tb=document.querySelector('#mt_saved tbody');if(!tb)return;
+  const l=[...mtD.golds,...mtD.disks].flatMap(i=>((i.st&&i.st.versions)||[]).filter(x=>x.saved).map(x=>({i,x}))).sort((a,b)=>b.x.saved-a.x.saved).slice(0,8);
+  tb.innerHTML=l.map(({i,x})=>`<tr><td class="mono">${esc(new Date(x.saved*1000).toLocaleString())}</td><td>${esc(mtName(i))}</td><td class="mono">g${esc(x.ver)}</td><td class="mono">${x.bytes?gbs(x.bytes):'—'}</td></tr>`).join('')
+    ||'<tr><td colspan="4" class="mono">nothing saved yet</td></tr>';}
+// The VM's size (owner), used from its next start.
+function mtVmSize(){const r=mtD.vm,vc=document.getElementById('vm_cpus'),vg=document.getElementById('vm_gb');if(!r||!vc)return;
+  if(document.activeElement!==vc&&document.activeElement!==vg){vc.value=r.cpus;vc.max=r.max_cpus;vg.value=r.mem_gb;vg.max=r.max_gb;}
+  document.getElementById('vm_size_txt').textContent=`${r.cpus} CPU threads and ${r.mem_gb} GB of memory`;
+  document.getElementById('vm_size_max').textContent=`at most ${r.max_cpus} threads and ${r.max_gb} GB here: 4 threads and 4 GB always stay with the server. Used from the VM's next start.`;}
+function vmSize(){post('/api/vm/size',{cpus:+v('vm_cpus'),mem_gb:+v('vm_gb')},'vm_msg',()=>'saved — used from the VM\'s next start',loadMaint);}
+const vmStop=force=>sure(force?'Turn the VM off at once, like pulling the plug? Unsaved work in Windows is lost; use it only if Windows hangs.':'Press the VM\'s power button? Windows shuts down (close what you are doing first).').then(ok=>ok&&post('/api/vm/stop',{force},'mt_msg',r=>r.msg,loadMaint));
 const startOnboard=()=>post('/api/onboard/start',{golden:v('ob_golden'),machine:+v('ob_machine')},'ob_msg',r=>r.status||'started',loadOnboard);
 const retryOnboard=()=>post('/api/onboard/retry',{},'ob_msg',r=>r.status||'running',loadOnboard);
 const cancelOnboard=()=>sure('Cancel adding hardware? A running VM is stopped and its work thrown away.').then(ok=>ok&&post('/api/onboard/cancel',{},'ob_msg',()=>'cancelled',loadOnboard));
@@ -978,9 +1143,6 @@ function dlOsChanged(){const os=document.getElementById('dl_os').value,sz=docume
   if(sz&&(sz.value==='256'||sz.value==='64'))sz.value=os==='linux'?'64':'256';dlIsoOptions('');}
 const dlCall=(url,body,q,msg)=>(q?sure(q):Promise.resolve(true)).then(ok=>ok&&post(url,body,msg||'dl_msg',r=>r.status||'saved',loadDiskless));
 const saveGolden=()=>dlCall('/api/diskless/golden',{name:v('dl_name'),os:v('dl_os'),size_gb:+v('dl_size'),iso:v('dl_iso')||null,groups:grpTicked('dl_groups')},null,'dl_fmsg');
-const setMaint=(name,el)=>dlCall('/api/diskless/maint',{name,id:el.value?+el.value:null});
-const saveMaint=name=>dlCall('/api/diskless/save',{name},'Save the maintenance work on '+name+' as its next version? Its maintenance machine must be shut down. Every machine gets it at its next boot (and sets itself up again).');
-const discardMaint=name=>dlCall('/api/diskless/discard',{name},'Throw the maintenance work on '+name+' away?');
 const delGolden=name=>dlCall('/api/diskless/golden/delete',{name},'Delete golden '+name+', all its versions and every machine\'s layers of it?');
 const isoOs=(name,el)=>dlCall('/api/diskless/iso/os',{name,os:el.value});
 const delIso=name=>dlCall('/api/diskless/iso/delete',{name},'Delete '+name+' from the ISO library?');
@@ -1193,10 +1355,20 @@ let rmWs=null, rmCtx=null, rmW=0, rmH=0;
 const rmProto=()=>location.protocol==='https:'?'wss:':'ws:';
 async function loadRemote(){
   try{rmAgents=await j('/api/vnc/agents');}catch(e){rmAgents=[];}
+  // PCs in a session of the Maintenance page. One whose Windows (C:) is open for changes runs no agent (its key
+  // would be saved into the golden): it gets a marked tile without a screen, so nobody looks for it in vain. A
+  // games disk's update PC runs its agent as always: its screen stays, marked.
+  rmMaint=[];rmMark={};
+  try{const [d,g]=await Promise.all([j('/api/diskless'),j('/api/games')]);
+    for(const x of d.goldens)if(x.golden.maint!=null){const m=d.machines.find(m=>m.id===x.golden.maint);if(!m)continue;
+      if(rmAgents.some(a=>grpSame(a.host,m.name)))rmMark[m.name.toLowerCase()]='maintenance at its next start';
+      else rmMaint.push({host:m.name,grp:m.group||'',maint:x.golden.name});}
+    for(const x of g.disks)if(x.disk.update!=null&&x.update_name)rmMark[x.update_name.toLowerCase()]=rmMark[x.update_name.toLowerCase()]||'games update';
+  }catch(e){}
   document.getElementById('rm_hosts').innerHTML=rmAgents.map(a=>`<option value="${esc(a.host)}">`).join('');
   // Group filter: the groups of the machines with an agent (the choice is kept when still there).
   const gs=document.getElementById('rm_wgrp'),cur=gs.value||rmWallGrp;
-  const groups=[...new Set(rmAgents.map(a=>a.grp).filter(Boolean))].sort();
+  const groups=[...new Set([...rmAgents,...rmMaint].map(a=>a.grp).filter(Boolean))].sort();
   gs.innerHTML='<option value="">All</option>'+groups.map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join('');
   gs.value=groups.includes(cur)?cur:'';rmWallGrp=gs.value;
   rmWallSizeInit();
@@ -1206,9 +1378,9 @@ async function loadRemote(){
 // Wall: a low-rate thumbnail of every machine running the agent, page by page; click one to control it. Only the
 // screens of the page shown are streamed: leaving a page closes its sockets, so those agents stop capturing and the
 // browser decodes nothing for them. A hidden tab streams nothing either.
-let rmAgents=[], rmWall=[], rmWallPg=1, rmWallGrp='', rmWallN=12, rmWallGen=0;
+let rmAgents=[], rmMaint=[], rmMark={}, rmWall=[], rmWallPg=1, rmWallGrp='', rmWallN=12, rmWallGen=0;
 function closeWall(){rmWallGen++;for(const w of rmWall){w.onclose=null;w.onerror=null;w.close();}rmWall=[];}
-const rmWallList=()=>rmAgents.filter(a=>!rmWallGrp||a.grp===rmWallGrp);
+const rmWallList=()=>[...rmMaint,...rmAgents].filter(a=>!rmWallGrp||a.grp===rmWallGrp);
 function rmWallSizeInit(){
   let n=12;try{n=+localStorage.getItem('rm_wall_n')||12;}catch(e){}
   rmWallN=Math.min(200,Math.max(1,n));
@@ -1235,19 +1407,26 @@ function showWall(){
   if(rmWallPg>pages)rmWallPg=pages;
   const first=(rmWallPg-1)*rmWallN,page=list.slice(first,first+rmWallN);
   document.getElementById('rm_wall_n').textContent=rmAgents.length?'('+rmAgents.length+')':'';
-  document.getElementById('rm_wall_empty').classList.toggle('d-none',rmAgents.length>0);
+  document.getElementById('rm_wall_empty').classList.toggle('d-none',rmAgents.length+rmMaint.length>0);
   document.getElementById('rm_wpage').textContent=list.length?`${first+1}–${first+page.length} of ${list.length}`:'0';
   const grid=document.getElementById('rm_wall');grid.innerHTML='';
   if(document.hidden)return;   // nothing streams in a hidden tab; shown again → visibilitychange redraws
   const gen=rmWallGen;
   for(const a of page){
     const fig=document.createElement('figure');fig.className='m-0 text-center position-relative';fig.style.cursor='pointer';
+    if(a.maint){   // no screen to show: the tile says why, and leads to its session
+      fig.title='The session of '+a.host+' (Maintenance page)';fig.onclick=()=>{history.pushState(null,'','/maintenance');showPage('maintenance');};
+      fig.innerHTML=`<div class="border border-warning border-2 rounded d-flex align-items-center justify-content-center small text-body-secondary bg-body-tertiary px-3" style="width:320px;max-width:100%;aspect-ratio:16/9">no live screen: Windows (C:) of ${esc(a.maint)} is open for changes on this PC</div>
+        <figcaption class="small mono mt-1">${esc(a.host)} <span class="badge text-bg-warning">Maintenance</span></figcaption>`;
+      grid.appendChild(fig);continue;}
     fig.title='Control '+a.host;fig.onclick=()=>remoteTo(a.host);
     const cv=document.createElement('canvas');cv.width=320;cv.height=180;
     cv.className='border rounded';cv.style.width='320px';cv.style.maxWidth='100%';cv.style.height='auto';cv.style.background='#111';
     const note=document.createElement('div');note.className='position-absolute top-50 start-50 translate-middle small text-white d-none';
     note.textContent='in use';
     const cap=document.createElement('figcaption');cap.className='small mono mt-1';cap.textContent=a.host;
+    const mark=rmMark[(a.host||'').toLowerCase()];
+    if(mark){const b=document.createElement('span');b.className='badge text-bg-warning ms-1';b.textContent=mark;cap.appendChild(b);}
     fig.append(cv,note,cap);grid.appendChild(fig);
     if(a.busy)wallBusy(a.host,cv,note,gen);else wallTile(a.host,cv,note,gen);
   }
@@ -1587,8 +1766,9 @@ const ACTIONS={
   userAdd,userRole,userPw,userDel,rekey,saveDnsGate,dnsResolveShow,
   loadImages,addImage,setDefault,toggleCache,toggleSsd,togglePreload,editImgGroups,republish,showVersions,exportImage,editBoot,delImage,
   snapshotImage,dedupImage,rollbackImage,versionToImage,deleteVersion,
-  loadGames,saveGames,setGamesUpdate,toggleGamesRam,saveGamesUpdate,discardGamesUpdate,editGames,delGames,
-  loadDiskless,dlOsChanged,mPower,mSelOne,mSelAll,hwToggle,hwDisplay,mDisplay,mDispRes,grpNew,startOnboard,cancelOnboard,retryOnboard,verToggle,verPin,verDrop,verKeepFree,setRoom,setWindows,noticeDismiss,vmSize,dlRebuild,roleSave,roleAdd,roleDel,vmStart,vmStop,vmGamesSave,vmGamesDiscard,saveGolden,setMaint,saveMaint,discardMaint,delGolden,editGolden,isoOs,delIso,setPlace,uploadIso,
+  loadGames,saveGames,toggleGamesRam,editGames,delGames,
+  loadDiskless,dlOsChanged,mPower,mSelOne,mSelAll,hwToggle,hwDisplay,mDisplay,mDispRes,grpNew,startOnboard,cancelOnboard,retryOnboard,verToggle,verPin,verDrop,verKeepFree,setRoom,setWindows,noticeDismiss,vmSize,dlRebuild,roleSave,roleAdd,roleDel,vmStop,saveGolden,delGolden,
+  loadMaint,mtForm,mtPcChanged,mtStart,mtAskDone,mtPower,mtWake,mtEndAsk,mtSave,mtDiscard,mtSaveAll,editGolden,isoOs,delIso,setPlace,uploadIso,
   loadDrivers,uploadDriver,saveDrvTargets,delDriver,
   loadGroups,editGroup,closeGroup,saveGroup,createGroup,renameGroup,deleteGroup,saveNewMachines,
   loadServer,loadBench,loadBenchHist,logsReload,logsFollow,logsSearch,benchServer,benchRequest:()=>benchAsk(false),benchCancel:()=>benchAsk(true),bSelAll,
