@@ -20,6 +20,7 @@ use crate::api::{ApiError, ise};
 pub fn routes() -> Router<SharedState> {
     Router::new()
         .route("/api/machines/inventory", routing::get(one))
+        .route("/api/machines/modes", routing::get(all_modes))
         .route("/api/machines/inventory.csv", routing::get(csv))
 }
 
@@ -96,6 +97,23 @@ async fn one(
         "display": crate::display::info(&st, &m),
         "modes": modes,
     })))
+}
+
+/// GET /api/machines/modes → {modes: {"<machine id>": ["1920x1080@165", …]}} — what each machine's monitors offer,
+/// largest first; a machine whose agent sent no hardware list yet is left out. The Display lists of the Machines page
+/// are filled from it, so a mode is picked, not typed.
+async fn all_modes(State(st): State<SharedState>) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut out = serde_json::Map::new();
+    for m in st.db.machines().map_err(ise)? {
+        let v: Vec<serde_json::Value> = modes(&st, &m.mac)
+            .into_iter()
+            .map(|(w, h, hz)| format!("{w}x{h}@{hz}").into())
+            .collect();
+        if !v.is_empty() {
+            out.insert(m.id.to_string(), v.into());
+        }
+    }
+    Ok(Json(serde_json::json!({ "modes": out })))
 }
 
 /// One CSV field: quoted, quotes doubled; a leading = + - @ neutralised (a spreadsheet would run it as a formula).

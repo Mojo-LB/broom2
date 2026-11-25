@@ -12,7 +12,7 @@
     <h2 class="h6 text-uppercase text-body-secondary mb-3">Machines</h2>
     <div class="d-flex flex-wrap gap-2 align-items-center mb-3">
       <span id="dv_sel" class="msg">0 selected</span>
-      <input class="form-control form-control-sm w-auto" id="dv_bulk_grp" placeholder="group" size="8">
+      <label class="visually-hidden" for="dv_bulk_grp">Group</label><select class="form-select form-select-sm w-auto" id="dv_bulk_grp" data-change="grpNew"></select>
       <button class="btn btn-sm btn-outline-primary" data-click="dvBulk" data-args='["group"]'>Set group</button>
       <select class="form-select form-select-sm w-auto" id="dv_bulk_img"></select>
       <button class="btn btn-sm btn-outline-primary" data-click="dvBulk" data-args='["image"]'>Set image</button>

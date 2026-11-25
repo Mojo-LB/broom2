@@ -349,6 +349,13 @@ fn api_contract() {
         assert_eq!(skip().as_deref(), Some("1"));
         assert_eq!(h.post("/api/diskless/windows", &all_on).status, 200);
 
+        // The Display lists of the Machines page: what each machine's monitors offer.
+        assert_eq!(
+            h.get("/api/machines/modes").json(),
+            json!({"modes": {}}),
+            "no machine has sent its hardware list"
+        );
+
         // A role the owner makes: its permissions, and nothing else; built-in names and unknown roles refused.
         let role = |v: serde_json::Value| h.post("/api/roles", &v);
         assert_eq!(

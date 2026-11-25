@@ -15,9 +15,8 @@
   <div class="card card-body mb-3">
     <h2 class="h6 text-uppercase text-body-secondary mb-3">New machines</h2>
     <div class="d-flex flex-wrap gap-2 align-items-end">
-      <div><label class="form-label small mb-1" for="gr_newm">Unknown PCs join this group by themselves (empty = register them by hand)</label>
-        <input class="form-control form-control-sm" id="gr_newm" size="20" placeholder="off" list="gr_grouplist"></div>
-      <datalist id="gr_grouplist"></datalist>
+      <div><label class="form-label small mb-1" for="gr_newm">Unknown PCs join this group by themselves (off = register them by hand)</label>
+        <select class="form-select form-select-sm" id="gr_newm"></select></div>
       <button class="btn btn-sm btn-primary" data-click="saveNewMachines">Save</button>
       <span id="gr_nmsg" class="msg align-self-center"></span>
     </div>

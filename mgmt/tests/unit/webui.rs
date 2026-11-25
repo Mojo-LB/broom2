@@ -183,6 +183,7 @@ const HTML_HELPERS: &[&str] = &[
     "fld",
     "gbs",
     "grNames",
+    "grpOpts",
     "ic",
     "led",
     "licCell",

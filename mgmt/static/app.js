@@ -25,8 +25,36 @@ for(const ev of ['click','change','input'])document.addEventListener(ev,e=>{
   const f=ACTIONS[el.dataset[ev]];if(f)f(...JSON.parse(el.dataset.args||'[]'),el,e);
 });
 
+// ---- pick, don't type: the groups Broom knows (in use, or made on the Groups page) fill lists and tick boxes ----
+let grpNames=[];
+async function loadGroupNames(){try{grpNames=(await j('/api/groups')).groups||[];}catch(e){}return grpNames;}
+const grpSame=(a,b)=>(a||'').toLowerCase()===(b||'').toLowerCase();
+const GRP_NEW='+new';   // no group can be called that (letters / digits / _ / -)
+// A list's options. none = what "no group" is called there (null = no such choice); cur = the chosen one, kept even
+// when it is no group any more; fresh = also "New group…" (grpNew asks for its name and makes it).
+function grpOpts(cur,none,fresh){
+  const l=!cur||grpNames.some(g=>grpSame(g,cur))?grpNames:[...grpNames,cur];
+  return (none==null?'':`<option value="">${esc(none)}</option>`)+l.map(g=>`<option value="${esc(g)}"${grpSame(g,cur)?' selected':''}>${esc(g)}</option>`).join('')
+    +(fresh?`<option value="${esc(GRP_NEW)}">New group…</option>`:'');}
+// The list `id` filled, its choice kept (cur given = that one chosen instead).
+function grpFill(id,none,fresh,cur){const e=document.getElementById(id);if(!e||document.activeElement===e)return;
+  e.innerHTML=grpOpts(cur===undefined?(e.value===GRP_NEW?'':e.value):cur,none,fresh);}
+// "New group…" chosen in a list: its name is asked, the group made, and chosen in that list.
+async function grpNew(el){if(el.value!==GRP_NEW)return;
+  const none=el.options[0]&&el.options[0].value===''?el.options[0].textContent:null;
+  const n=((await ask('New group','Its name (letters, digits, _ and -, at most 32):'))||'').trim();
+  let cur='';
+  if(n){try{await j('/api/groups/create',mk({name:n}));await loadGroupNames();cur=n;}catch(e){toast(e.message,true);}}
+  el.innerHTML=grpOpts(cur,none,true);}
+// Tick boxes, one per group, in element `id`; on = the ticked names (one that is no group any more keeps its box).
+function grpBoxes(id,on){const e=document.getElementById(id);if(!e)return;on=on||[];
+  const l=[...grpNames,...on.filter(x=>!grpNames.some(g=>grpSame(g,x)))];
+  e.innerHTML=l.map(g=>`<label class="form-check mb-0"><input class="form-check-input" type="checkbox" value="${esc(g)}"${on.some(x=>grpSame(x,g))?' checked':''}> ${esc(g)}</label>`).join('')
+    ||'<span class="text-body-secondary">no group yet (Groups page)</span>';}
+const grpTicked=id=>[...document.querySelectorAll('#'+CSS.escape(id)+' input:checked')].map(e=>e.value);
+
 // ---- tabs: load HTML fragments on demand (/ui/<page>) + only load data for the tab being viewed ----
-const loaders={machines:loadStatus,remote:loadRemote,server:loadServer,devices:loadDevices,groups:loadGroups,images:loadImages,games:loadGames,diskless:loadDiskless,drivers:loadDrivers,network:loadDhcp,windows:loadCafe,system:()=>{loadCafe();loadUsers();loadTls();},benchmark:loadBench,logs:loadLogs};
+const loaders={machines:()=>{loadDispLists().catch(()=>{});return loadStatus();},remote:loadRemote,server:loadServer,devices:loadDevices,groups:loadGroups,images:loadImages,games:loadGames,diskless:loadDiskless,drivers:loadDrivers,network:loadDhcp,windows:loadCafe,system:()=>{loadCafe();loadUsers();loadTls();},benchmark:loadBench,logs:loadLogs};
 const fragCache={};
 let curPage=null;
 async function showPage(p){
@@ -152,11 +180,32 @@ async function hwDisplay(id,el){
   try{const r=await j('/api/machines/display',mk({ids:[id],mode:el.value}));toast(el.value?'Display '+el.value+(r.sent?' sent':' set: applied at its next start'):'Display setting removed');
     hwData[id]=await j('/api/machines/inventory?id='+encodeURIComponent(id));renderMachines();}
   catch(e){toast(e.message,true)}}
-// The same for the selected machines, or for a group (new machines of it too).
+// The same for the selected machines, or for a group (new machines of it too): picked from two lists, the modes
+// the machines' monitors offer (GET /api/machines/modes). Until one machine has sent its hardware list, common ones.
+const DISP_COMMON={'1920x1080':[60,75,100,120,144,165,180,240,360],'2560x1440':[60,75,100,120,144,165,180,240,360],'3440x1440':[60,100,120,144,165,175],'3840x2160':[60,120,144,160,240]};
+let dispModes={},dispRes={};   // machine id → its modes; resolution → its refresh rates (highest first)
+async function loadDispLists(){
+  const [md]=await Promise.all([j('/api/machines/modes').catch(()=>({modes:{}})),loadGroupNames()]);
+  dispModes=md.modes||{};dispRes={};
+  for(const m of Object.values(dispModes).flat()){const [r,hz]=m.split('@');(dispRes[r]=dispRes[r]||new Set()).add(+hz);}
+  if(!Object.keys(dispRes).length)for(const [r,l] of Object.entries(DISP_COMMON))dispRes[r]=new Set(l);
+  for(const r in dispRes)dispRes[r]=[...dispRes[r]].sort((a,b)=>b-a);
+  const e=document.getElementById('m_dres');if(!e)return;
+  const px=r=>r.split('x').reduce((a,b)=>a*b,1),keep=e.value;
+  e.innerHTML='<option value="">Remove the setting</option>'+Object.keys(dispRes).sort((a,b)=>px(b)-px(a))
+    .map(r=>`<option value="${esc(r)}"${r===keep?' selected':''}>${esc(r.replace('x',' × '))}</option>`).join('');
+  mDispRes();grpFill('m_dgrp','Group…');}
+function mDispRes(){const e=document.getElementById('m_dhz'),r=v('m_dres'),keep=e.value;
+  e.innerHTML=(dispRes[r]||[]).map(h=>`<option value="${esc(h)}"${String(h)===keep?' selected':''}>${esc(h)} Hz</option>`).join('');e.disabled=!r;}
 async function mDisplay(to){
-  const out=document.getElementById('m_pres'),mode=document.getElementById('m_disp').value.trim();
-  const body=to==='grp'?{group:document.getElementById('m_dgrp').value.trim(),mode}:{ids:[...mSel],mode};
+  const out=document.getElementById('m_pres'),res=v('m_dres'),mode=res?res+'@'+v('m_dhz'):'';
+  const grp=v('m_dgrp'),body=to==='grp'?{group:grp,mode}:{ids:[...mSel],mode};
   if(to==='sel'&&!body.ids.length){say(out,' ✗ select machines first (the boxes on the left)');return;}
+  if(to==='grp'&&!grp){say(out,' ✗ pick the group first');return;}
+  // A machine that has told what its monitor offers, and does not offer this: asked before it is set.
+  const aim=allMachines.filter(m=>m.id!=null&&(to==='grp'?grpSame(m.grp,grp):mSel.has(m.id)));
+  const lack=mode?aim.filter(m=>dispModes[m.id]&&!dispModes[m.id].includes(mode)).map(m=>m.hostname||m.mac):[];
+  if(lack.length&&!await sure('Not offered by the monitor of '+lack.length+' of these machines: '+lack.slice(0,12).join(', ')+(lack.length>12?' …':'')+'.\n\nSet '+mode+' anyway?'))return;
   try{const r=await j('/api/machines/display',mk(body));say(out,' ✓ display '+(mode||'setting removed')+' — sent to '+r.sent+' running machine(s), the others at their next start');}
   catch(e){say(out,' ✗ '+e.message);}}
 // Power (power.rs): the selected machines (kept across refreshes and pages) → turn on / restart / shut down / cancel.
@@ -244,6 +293,7 @@ const dvKey=m=>m.mac;   // selection key (new machines have no id yet)
 const imgName=id=>(dvImages.find(i=>i.id===id)||{}).name||'';
 async function loadDevices(){
   [dvAll,dvImages]=await Promise.all([j('/api/status'),j('/api/images')]);
+  await loadGroupNames();grpFill('dv_bulk_grp','(no group)',true);
   const bi=document.getElementById('dv_bulk_img');
   if(bi)bi.innerHTML='<option value="">(global default image)</option>'+dvImages.map(i=>`<option value="${i.id}">${esc(i.name)}</option>`).join('');
   const keys=new Set(dvAll.map(dvKey)); [...dvSel].forEach(k=>{if(!keys.has(k))dvSel.delete(k);});
@@ -279,7 +329,7 @@ async function dvBulk(action){
   const reg=dvPicked().filter(m=>m.registered);
   if(!reg.length){toast('Select registered machines first',true);return;}
   let value='';
-  if(action==='group'){value=v('dv_bulk_grp');if(value&&!/^[A-Za-z0-9_-]{1,32}$/.test(value)){toast('Group: letters/digits/_/-, max 32',true);return;}}
+  if(action==='group'){value=v('dv_bulk_grp');if(value===GRP_NEW)value='';}
   if(action==='image')value=document.getElementById('dv_bulk_img').value;
   if(action==='delete'&&!await sure('Delete '+reg.length+' machine(s)? Their DHCP binding and license key go too.'))return;
   try{const r=await j('/api/machines/bulk',mk({ids:reg.map(m=>m.id),action,value}));dvMsg('✓ '+action+': '+r.count+' machine(s)');
@@ -323,7 +373,7 @@ async function dvOpen(id){
       ${fld('Hostname','dd_host',`<input class="form-control form-control-sm" id="dd_host" value="${esc(m.hostname||'')}" size="12" maxlength="15">`)}
       ${fld('MAC','dd_mac',`<input class="form-control form-control-sm" id="dd_mac" value="${esc(m.mac)}" size="17">`)}
       ${fld('Fixed IP','dd_ip',`<input class="form-control form-control-sm" id="dd_ip" value="${esc(m.ip||'')}" size="12" placeholder="(none)">`)}
-      ${fld('Group','dd_grp',`<input class="form-control form-control-sm" id="dd_grp" value="${esc(m.grp||'')}" size="8">`)}
+      ${fld('Group','dd_grp',`<select class="form-select form-select-sm" id="dd_grp" data-change="grpNew">${grpOpts(m.grp||'','(no group)',true)}</select>`)}
       ${fld('Default image','dd_img',`<select class="form-select form-select-sm" id="dd_img"><option value="">(global default)</option>${opt}</select>`)}
       <div class="flex-grow-1" style="min-width:180px"><label class="form-label small mb-1" for="dd_notes">Notes</label><input class="form-control form-control-sm" id="dd_notes" value="${esc(m.notes||'')}" maxlength="200"></div>
     </div>
@@ -387,7 +437,7 @@ async function dvBroomDisk(mac,id,label,name){
 function dvClose(){dvOpenId=null;const b=document.getElementById('dv_detail');if(b)b.hidden=true;dvRender();}
 async function dvSave(id){
   const img=document.getElementById('dd_img').value, msg=document.getElementById('dd_msg');
-  const body={id,mac:v('dd_mac'),ip:v('dd_ip')||null,hostname:v('dd_host')||null,grp:v('dd_grp')||null,notes:v('dd_notes')||null,image_id:img?+img:null};
+  const body={id,mac:v('dd_mac'),ip:v('dd_ip')||null,hostname:v('dd_host')||null,grp:(v('dd_grp')===GRP_NEW?'':v('dd_grp'))||null,notes:v('dd_notes')||null,image_id:img?+img:null};
   if(body.hostname&&!hostOk(body.hostname)){say(msg,' ✗ '+HOST_RULE);return;}
   try{await j('/api/machines/update',mk(body));say(msg,' ✓ saved');loadDevices();}
   catch(e){say(msg,' ✗ '+e.message);}
@@ -618,16 +668,17 @@ async function volRemove(id){if(!await sure('Stop using broom disk '+id+'? It is
 
 // ---- driver packages (drivers.rs): .zip of an extracted driver folder → installed into base by broom-done ----
 async function loadDrivers(){
-  const rows=await j('/api/drivers');
+  const [rows]=await Promise.all([j('/api/drivers'),loadGroupNames()]);
   document.querySelector('#drivers tbody').innerHTML=rows.map(d=>
     `<tr><td>${esc(d.name)}${d.net?' <span class="badge text-bg-info" title="network-card driver: also goes to Windows PE and into a golden for Add hardware">network card</span>':''}</td><td class="mono">${gbs(d.size)}</td>
        <td class="mono" title="${esc(d.hwids.slice(0,40).join('\n'))}${d.hwids.length>40?'\n…':''}">${d.hwids.length}</td>
        <td class="mono" style="white-space:normal">${d.machines.length?esc(d.machines.join(', ')):'—'}</td>
        <td><input class="form-check-input" type="checkbox" id="drv_all_${d.id}" ${d.all_machines?'checked':''}></td>
-       <td><input class="form-control form-control-sm" id="drv_grp_${d.id}" value="${esc(d.groups.join(', '))}" placeholder="VIP, Pro" size="12"></td>
+       <td><div class="d-flex flex-wrap gap-3 small" id="drv_grp_${d.id}" role="group" aria-label="Groups of ${esc(d.name)}"></div></td>
        <td><div class="d-flex gap-1"><button class="btn btn-sm btn-outline-secondary" ${act('saveDrvTargets',d.id)}>Save</button>
          <button class="btn btn-sm btn-outline-danger" ${act('delDriver',d.id,d.name)}>Delete</button></div></td></tr>`).join('')
     || '<tr><td colspan=7 class="mono">no driver packages yet</td></tr>';
+  for(const d of rows)grpBoxes('drv_grp_'+d.id,d.groups);
 }
 async function uploadDriver(){
   const f=document.getElementById('drv_file').files[0],msg=document.getElementById('drv_msg');
@@ -638,7 +689,7 @@ async function uploadDriver(){
   catch(e){say(msg,' ✗ '+e.message);}
 }
 async function saveDrvTargets(id){
-  const all_machines=document.getElementById('drv_all_'+id).checked, groups=document.getElementById('drv_grp_'+id).value;
+  const all_machines=document.getElementById('drv_all_'+id).checked, groups=grpTicked('drv_grp_'+id).join(',');
   try{await j('/api/drivers/targets',mk({id,all_machines,groups}));loadDrivers();}catch(e){toast(e.message,true)}}
 async function delDriver(id,name){if(!await sure('Delete driver package "'+name+'"? Machines that had it rebuild their base on the next boot.'))return;
   try{await j('/api/drivers/delete',mk({id}));loadDrivers();}catch(e){toast(e.message,true)}}
@@ -696,9 +747,11 @@ async function applyDhcp(){const b={};['mode','iface','server_ip','subnet','netm
 
 // ---- games disks (Games page) ----
 let gmDisks=[];
-async function loadGames(){const [g]=await Promise.all([j('/api/games'),loadVols(),loadVersions()]);const tb=document.querySelector('#games tbody');if(!tb)return;
+async function loadGames(){const [g]=await Promise.all([j('/api/games'),loadVols(),loadVersions(),loadGroupNames()]);const tb=document.querySelector('#games tbody');if(!tb)return;
   gmDisks=g.disks;
-  document.getElementById('gm_grouplist').innerHTML=g.groups.map(x=>`<option value="${esc(x)}">`).join('');
+  grpBoxes('gm_groups',grpTicked('gm_groups'));
+  const le=document.getElementById('gm_letter');
+  if(le&&!le.options.length)le.innerHTML=[...'DEFGHIJKLMNOPQRSTUVWXYZ'].map(c=>`<option${c==='G'?' selected':''}>${esc(c)}</option>`).join('');
   const opts=sel=>'<option value="">— none —</option>'+g.machines.map(m=>
     `<option value="${m.id}"${m.id===sel?' selected':''}>${esc(m.name)}${m.grp?' ('+esc(m.grp)+')':''}</option>`).join('');
   tb.innerHTML=g.disks.map(x=>{const d=x.disk,s=x.status;
@@ -713,14 +766,15 @@ async function loadGames(){const [g]=await Promise.all([j('/api/games'),loadVols
     ||'<tr><td colspan="10" class="mono">no iSCSI disk yet</td></tr>';
   const m=document.getElementById('gm_msg');if(m&&g.error)say(m,' ✗ not served: '+g.error);}
 async function gamesCall(url,body,q){if(q&&!await sure(q))return;await post(url,body,'gm_msg',r=>r.status||'saved',loadGames);}
-const saveGames=()=>gamesCall('/api/games/disk',{name:v('gm_name'),letter:v('gm_letter'),size_gb:+v('gm_size'),groups:[v('gm_groups')],volume:v('gm_vol')||null});
+const saveGames=()=>gamesCall('/api/games/disk',{name:v('gm_name'),letter:v('gm_letter'),size_gb:+v('gm_size'),groups:grpTicked('gm_groups'),volume:v('gm_vol')||null});
 const setGamesUpdate=(name,el)=>gamesCall('/api/games/update',{name,id:el.value?+el.value:null});
 const toggleGamesRam=(name,ram)=>gamesCall('/api/games/cache',{name,ram},ram?'Serve iSCSI disk '+name+' from RAM? It is loaded in the background (served from the disk meanwhile) and needs about as much free RAM as the data on it; not enough RAM → it stays on the disk (see the log).':null);
 const saveGamesUpdate=name=>gamesCall('/api/games/save',{name},'Save the update of '+name+' as its new version? Its update machine must be shut down. Each machine gets it at its next boot.');
 const discardGamesUpdate=name=>gamesCall('/api/games/discard',{name},'Throw the update of '+name+' away?');
 const delGames=name=>gamesCall('/api/games/delete',{name},'Delete iSCSI disk '+name+' and EVERYTHING on it? Machines using it keep it until they reboot.');
 function editGames(name){const d=gmDisks.find(x=>x.disk.name===name).disk;
-  for(const [k,val] of [['gm_name',d.name],['gm_letter',d.letter],['gm_size',d.size_gb],['gm_groups',d.groups.join(', ')]])document.getElementById(k).value=val;}
+  for(const [k,val] of [['gm_name',d.name],['gm_letter',d.letter],['gm_size',d.size_gb]])document.getElementById(k).value=val;
+  grpBoxes('gm_groups',d.groups);}
 
 // ---- versions of goldens / iSCSI disks (pins.rs): kept until a drive runs short, a group held on one ----
 let verData=null;const verOpen=new Set();
@@ -762,7 +816,7 @@ const verKeepFree=()=>post('/api/versions/keep-free',{keep:document.getElementBy
 let dlData=null;
 const mac12=m=>(m||'').toLowerCase().replace(/[^0-9a-f]/g,'');
 async function loadDiskless(){
-  const [d,vl]=await Promise.all([j('/api/diskless'),j('/api/volumes').catch(()=>({volumes:[]})),loadVersions()]);
+  const [d,vl]=await Promise.all([j('/api/diskless'),j('/api/volumes').catch(()=>({volumes:[]})),loadVersions(),loadGroupNames()]);
   dlData=d;const tb=document.querySelector('#dl_goldens tbody');if(!tb)return;
   const opts=sel=>'<option value="">— none —</option>'+d.machines.map(m=>
     `<option value="${esc(m.id)}"${m.id===sel?' selected':''}>${esc(m.name)}${m.group?' ('+esc(m.group)+')':''}</option>`).join('');
@@ -796,8 +850,7 @@ async function loadDiskless(){
   mb.innerHTML=rows||'<tr><td colspan="9" class="mono">no machine yet: put registered machines with a fixed IP in a golden\'s group</td></tr>';
   const noip=d.goldens.filter(x=>x.machines_without_fixed_ip.length).map(x=>x.golden.name+': '+x.machines_without_fixed_ip.join(', ')+' (no fixed IP — not served)');
   document.getElementById('dl_noip').textContent=noip.join(' · ');
-  const groups=[...new Set([...d.machines.map(m=>m.group).filter(Boolean),...d.goldens.flatMap(x=>x.golden.groups)])];
-  document.getElementById('dl_grouplist').innerHTML=groups.map(x=>`<option value="${esc(x)}">`).join('');
+  grpBoxes('dl_groups',grpTicked('dl_groups'));
   dlIsoOptions();
   // ISO library.
   const ib=document.querySelector('#dl_isos tbody');
@@ -924,7 +977,7 @@ function dlIsoOptions(keep){const sel=document.getElementById('dl_iso');if(!sel|
 function dlOsChanged(){const os=document.getElementById('dl_os').value,sz=document.getElementById('dl_size');
   if(sz&&(sz.value==='256'||sz.value==='64'))sz.value=os==='linux'?'64':'256';dlIsoOptions('');}
 const dlCall=(url,body,q,msg)=>(q?sure(q):Promise.resolve(true)).then(ok=>ok&&post(url,body,msg||'dl_msg',r=>r.status||'saved',loadDiskless));
-const saveGolden=()=>dlCall('/api/diskless/golden',{name:v('dl_name'),os:v('dl_os'),size_gb:+v('dl_size'),iso:v('dl_iso')||null,groups:[v('dl_groups')]},null,'dl_fmsg');
+const saveGolden=()=>dlCall('/api/diskless/golden',{name:v('dl_name'),os:v('dl_os'),size_gb:+v('dl_size'),iso:v('dl_iso')||null,groups:grpTicked('dl_groups')},null,'dl_fmsg');
 const setMaint=(name,el)=>dlCall('/api/diskless/maint',{name,id:el.value?+el.value:null});
 const saveMaint=name=>dlCall('/api/diskless/save',{name},'Save the maintenance work on '+name+' as its next version? Its maintenance machine must be shut down. Every machine gets it at its next boot (and sets itself up again).');
 const discardMaint=name=>dlCall('/api/diskless/discard',{name},'Throw the maintenance work on '+name+' away?');
@@ -939,7 +992,8 @@ const setWindows=()=>{const c=id=>document.getElementById(id).checked;
 const setRoom=()=>post('/api/diskless/room',{pc_gb:+v('room_gb'),free_pct:+v('room_pct'),pagefile_gb:+v('room_pf')},'room_msg',()=>'saved - machines get it at their next start',loadDiskless);
 const setPlace=k=>dlCall('/api/diskless/volume',{kind:k,id:document.getElementById('dl_place_'+k).value},null,'dl_pmsg');
 function editGolden(name){const g=dlData.goldens.find(x=>x.golden.name===name).golden;
-  for(const [k,val] of [['dl_name',g.name],['dl_os',g.os],['dl_size',g.size_gb],['dl_groups',g.groups.join(', ')]])document.getElementById(k).value=val;
+  for(const [k,val] of [['dl_name',g.name],['dl_os',g.os],['dl_size',g.size_gb]])document.getElementById(k).value=val;
+  grpBoxes('dl_groups',g.groups);
   dlIsoOptions(g.iso||'');}
 // ISO upload: same chunked protocol as goldens / drivers, with the OS chosen (Windows by default).
 async function uploadIso(){const f=document.getElementById('dl_isofile').files[0],msg=document.getElementById('dl_isomsg');
@@ -965,9 +1019,8 @@ const grIn=(x,n)=>x.groups.some(y=>y.toLowerCase()===n.toLowerCase());
 const grNames=l=>l.length?(l.length>2?'<div class="small" style="white-space:normal;min-width:12rem;max-height:6.5em;overflow:auto">':'<div>')+l.map(x=>esc(x.name)+(x.letter?' ('+esc(x.letter)+':)':'')).join(l.length>2?'<br>':', ')+'</div>':'—';
 async function loadGroups(){const g=grData=await j('/api/groups');const tb=document.querySelector('#groups tbody');if(!tb)return;
   const cnt=n=>g.machines.filter(m=>(m.grp||'').toLowerCase()===n.toLowerCase()).length;
-  const nm=(g.new_machines||'').toLowerCase(),nmEl=document.getElementById('gr_newm');
-  if(nmEl&&document.activeElement!==nmEl)nmEl.value=g.new_machines||'';
-  const gl=document.getElementById('gr_grouplist');if(gl)gl.innerHTML=g.groups.map(x=>`<option value="${esc(x)}">`).join('');
+  const nm=(g.new_machines||'').toLowerCase();
+  grpNames=g.groups;grpFill('gr_newm','off',false,g.new_machines||'');
   tb.innerHTML=g.groups.map(n=>`<tr><td><b>${esc(n)}</b>${n.toLowerCase()===nm?' <span class="badge text-bg-warning" title="unknown PCs join it by themselves and wait here for you">new machines</span>':''}</td><td class="mono">${cnt(n)}</td>
       <td>${grNames(g.images.filter(x=>grIn(x,n)))}</td><td>${grNames(g.disks.filter(x=>grIn(x,n)))}</td><td>${grNames((g.goldens||[]).filter(x=>grIn(x,n)))}</td><td>${grNames(g.drivers.filter(x=>grIn(x,n)))}</td>
       <td><div class="d-flex gap-1"><button class="btn btn-sm btn-outline-secondary" ${act('editGroup',n)}>Edit</button> <button class="btn btn-sm btn-outline-secondary" ${act('renameGroup',n)}>Rename</button> <button class="btn btn-sm btn-outline-danger" ${act('deleteGroup',n)}>Delete</button></div></td></tr>`).join('')
@@ -1535,7 +1588,7 @@ const ACTIONS={
   loadImages,addImage,setDefault,toggleCache,toggleSsd,togglePreload,editImgGroups,republish,showVersions,exportImage,editBoot,delImage,
   snapshotImage,dedupImage,rollbackImage,versionToImage,deleteVersion,
   loadGames,saveGames,setGamesUpdate,toggleGamesRam,saveGamesUpdate,discardGamesUpdate,editGames,delGames,
-  loadDiskless,dlOsChanged,mPower,mSelOne,mSelAll,hwToggle,hwDisplay,mDisplay,startOnboard,cancelOnboard,retryOnboard,verToggle,verPin,verDrop,verKeepFree,setRoom,setWindows,noticeDismiss,vmSize,dlRebuild,roleSave,roleAdd,roleDel,vmStart,vmStop,vmGamesSave,vmGamesDiscard,saveGolden,setMaint,saveMaint,discardMaint,delGolden,editGolden,isoOs,delIso,setPlace,uploadIso,
+  loadDiskless,dlOsChanged,mPower,mSelOne,mSelAll,hwToggle,hwDisplay,mDisplay,mDispRes,grpNew,startOnboard,cancelOnboard,retryOnboard,verToggle,verPin,verDrop,verKeepFree,setRoom,setWindows,noticeDismiss,vmSize,dlRebuild,roleSave,roleAdd,roleDel,vmStart,vmStop,vmGamesSave,vmGamesDiscard,saveGolden,setMaint,saveMaint,discardMaint,delGolden,editGolden,isoOs,delIso,setPlace,uploadIso,
   loadDrivers,uploadDriver,saveDrvTargets,delDriver,
   loadGroups,editGroup,closeGroup,saveGroup,createGroup,renameGroup,deleteGroup,saveNewMachines,
   loadServer,loadBench,loadBenchHist,logsReload,logsFollow,logsSearch,benchServer,benchRequest:()=>benchAsk(false),benchCancel:()=>benchAsk(true),bSelAll,

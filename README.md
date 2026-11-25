@@ -204,9 +204,11 @@ Upload the powered-off VM folder (only `.vmx` / `.vmdk` are sent, in parallel ch
   and the modes it offers — sent by the agent once connected, 2 minutes later (games disks mounted) and every 30
   minutes, kept per machine.
 - **Display** (Machines page, owner): resolution + refresh per machine (picked from the modes its monitor offers, in
-  its Hardware panel) or for the selected machines / a group (typed, e.g. `1920x1080@165`; a machine's own setting wins
-  over its group's). The agent applies it to the main output at every start — only a mode the monitor offers, tested
-  first — and at once when changed.
+  its Hardware panel) or for the selected machines / a group: picked from two lists, the resolutions and refresh rates
+  the machines' monitors offer (common ones until a machine has sent its hardware list), and Broom asks first when the
+  monitor of a chosen machine does not offer the mode. A machine's own setting wins over its group's. The agent
+  applies it to the main output at every start — only a mode the monitor offers, tested first — and at once when
+  changed.
 - **Power** (Machines page; turning on: the *wake* permission, staff too; restart / shut down: *power*, see
   [Web admin](#web-admin)): tick machines (or all a filter shows, e.g. one group), then **Turn on**
   (Wake-on-LAN: on in the PC's firmware), **Restart** or **Shut down** (now, or after 30 s / 1 / 5 min with an optional

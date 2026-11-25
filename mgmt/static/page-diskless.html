@@ -65,8 +65,7 @@
       <div><label class="form-label small mb-1" for="dl_os">OS</label><select class="form-select form-select-sm" id="dl_os" data-change="dlOsChanged"><option value="windows" selected>Windows</option><option value="linux">Linux</option></select></div>
       <div><label class="form-label small mb-1" for="dl_size">Size GB</label><input class="form-control form-control-sm" id="dl_size" type="number" min="16" style="width:90px" value="256"></div>
       <div><label class="form-label small mb-1" for="dl_iso">Installer ISO</label><select class="form-select form-select-sm" id="dl_iso"></select></div>
-      <div><label class="form-label small mb-1" for="dl_groups">Groups (their machines boot it)</label><input class="form-control form-control-sm" id="dl_groups" size="20" placeholder="Lounge" list="dl_grouplist"></div>
-      <datalist id="dl_grouplist"></datalist>
+      <div><span class="form-label small mb-1 d-block" id="dl_groups_l">Groups (their machines boot it)</span><div id="dl_groups" class="d-flex flex-wrap gap-3 small py-1" role="group" aria-labelledby="dl_groups_l"></div></div>
       <button class="btn btn-sm btn-primary" data-click="saveGolden">Create / change</button>
       <span id="dl_fmsg" class="msg align-self-center"></span>
     </div>
