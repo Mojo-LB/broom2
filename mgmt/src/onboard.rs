@@ -822,6 +822,13 @@ pub(crate) fn restricted_netdev(server_ip: &str, port: u16) -> Result<String, St
         "user,id=n0,net={a}.{b}.{c}.0/24,host={a}.{b}.{c}.{host},dns={a}.{b}.{c}.{dns},dhcpstart={a}.{b}.{c}.{start},restrict=on,guestfwd=tcp:{ip}:80-tcp:127.0.0.1:{port}"
     ))
 }
+/// The CPU a golden's VM gets (Add hardware, the maintenance VM): the server's own, without hardware virtualization.
+/// A Windows golden with memory integrity (virtualization-based security; anti-cheats ask for it) starts Windows' own
+/// hypervisor wherever the CPU offers virtualization. Seen on a server that is itself a VM, with virtualization
+/// passed down: such a golden never got past its boot spinner in the maintenance VM, every CPU thread busy; with
+/// these two flags off it started in under two minutes. Windows then runs as on a PC with virtualization turned off
+/// in its firmware: those protections stay configured in the golden and are idle in the VM only.
+pub(crate) const GUEST_CPU: &str = "host,vmx=off,svm=off";
 
 /// QEMU's arguments: the golden as an AHCI disk (Windows has storahci at boot) — the daemon's NBD export `disk` on its
 /// root-only socket, like the maintenance VM's (vmmaint.rs) — and the restricted network `net` (`restricted_netdev`)
@@ -835,7 +842,7 @@ pub(crate) fn qemu_args(disk: &str, code: &str, vars: &str, qmp: &str, net: &str
         "-machine",
         "q35,accel=kvm",
         "-cpu",
-        "host",
+        GUEST_CPU,
         "-smp",
         "4",
         "-m",

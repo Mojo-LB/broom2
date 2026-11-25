@@ -268,9 +268,13 @@ pub(crate) fn qemu_args(
         "-machine",
         "q35,accel=kvm",
         // The server's own CPU model + the Hyper-V enlightenments Windows uses as a guest (cheaper timers and
-        // interrupts than an emulated CPU), so updates and launchers run at a usable speed.
+        // interrupts than an emulated CPU), so updates and launchers run at a usable speed. No virtualization inside
+        // the VM (onboard::GUEST_CPU): a golden with memory integrity on does not start in there otherwise.
         "-cpu",
-        "host,hv_relaxed,hv_vapic,hv_spinlocks=0x1fff,hv_time",
+        &format!(
+            "{},hv_relaxed,hv_vapic,hv_spinlocks=0x1fff,hv_time",
+            crate::onboard::GUEST_CPU
+        ),
         "-smp",
         &cpus.to_string(),
         "-m",

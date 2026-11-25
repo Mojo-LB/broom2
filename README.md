@@ -315,7 +315,9 @@ PC down.
 - **The maintenance VM (Windows):** the Maintenance page runs a golden in a VM on the server (QEMU/KVM, 4 CPU
   threads and 8 GB unless you set its size on that page — at most the server's threads less 4 and its memory less
   4 GB; internet through QEMU's NAT) and shows its screen in the browser (**Open the screen**: noVNC,
-  through Broom's signed-in WebSocket; QEMU's VNC is only a Unix socket). Tick games disks to attach them **writable**
+  through Broom's signed-in WebSocket; QEMU's VNC is only a Unix socket). The VM's CPU is the server's own without
+  hardware virtualization (Add hardware's VM too): a golden with memory integrity on (anti-cheats ask for it) would
+  start Windows' own hypervisor in there and not get past its boot spinner; in the VM those protections are idle. Tick games disks to attach them **writable**
   under their letters, as for an update machine: install or update games, shut the VM down, then **Save** each disk —
   every machine gets it at its next boot. *Windows (C:)* ticked (Windows / app updates; the *maintain* permission):
   Save or Discard the golden afterwards; without it the VM's Windows changes are thrown away when it stops, so a role

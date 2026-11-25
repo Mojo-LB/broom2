@@ -34,6 +34,11 @@ fn vm_command_line() {
         "{dev:?}"
     );
     assert!(dev.contains(&"usb-tablet,bus=usb.0"));
+    // No hardware virtualization inside the VM (as Add hardware's: onboard::GUEST_CPU), then the Hyper-V enlightenments.
+    assert_eq!(
+        after(&a, "-cpu"),
+        ["host,vmx=off,svm=off,hv_relaxed,hv_vapic,hv_spinlocks=0x1fff,hv_time"]
+    );
     assert!(
         dev.iter()
             .any(|d| d.starts_with("e1000e,netdev=n0,mac=52:54:00:"))

@@ -156,7 +156,9 @@ fn qemu_disk_is_ahci_over_nbd() {
         "user,id=n0,restrict=on",
     );
     let j = a.join(" ");
-    assert!(j.contains("-machine q35,accel=kvm -cpu host"));
+    // The server's own CPU without hardware virtualization: a golden with memory integrity on would start Windows'
+    // hypervisor in there and never get past its boot spinner (seen with virtualization passed down to the VM).
+    assert!(j.contains("-machine q35,accel=kvm -cpu host,vmx=off,svm=off -smp"));
     assert!(j.contains(
         "-blockdev driver=nbd,node-name=d0,server.type=unix,server.path=/run/broom-nbd.sock,export=iqn.x:golden-w.g2.u0123456789abcdef"
     ));
