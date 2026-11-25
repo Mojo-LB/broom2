@@ -597,6 +597,14 @@ async fn for_lines(st: SharedState, ip: String) -> String {
     };
     let me = machine_at(&st, &ip);
     let grp = me.as_ref().and_then(|m| m.grp.clone());
+    // A golden's maintenance machine works on Windows itself: no diskless machine's games drive for it. What that
+    // drive leaves on C: (the folder its disk is mounted on) would be saved with the golden — seen once the golden
+    // carried the "games drives before the logon" task. A disk's own update machine still gets that disk.
+    let maint = me.as_ref().is_some_and(|m| {
+        crate::diskless::goldens(&st)
+            .iter()
+            .any(|g| g.maint == Some(m.id))
+    });
     let cfgs = configs(&st);
     let mut out = String::new();
     for d in disks(&st)
@@ -610,6 +618,9 @@ async fn for_lines(st: SharedState, ip: String) -> String {
             continue;
         };
         let upd = c.update_ip.as_deref() == Some(ip.as_str());
+        if maint && !upd {
+            continue;
+        }
         // A diskless machine (no SSD for its writes): its own copy of the disk on the server, writable (mode 2). Its
         // update machine gets the disk itself (mode 1), as on an SSD machine.
         let own = (!upd)
