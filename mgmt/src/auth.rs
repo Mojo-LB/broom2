@@ -498,6 +498,7 @@ pub(crate) fn is_public(method: &axum::http::Method, path: &str) -> bool {
         "/api/diskless/client",
         "/api/diskless/client/base-done",
         "/api/diskless/client/agent-key",
+        "/api/diskless/client/boot-cards",
         "/boot/onboard",
         "/api/onboard/report",
         "/api/onboard/state",

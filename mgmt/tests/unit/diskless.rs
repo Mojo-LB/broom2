@@ -640,3 +640,67 @@ fn windows_settings_changed_set_a_machine_up_again() {
     };
     assert_eq!(plan(&reported, true, "u1b0d1g1p0"), (true, false));
 }
+
+/// The network-boot driver guard's reports (a maintenance session): what was restored stays for the whole session
+/// with the time it last happened, a new session starts clean, and only names that can be a driver service are kept.
+#[test]
+fn boot_card_reports_are_merged_per_session() {
+    let rep = |start: bool, ok: &[&str], restored: &[&str], missing: &[&str]| BootReport {
+        start,
+        ok: ok.iter().map(|s| s.to_string()).collect(),
+        restored: restored.iter().map(|s| s.to_string()).collect(),
+        missing: missing.iter().map(|s| s.to_string()).collect(),
+    };
+    let first = boot_check_merge(None, &rep(true, &["rt640x64", "e1rexpress"], &[], &[]), 100);
+    assert_eq!(first.at, 100);
+    assert_eq!(first.ok, ["rt640x64", "e1rexpress"]);
+    assert!(first.restored.is_empty() && first.missing.is_empty());
+    // A driver installer dropped the flag: restored, and still counted as ready.
+    let fixed = boot_check_merge(
+        Some(first),
+        &rep(false, &["rt640x64", "e1rexpress"], &["rt640x64"], &[]),
+        160,
+    );
+    assert_eq!(
+        fixed.restored,
+        [Restored {
+            service: "rt640x64".into(),
+            at: 160
+        }]
+    );
+    // A later report of the same session keeps it; the same service restored again is listed once, with the last time.
+    let later = boot_check_merge(
+        Some(fixed),
+        &rep(false, &["rt640x64"], &[], &["e1rexpress"]),
+        200,
+    );
+    assert_eq!(later.restored.len(), 1);
+    assert_eq!(later.missing, ["e1rexpress"]);
+    let again = boot_check_merge(
+        Some(later),
+        &rep(false, &["rt640x64"], &["RT640x64"], &[]),
+        260,
+    );
+    assert_eq!(again.restored.len(), 1);
+    assert_eq!((again.restored[0].at, again.at), (260, 260));
+    assert!(
+        again.missing.is_empty(),
+        "each report says what is missing now"
+    );
+    // The next session starts clean.
+    let next = boot_check_merge(Some(again), &rep(true, &["rt640x64"], &[], &[]), 900);
+    assert!(next.restored.is_empty());
+    // Not a service name: dropped (the report comes from a machine, and ends up on a page).
+    let odd = boot_check_merge(
+        None,
+        &rep(
+            true,
+            &["ok_svc", "<b>x</b>", "", &"y".repeat(65), "ok_svc"],
+            &["a b"],
+            &["../x"],
+        ),
+        1,
+    );
+    assert_eq!(odd.ok, ["ok_svc"]);
+    assert!(odd.restored.is_empty() && odd.missing.is_empty());
+}

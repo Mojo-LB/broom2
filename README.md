@@ -232,6 +232,13 @@ PC down.
   the OS, then drivers, software and settings; shut down; **Save** makes that work the golden's next version, which
   every machine gets at its next boot (**Discard** throws it away). Windows ISOs ask to press a key to boot from the
   DVD: press one on the maintenance machine.
+- **Network-boot driver guard:** a network card's driver starts Windows from the network only while its service is
+  flagged for it (`BootFlags`, set by *Add hardware*). A vendor's driver installer run in a maintenance session
+  registers the service anew without the flag; saved like that, every PC with that card stops at
+  `INACCESSIBLE_BOOT_DEVICE`. So while a session runs (PC or VM), a task of the golden's script (`BroomBootCard`)
+  looks once a second at the cards Add hardware put into the golden and at the PC's own, sets the flag again where it
+  went, and tells the server: the Maintenance page shows it next to Save (*OK*, *set again*, or the card whose driver
+  is gone). It runs in the session only, so a PC switched off within that second of an installer is not covered.
 - **Machines:** registered machines of the golden's groups with a **fixed IP**. Each gets its own disk (target
   `<golden>.m<mac>`, answered only from its IP with its MAC behind it): the golden, then the machine's own **base**
   layer, then a **session** layer that is wiped at every PXE boot.

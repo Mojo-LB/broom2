@@ -45,6 +45,10 @@ fn public_paths() {
     );
     assert!(pub_get("/boot.ipxe") && pub_get("/tftp/broom/x/vmlinuz"));
     assert!(pub_post("/api/license") && pub_post("/api/auth/login") && pub_post("/api/booted"));
+    assert!(
+        pub_post("/api/diskless/client/boot-cards"),
+        "a maintenance session's guard reports without an account (its address says who it is)"
+    );
     assert!(!pub_get("/api/golden-chunk"), "delta chunks are gone");
     assert!(
         pub_get("/broom-prep-win") && !pub_post("/api/images/base-mode"),

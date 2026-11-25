@@ -13,7 +13,8 @@
 #    own task; broom-games.ps1 at start and every 5 minutes).
 #  - the maintenance machine: nothing - what it writes goes into the golden every machine shares (no key, no agent).
 #    The maintenance VM on the server (Diskless page, Maintain in the browser: vmmaint.rs) also gets its games disks,
-#    writable, under their letters (broom-games.ps1 -LinesFile).
+#    writable, under their letters (broom-games.ps1 -LinesFile). In both, a guard keeps the golden's network cards'
+#    drivers flagged for network boot while the session runs (task BroomBootCard; a driver installer drops the flag).
 #  - anything else (the server unreachable): nothing.
 # Windows is also set for a disk that is on the network and starts fresh at every boot (Prep below): always no
 # automatic BitLocker, hibernation, System Restore, defrag, search index, SysMain or crash dump; on the machines (in
@@ -353,6 +354,75 @@ if ($info.role -eq 'maintenance') {
       step ("VM: games disks {0} (log: broom-games.log)" -f (($info.games -split "`n" | Where-Object { $_ } | ForEach-Object { ($_ -split ' ')[0] }) -join ', '))
     } catch { step "VM games disks FAILED: $_" }
   }
+  # Network-boot driver guard. A network card's driver starts Windows from the network only while its service is
+  # flagged for it (BootFlags bit 1; Add hardware sets it). A vendor's driver installer run in this session registers
+  # the service anew without the flag: saved like that, every PC with that card stops at INACCESSIBLE_BOOT_DEVICE.
+  # So while this session runs, a task (BroomBootCard, SYSTEM; started here only, never on a diskless machine) looks
+  # once a second at the cards the server knows for this golden and at this PC's own, sets the flag again where it
+  # went, and tells the server, which shows it next to Save. One card a line for it: device instance, driver
+  # service, 1 = always flagged (the server's list) / 0 = this PC's own, guarded once it was seen flagged.
+  try {
+    $cards = @()
+    foreach ($c in @($info.boot_cards)) { if ($c -and $c.instance) { $cards += ("{0}`t{1}`t1" -f $c.instance, $c.service) } }
+    if (-not $info.vm) {
+      Get-CimInstance Win32_NetworkAdapter -Filter 'PhysicalAdapter=True' -ErrorAction SilentlyContinue |
+        Where-Object { $_.PNPDeviceID -like 'PCI\*' } | ForEach-Object {
+          $id = [string]$_.PNPDeviceID
+          if (-not ($cards | Where-Object { ($_ -split "`t")[0] -ieq $id })) { $cards += ("{0}`t{1}`t0" -f $id, $_.ServiceName) }
+        }
+    }
+    $bl = "$env:SystemRoot\Temp\broom-bootcard.txt"; $bp = "$env:SystemRoot\Temp\broom-bootcard.ps1"
+    [IO.File]::WriteAllLines($bl, [string[]]$cards, [Text.Encoding]::ASCII)
+    [IO.File]::WriteAllText($bp, @'
+param([string]$Srv, [string]$List)
+$reg = [Microsoft.Win32.Registry]
+$log = "$env:SystemRoot\Temp\broom-bootcard.log"
+function Say($m) { try { [IO.File]::AppendAllText($log, ('{0:yyyy-MM-dd HH:mm:ss} {1}' -f (Get-Date), $m) + "`r`n") } catch { } }
+$cards = @(Get-Content -LiteralPath $List -ErrorAction SilentlyContinue | Where-Object { $_ } | ForEach-Object {
+  $p = $_ -split "`t"; [pscustomobject]@{ i = $p[0]; s = $p[1]; must = ($p[2] -eq '1') } })
+Say ("guard started: {0} card(s)" -f $cards.Count)
+$failed = @{}
+# One look at every card: the services flagged, those flagged again just now, those gone or not to be flagged.
+function Look {
+  $ok = @(); $fixed = @(); $gone = @()
+  foreach ($c in $cards) {
+    # The service the card is bound to now (a new driver may come with another one), else the one it was added with.
+    $s = [string]$reg::GetValue("HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\$($c.i)", 'Service', '')
+    if (-not $s) { $s = $c.s }
+    if (-not $s) { continue }
+    $k = "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\$s"
+    if ($null -eq $reg::GetValue($k, 'Type', $null)) { if ($c.must) { $gone += $s }; continue }
+    $bf = [int]$reg::GetValue($k, 'BootFlags', 0)
+    if ($bf -band 1) { $ok += $s; $c.must = $true; continue }
+    if (-not $c.must) { continue }
+    try {
+      $reg::SetValue($k, 'BootFlags', [int]($bf -bor 1), [Microsoft.Win32.RegistryValueKind]::DWord)
+      $fixed += $s; $failed.Remove($s); Say "network-boot flag of $s set again (BootFlags $bf -> $($bf -bor 1))"
+    } catch { $gone += $s; if (-not $failed[$s]) { $failed[$s] = $true; Say "network-boot flag of $s NOT set: $_" } }
+  }
+  [pscustomobject]@{ ok = [string[]]@($ok + $fixed | Sort-Object -Unique); fixed = [string[]]@($fixed | Sort-Object -Unique); gone = [string[]]@($gone | Sort-Object -Unique) }
+}
+$first = $true; $last = $null; $wait = 0
+while ($true) {
+  $seen = Look
+  $now = ($seen.ok -join ',') + '|' + ($seen.gone -join ',')
+  if ($wait -gt 0) { $wait-- }
+  if (($first -or $seen.fixed.Count -or $now -ne $last) -and $wait -eq 0) {
+    $body = @{ start = $first; ok = $seen.ok; restored = $seen.fixed; missing = $seen.gone } | ConvertTo-Json -Compress
+    try {
+      Invoke-RestMethod -UseBasicParsing -TimeoutSec 5 -Method Post -ContentType 'application/json' -Uri "http://$Srv/api/diskless/client/boot-cards" -Body $body | Out-Null
+      $first = $false; $last = $now
+    } catch { Say "report not sent: $_"; $wait = 15 }
+  }
+  Start-Sleep -Seconds 1
+}
+'@, [Text.Encoding]::ASCII)
+    $act = New-ScheduledTaskAction -Execute powershell.exe -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$bp`" -Srv $srv -List `"$bl`""
+    $set = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+    Register-ScheduledTask -TaskName BroomBootCard -Action $act -Settings $set -User SYSTEM -RunLevel Highest -Force | Out-Null
+    Start-ScheduledTask -TaskName BroomBootCard
+    step ("network-boot driver guard started: {0} card(s) (log: broom-bootcard.log)" -f $cards.Count)
+  } catch { step "network-boot driver guard NOT started: $_" }
   exit
 }
 if ($info.role -ne 'diskless') { exit }

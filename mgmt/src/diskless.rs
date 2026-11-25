@@ -35,6 +35,7 @@ use axum::{
     routing::{get, post, put},
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::SharedState;
@@ -71,6 +72,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/diskless/client", get(client))
         .route("/api/diskless/client/base-done", post(base_done))
         .route("/api/diskless/client/agent-key", get(agent_key))
+        .route("/api/diskless/client/boot-cards", post(boot_cards_report))
         // Public, for a golden's maintenance machine only: an Ubuntu installer it boots from the server.
         .route("/boot/iso/{golden}/{file}", get(iso_file))
         .route("/boot/nocloud/{golden}/{file}", get(nocloud))
@@ -1324,12 +1326,17 @@ async fn client(
             "gateway": router_of(&m.mac), "pagefile_gb": pf, "windows": w,
         })
     } else {
-        let role = if goldens(&st).iter().any(|g| g.maint == Some(m.id)) {
-            "maintenance"
-        } else {
-            "none"
-        };
-        serde_json::json!({"role": role, "host": m.hostname, "gateway": router_of(&m.mac)})
+        // A golden's maintenance machine: with the network cards that golden boots from (its guard keeps their
+        // drivers flagged for network boot while the session runs).
+        match goldens(&st).into_iter().find(|g| g.maint == Some(m.id)) {
+            Some(g) => serde_json::json!({
+                "role": "maintenance", "golden": g.name, "host": m.hostname, "gateway": router_of(&m.mac),
+                "boot_cards": boot_cards(&st, &g.name),
+            }),
+            None => {
+                serde_json::json!({"role": "none", "host": m.hostname, "gateway": router_of(&m.mac)})
+            }
+        }
     };
     if q.get("fmt").map(String::as_str) == Some("env") {
         return Ok((
@@ -1339,6 +1346,175 @@ async fn client(
             .into_response());
     }
     Ok(Json(v).into_response())
+}
+
+// ---------- network-boot driver guard ----------
+// A network card's driver starts Windows from the network only while its service is flagged for it (BootFlags bit 1:
+// Add hardware sets it). A vendor's driver installer run in a maintenance session registers the service anew without
+// the flag; saved like that, every PC with that card stops at INACCESSIBLE_BOOT_DEVICE. So while a maintenance
+// session runs (a PC or the VM), broom-diskless.ps1 keeps a guard running that looks at the golden's cards once a
+// second, sets the flag again where it went and reports here; the Maintenance page shows the last report next to Save.
+
+const BOOT_CHECK_KEY: &str = "diskless_boot_check";
+
+/// A driver service whose network-boot flag was set again, and when.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub(crate) struct Restored {
+    pub service: String,
+    pub at: u64,
+}
+
+/// What a golden's maintenance session last reported about its network cards' drivers.
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
+pub(crate) struct BootCheck {
+    /// Unix time of the last report.
+    pub at: u64,
+    /// Driver services flagged for network boot.
+    #[serde(default)]
+    pub ok: Vec<String>,
+    /// Those that had lost the flag during the session and got it back.
+    #[serde(default)]
+    pub restored: Vec<Restored>,
+    /// Cards of the golden whose driver service is no longer in Windows, or could not be flagged.
+    #[serde(default)]
+    pub missing: Vec<String>,
+}
+
+/// The network cards golden `name` boots from, as its maintenance session's guard gets them (from Add hardware).
+pub(crate) fn boot_cards(st: &SharedState, name: &str) -> Vec<serde_json::Value> {
+    crate::onboard::hardware(st)
+        .remove(name)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|h| serde_json::json!({"instance": h.instance, "service": h.service}))
+        .collect()
+}
+
+pub(crate) fn boot_checks(st: &SharedState) -> HashMap<String, BootCheck> {
+    serde_json::from_str(&st.db.get_config(BOOT_CHECK_KEY, "{}")).unwrap_or_default()
+}
+
+/// Golden `name` saved, its work discarded, or deleted: the session's report goes with it.
+fn boot_check_forget(st: &SharedState, name: &str) {
+    let _ = crate::db::edit_json(
+        &*st.db,
+        BOOT_CHECK_KEY,
+        |m: &mut HashMap<String, BootCheck>| {
+            m.remove(name);
+            Ok::<(), String>(())
+        },
+    );
+}
+
+/// A driver service's name as Windows allows it, short enough to show.
+fn service_ok(s: &str) -> bool {
+    (1..=64).contains(&s.len())
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+}
+
+/// One report merged into what is known: `start` = the session's first (what an earlier session restored is
+/// dropped); a service is listed once, with the last time it was restored.
+pub(crate) fn boot_check_merge(old: Option<BootCheck>, r: &BootReport, now: u64) -> BootCheck {
+    let clean = |v: &[String]| -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for s in v.iter().filter(|s| service_ok(s)).take(32) {
+            if !out.iter().any(|x| x.eq_ignore_ascii_case(s)) {
+                out.push(s.clone());
+            }
+        }
+        out
+    };
+    let mut restored = match old {
+        Some(o) if !r.start => o.restored,
+        _ => Vec::new(),
+    };
+    for s in clean(&r.restored) {
+        restored.retain(|x| !x.service.eq_ignore_ascii_case(&s));
+        restored.push(Restored {
+            service: s,
+            at: now,
+        });
+    }
+    restored.truncate(32);
+    BootCheck {
+        at: now,
+        ok: clean(&r.ok),
+        restored,
+        missing: clean(&r.missing),
+    }
+}
+
+#[derive(Deserialize, Default, Debug)]
+pub(crate) struct BootReport {
+    #[serde(default)]
+    pub start: bool,
+    #[serde(default)]
+    pub ok: Vec<String>,
+    #[serde(default)]
+    pub restored: Vec<String>,
+    #[serde(default)]
+    pub missing: Vec<String>,
+}
+
+/// POST /api/diskless/client/boot-cards (public) {start, ok, restored, missing} — the guard of a maintenance session
+/// (the golden's maintenance machine, or the maintenance VM on this server) reports its network cards' drivers.
+/// Anyone else is 403 and changes nothing.
+async fn boot_cards_report(
+    State(st): State<SharedState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    Json(b): Json<BootReport>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let ip = peer.ip().to_canonical();
+    let golden = match crate::vmmaint::client_answer(&st, ip) {
+        Some(v) => v["golden"].as_str().map(str::to_string),
+        None => {
+            let (peer, st2) = (ip.to_string(), st.clone());
+            tokio::task::spawn_blocking(move || {
+                let m = crate::machines::machine_at(&st2, &peer)?;
+                from_machine(&m, m.ip.as_deref(), &peer).ok()?;
+                goldens(&st2)
+                    .into_iter()
+                    .find(|g| g.maint == Some(m.id))
+                    .map(|g| g.name)
+            })
+            .await
+            .map_err(ise)?
+        }
+    };
+    let Some(golden) = golden else {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "not a maintenance session".to_string(),
+        ));
+    };
+    let now = crate::now_secs();
+    let mut merged = BootCheck::default();
+    crate::db::edit_json(
+        &*st.db,
+        BOOT_CHECK_KEY,
+        |m: &mut HashMap<String, BootCheck>| {
+            merged = boot_check_merge(m.remove(&golden), &b, now);
+            m.insert(golden.clone(), merged.clone());
+            Ok::<(), String>(())
+        },
+    )
+    .map_err(ise)?
+    .map_err(ise)?;
+    for s in b.restored.iter().filter(|s| service_ok(s)) {
+        tracing::warn!(
+            "golden {golden}: network card driver {s} had lost its network-boot flag in this maintenance session \
+             (a driver installer registers it anew) — set again"
+        );
+    }
+    if !merged.missing.is_empty() {
+        tracing::warn!(
+            "golden {golden}: network card driver(s) {} not in Windows any more, or not flagged for network boot — \
+             PCs with that card will not start from it (Add hardware installs it again)",
+            merged.missing.join(", ")
+        );
+    }
+    Ok(ok())
 }
 
 /// `client`'s answer as KEY=value lines a shell reads with sed (values cut to letters, digits, '-', '.', '_').
@@ -1496,6 +1672,7 @@ async fn status(State(st): State<SharedState>) -> Result<Json<serde_json::Value>
         .map_err(ise)?
         .unwrap_or_default();
     let all = st.db.machines().map_err(ise)?;
+    let (checks, hw) = (boot_checks(&st), crate::onboard::hardware(&st));
     let list: Vec<serde_json::Value> = goldens(&st)
         .into_iter()
         .map(|g| {
@@ -1517,6 +1694,10 @@ async fn status(State(st): State<SharedState>) -> Result<Json<serde_json::Value>
                 "served": d.is_some(),
                 "status": d,
                 "machines_without_fixed_ip": without_ip,
+                // The maintenance session's network-boot driver guard: its last report, and how many cards Add
+                // hardware put into this golden.
+                "boot_check": checks.get(&g.name),
+                "boot_cards": hw.get(&g.name).map_or(0, Vec::len),
             })
         })
         .collect();
@@ -1706,6 +1887,7 @@ async fn delete(
         Ok(())
     })?;
     crate::onboard::forget_golden(&st, &b.name);
+    boot_check_forget(&st, &b.name);
     sync_now(st).await?;
     tokio::task::spawn_blocking(move || {
         for d in dirs {
@@ -1829,6 +2011,7 @@ async fn save(
     .await
     .map_err(ise)?
     .map_err(|e| (StatusCode::CONFLICT, e))?;
+    boot_check_forget(&st, &b.name);
     let msg = format!("{msg}{}", held(&st, &b.name));
     tracing::info!("golden {}: {msg}", b.name);
     Ok(Json(serde_json::json!({"ok": true, "status": msg})))
@@ -1870,6 +2053,7 @@ async fn discard(
     .await
     .map_err(ise)?
     .map_err(|e| (StatusCode::CONFLICT, e))?;
+    boot_check_forget(&st, &b.name);
     tracing::info!("golden {}: maintenance work discarded", b.name);
     Ok(ok())
 }

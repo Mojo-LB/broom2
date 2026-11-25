@@ -879,6 +879,7 @@ pub(crate) fn client_answer(st: &SharedState, peer: IpAddr) -> Option<serde_json
         "host": "",
         "games": games_lines(&s.games),
         "windows": crate::diskless::win_prep(st),
+        "boot_cards": crate::diskless::boot_cards(st, &s.golden),
     }))
 }
 

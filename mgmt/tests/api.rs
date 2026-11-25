@@ -355,6 +355,15 @@ fn api_contract() {
             json!({"modes": {}}),
             "no machine has sent its hardware list"
         );
+        // The network-boot driver guard reports from a maintenance session only: anyone else changes nothing.
+        assert_eq!(
+            anon.post(
+                "/api/diskless/client/boot-cards",
+                &json!({"start": true, "ok": ["rt640x64"]})
+            )
+            .status,
+            403
+        );
 
         // A role the owner makes: its permissions, and nothing else; built-in names and unknown roles refused.
         let role = |v: serde_json::Value| h.post("/api/roles", &v);
